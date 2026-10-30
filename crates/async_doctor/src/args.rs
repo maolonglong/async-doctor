@@ -57,9 +57,10 @@ pub struct Cli {
     /// covers the whole project; only reporting is filtered.
     ///
     /// Base detection order: `GITHUB_BASE_REF`, branch upstream, `origin/HEAD`,
-    /// `origin/main|master`, local `main|master`. Outside a git repo — or when
-    /// no base can be resolved (typical shallow detached CI checkout) — prints
-    /// a note and falls back to the full report (never silently diffs HEAD).
+    /// `origin/main|master`, local `main|master`. When HEAD is on/at that base,
+    /// reporting filters to uncommitted + untracked changes only. Outside a git
+    /// repo — or when no base can be resolved (shallow detached CI without the
+    /// PR base) — prints a note and falls back to the full report.
     #[arg(
         long,
         num_args = 0..=1,
