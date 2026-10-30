@@ -131,7 +131,9 @@ pub fn group_choke_point(findings: &[&Finding]) -> Option<(String, u32, String, 
     for ((file, line, text), n) in counts {
         let better = match &best {
             None => true,
-            Some((bf, bl, bt, bn)) => n > *bn || (n == *bn && (&file, line, &text) < (bf, bl, bt)),
+            Some((bf, bl, bt, bn)) => {
+                n > *bn || (n == *bn && (&file, &line, &text) < (bf, bl, bt))
+            }
         };
         if better {
             best = Some((file, line, text, n));
