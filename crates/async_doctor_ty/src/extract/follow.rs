@@ -65,6 +65,10 @@ pub(crate) const DEFAULT_FOLLOW_BUDGET: usize = 256;
 /// `follow_budget` caps how many third-party functions may be followed after the
 /// initial first-party-reachable wave. Cold extract and warm cache materialization
 /// must charge this identically — never transitively materialize past the cut.
+///
+/// `package_meta` is the eighth argument (per-scan memo); kept flat so cold/warm
+/// call sites stay obvious rather than hiding behind a scratch struct.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn follow_third_party(
     db: &AsyncDoctorDb,
     facts: &mut ProjectFacts,
@@ -436,6 +440,7 @@ pub(crate) fn rewrite_external_to_project(
 }
 
 /// Parse one site-packages function and collect its call edges into `facts`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn extract_third_party_function(
     db: &AsyncDoctorDb,
     facts: &mut ProjectFacts,
