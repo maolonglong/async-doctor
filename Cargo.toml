@@ -1,0 +1,46 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "MIT"
+repository = "https://github.com/maolonglong/async-doctor"
+authors = ["Shaolong Chen"]
+
+[workspace.dependencies]
+async_doctor_core = { path = "crates/async_doctor_core" }
+async_doctor_rules = { path = "crates/async_doctor_rules" }
+async_doctor_ty = { path = "crates/async_doctor_ty" }
+
+# ty/ruff crates are internal components with no semver promise: pin exact versions
+# and bump them together in a single PR.
+ruff_db = { version = "=0.0.20", features = ["os"] }
+ruff_python_ast = "=0.0.20"
+ruff_source_file = "=0.0.20"
+ruff_text_size = "=0.0.20"
+ty_module_resolver = "=0.0.20"
+ty_python_core = "=0.0.20"
+ty_python_semantic = "=0.0.20"
+ty_site_packages = "=0.0.20"
+ty_vendored = "=0.0.20"
+salsa = { version = "0.28.5", default-features = false, features = [
+    "compact_str",
+    "macros",
+    "salsa_unstable",
+    "inventory",
+] }
+
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+ignore = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4

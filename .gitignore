@@ -1,0 +1,12 @@
+/target/
+**/target/
+.venv/
+venv/
+__pycache__/
+*.egg-info/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.whl
+.DS_Store
