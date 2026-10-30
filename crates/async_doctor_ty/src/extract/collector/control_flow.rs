@@ -367,9 +367,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                     self.handle_call(call, false);
                     self.pending_with_enter = false;
                     self.walk_call_children(call);
-                } else if let Some(callee) =
-                    self.resolve_dunder(&item.context_expr, "__enter__")
-                {
+                } else if let Some(callee) = self.resolve_dunder(&item.context_expr, "__enter__") {
                     self.push_edge(
                         caller,
                         callee,

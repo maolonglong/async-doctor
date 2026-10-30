@@ -119,10 +119,7 @@ pub fn analyze_with_options(
                         continue;
                     }
                     if hit.consume_only
-                        && !matches!(
-                            edge.kind,
-                            CallKind::GeneratorConsume | CallKind::ForIter
-                        )
+                        && !matches!(edge.kind, CallKind::GeneratorConsume | CallKind::ForIter)
                     {
                         continue;
                     }
