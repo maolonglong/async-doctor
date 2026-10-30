@@ -97,6 +97,7 @@ dependencies = [
  "async_doctor_rules",
  "async_doctor_ty",
  "clap",
+ "serde",
  "serde_json",
  "tempfile",
 ]

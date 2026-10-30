@@ -152,6 +152,16 @@ pub struct Candidate {
     pub docs_url: String,
 }
 
+/// An `# async-doctor: ignore[...]` comment that matched no finding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnusedSuppression {
+    pub file: String,
+    pub line: u32,
+    pub rule: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Report {
@@ -170,6 +180,9 @@ pub struct Report {
     /// Aggregated unresolved patterns (populated when `--show-unresolved`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unresolved_summary: Vec<UnresolvedPattern>,
+    /// Inline ignore comments that did not suppress anything. Additive in schema v1.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unused_suppressions: Vec<UnusedSuppression>,
 }
 
 fn is_zero(v: &u32) -> bool {
@@ -187,11 +200,13 @@ impl Report {
             omitted_non_production_entries: 0,
             hidden_unresolved_candidates: 0,
             unresolved_summary: Vec::new(),
+            unused_suppressions: Vec::new(),
         }
     }
 
+    /// Exit 1 when findings or unused suppressions remain; candidates ignored.
     pub fn exit_code(&self) -> i32 {
-        if self.findings.is_empty() {
+        if self.findings.is_empty() && self.unused_suppressions.is_empty() {
             EXIT_OK
         } else {
             EXIT_FINDINGS

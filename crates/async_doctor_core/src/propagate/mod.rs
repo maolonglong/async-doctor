@@ -63,6 +63,7 @@ pub fn analyze_with_options(
         omitted_non_production_entries: 0,
         hidden_unresolved_candidates: 0,
         unresolved_summary: Vec::new(),
+        unused_suppressions: Vec::new(),
     };
 
     // BTreeMap + sorted preds so reverse-graph walk order is stable across
