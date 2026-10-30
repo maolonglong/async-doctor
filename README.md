@@ -5,9 +5,10 @@
 Zero-config static analysis for Python: finds sync/blocking IO reachable from
 `async def` code, and reports evidence an agent can act on.
 
-> Status: **M1** — typed call graph + stdlib sink propagation across the
-> project's own modules (shortest evidence chain, offload cuts, entry labels).
-> Following into site-packages is M2. See [docs/design.md](docs/design.md).
+> Status: **M2** — follows reachable third-party code in site-packages (with a
+> per-`(package, version)` cache), built-in third-party rule table + async-twin
+> fix hints, higher-order callables, and imperative FastAPI/Starlette routes.
+> See [docs/design.md](docs/design.md).
 
 ## Quick start
 
@@ -35,33 +36,27 @@ does **not** use exit code 2. Candidates never affect the exit code.
 By default, entries under `tests/` / `docs/` / `examples/` / `scripts/` /
 hidden dirs are skipped (count shown in the summary;
 `--include-non-production` to include). `reason=unresolved` candidates are
-hidden unless `--show-unresolved`.
+hidden unless `--show-unresolved` (which also prints an aggregated pattern
+summary ranked by entries affected).
 
-## What M1 detects
+## What M2 detects (includes M1)
 
-- Stdlib blocking sinks reachable from `async def` (sleep, socket, urllib,
-  subprocess, file IO, threading/queue locks, sqlite3), including multi-hop
-  chains across project modules.
-- Typed receivers (`self.client.get()`), import aliases, function-local
-  imports; shadowed names do not false-match.
-- Offload boundaries that cut propagation: `asyncio.to_thread`,
-  `loop.run_in_executor`, `anyio.to_thread.run_sync`,
-  `starlette.concurrency.run_in_threadpool`, `ThreadPoolExecutor.submit/map`
-  (plus `functools.partial` / lambdas passed to those). Eager
-  `to_thread(f())` still reports.
-- Entry labels: `route` / `lifecycle` / `task` / `other`. FastAPI/Starlette
-  sync `def` routes are not treated as entries.
-- Prove-only `conditions[]` (`unconditional`/`all-paths` never share a path
-  with `if`/`else`/`try`/`match`; `cache_miss_dependent` for module-cache
-  checks). Parameter-guarded sinks → `candidates` (`reason=conditional`)
-  unless the arg is provably truthy.
-- Generators: bare `g = gen()` does not propagate; `for` / `list()` / `next()`
-  / `yield from` do. Module-level constant dead branches are pruned.
-- `open(...)` + same-entry `f.read()`/`f.write()` merge into one finding.
-- Unresolvable dynamic dispatch (`getattr`, …) → `candidates` with reason
-  `unresolved` (hidden by default). Small metadata IO → candidates.
-- Stable finding `id`s (rule + entry + sink + chain qualnames — not
-  line/column). Async-twin names appear only as `fix.hint` text.
+- **Site-packages follow:** continues into reachable third-party `.py` down to
+  stdlib sinks; only functions reachable from project `async def` entries.
+  Per-`(package, version)` cache under `$XDG_CACHE_HOME/async-doctor`.
+  Third-party chain hops are marked in JSON (`thirdParty` / `package`).
+- **Third-party rules** (type-based; also C extensions without source):
+  `requests`, sync `httpx.Client`, `urllib3`, sync `redis`, sync SQLAlchemy
+  `Session`/`Engine` (`Engine.begin` only in `with`), `psycopg`/`psycopg2`,
+  `pymysql`, `pymongo`, `boto3`/`botocore`, sync `openai`/`anthropic`,
+  `kafka-python`, sync Elasticsearch, sync gRPC. Async counterparts never fire;
+  fix hints name the async twin.
+- **Higher-order args** and **ty-resolved offload** (not bare name), plus
+  inferred wrappers whose bodies call a real offload primitive.
+- Nested defs keyed by full scope; lambda assign+call; blocking `@property`;
+  genexprs consumed by `next`/`list`; imperative FastAPI/Starlette routes.
+- Stdlib sinks, prove-only conditions, entry labels, generator consume rules,
+  and stable finding ids from M1 are unchanged.
 
 ## Packaging
 

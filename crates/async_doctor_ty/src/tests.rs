@@ -942,3 +942,162 @@ fn fastapi_api_route_decorator_is_route() {
     assert_eq!(report.findings[0].entry.label, EntryLabel::Route);
     let _ = fs::remove_dir_all(dir);
 }
+
+#[test]
+fn m2_nested_same_name_not_merged() {
+    let dir = temp_project(&[(
+        "nest.py",
+        "import time\n\ndef outer_a():\n    def inner():\n        time.sleep(1)\n    inner()\n\ndef outer_b():\n    def inner():\n        return 0\n    inner()\n\nasync def handler_a():\n    outer_a()\n\nasync def handler_b():\n    outer_b()\n",
+    )]);
+    let facts = crate::extract::extract_path(&dir).unwrap();
+    let names: Vec<_> = facts
+        .functions
+        .iter()
+        .map(|f| f.qualname.as_str())
+        .collect();
+    assert!(names.contains(&"outer_a.inner"), "{names:?}");
+    assert!(names.contains(&"outer_b.inner"), "{names:?}");
+    let report = scan_path(&dir).unwrap();
+    assert!(
+        report.findings.iter().any(|f| f.entry.name == "handler_a"),
+        "handler_a should find sleep via outer_a.inner: {:?}",
+        report.findings
+    );
+    assert!(
+        !report.findings.iter().any(|f| f.entry.name == "handler_b"),
+        "handler_b must stay clean: {:?}",
+        report.findings
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn m2_higher_order_propagates_callable_arg() {
+    let dir = temp_project(&[(
+        "ho.py",
+        "import time\n\ndef block():\n    time.sleep(1)\n\ndef apply(fn):\n    fn()\n\nasync def handler():\n    apply(block)\n",
+    )]);
+    let report = scan_path(&dir).unwrap();
+    assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+    assert!(
+        report.findings[0].chain.len() >= 3,
+        "{:?}",
+        report.findings[0].chain
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn m2_inferred_offload_wrapper_cuts_fake_name_does_not() {
+    let dir = temp_project(&[(
+        "wrap.py",
+        "import asyncio\nimport time\n\ndef work():\n    time.sleep(1)\n\nasync def real_wrapper(fn, *args):\n    return await asyncio.to_thread(fn, *args)\n\nasync def to_thread(fn, *args):\n    return fn(*args)\n\nasync def safe():\n    await real_wrapper(work)\n\nasync def unsafe():\n    await to_thread(work)\n",
+    )]);
+    let report = scan_path(&dir).unwrap();
+    assert!(
+        !report.findings.iter().any(|f| f.entry.name == "safe"),
+        "inferred wrapper must cut: {:?}",
+        report.findings
+    );
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| f.entry.name == "unsafe" || f.entry.name == "to_thread"),
+        "fake to_thread must still report: {:?}",
+        report.findings
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn m2_lambda_assign_property_genexpr() {
+    let dir = temp_project(&[(
+        "forms.py",
+        "import time\n\nclass Holder:\n    @property\n    def data(self):\n        time.sleep(1)\n        return 1\n\ndef gen():\n    time.sleep(1)\n    yield 1\n\nasync def lambda_assign():\n    f = lambda: time.sleep(1)\n    f()\n\nasync def property_access():\n    _ = Holder().data\n\nasync def genexpr_list():\n    list(x for x in gen())\n\nasync def genexpr_deferred():\n    g = (x for x in gen())\n    list(g)\n",
+    )]);
+    let report = scan_path(&dir).unwrap();
+    let entries: Vec<_> = report
+        .findings
+        .iter()
+        .map(|f| f.entry.name.as_str())
+        .collect();
+    for needed in [
+        "lambda_assign",
+        "property_access",
+        "genexpr_list",
+        "genexpr_deferred",
+    ] {
+        assert!(
+            entries.contains(&needed),
+            "missing {needed} in {entries:?} findings={:?}",
+            report.findings
+        );
+    }
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn m2_imperative_routes_labeled() {
+    let dir = temp_project(&[
+        (
+            "routes.py",
+            "import time\n\nclass APIRouter:\n    def __init__(self):\n        self.routes = []\n    def add_api_route(self, path, endpoint, **kwargs):\n        self.routes.append((path, endpoint))\n\nrouter = APIRouter()\n\nasync def via_router():\n    time.sleep(1)\n\nrouter.add_api_route('/r', via_router)\n",
+        ),
+        (
+            "app.py",
+            "import time\nfrom routes import router\n\nclass App:\n    def add_api_route(self, path, endpoint, **kwargs):\n        pass\n    def add_route(self, path, endpoint, **kwargs):\n        pass\n    def include_router(self, r):\n        pass\n\nclass Route:\n    def __init__(self, path, endpoint, **kwargs):\n        self.endpoint = endpoint\n\nclass WebSocketRoute:\n    def __init__(self, path, endpoint, **kwargs):\n        self.endpoint = endpoint\n\napp = App()\n\nasync def via_add_api():\n    time.sleep(1)\n\nasync def via_add_route():\n    time.sleep(1)\n\nasync def via_route():\n    time.sleep(1)\n\nasync def via_ws():\n    time.sleep(1)\n\napp.add_api_route('/a', via_add_api)\napp.add_route('/b', via_add_route)\n_ = [Route('/c', via_route), WebSocketRoute('/ws', via_ws)]\napp.include_router(router)\n",
+        ),
+    ]);
+    let report = scan_path(&dir).unwrap();
+    assert!(report.findings.len() >= 4, "{:?}", report.findings);
+    for f in &report.findings {
+        assert_eq!(
+            f.entry.label,
+            EntryLabel::Route,
+            "{} should be route, got {:?}",
+            f.entry.name,
+            f.entry.label
+        );
+    }
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn m2_show_unresolved_aggregates_by_pattern() {
+    let dir = temp_project(&[(
+        "dyn.py",
+        "async def a():\n    getattr(object(), 'x')()\n\nasync def b():\n    getattr(object(), 'x')()\n    getattr(object(), 'y')()\n",
+    )]);
+    let hidden = scan_path(&dir).unwrap();
+    assert!(hidden.candidates.is_empty());
+    assert!(hidden.hidden_unresolved_candidates >= 1);
+
+    let shown = scan_path_with_options(
+        &dir,
+        AnalyzeOptions {
+            include_non_production: false,
+            show_unresolved: true,
+        },
+    )
+    .unwrap();
+    assert!(
+        !shown.unresolved_summary.is_empty(),
+        "{:?}",
+        shown.unresolved_summary
+    );
+    assert!(
+        shown.unresolved_summary[0].entries_affected
+            >= shown
+                .unresolved_summary
+                .iter()
+                .map(|p| p.entries_affected)
+                .min()
+                .unwrap_or(0)
+    );
+    // Ranked by entries_affected descending.
+    for w in shown.unresolved_summary.windows(2) {
+        assert!(w[0].entries_affected >= w[1].entries_affected);
+    }
+    let _ = fs::remove_dir_all(dir);
+}

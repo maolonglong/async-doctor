@@ -302,7 +302,13 @@ fn extract_files(db: &AsyncDoctorDb, files: Vec<PathBuf>) -> anyhow::Result<Proj
     }
 
     // M2: follow reachable third-party `.py` callees under site-packages.
-    follow_third_party(db, &mut facts, &mut def_map, &mut qual_map, &mut follow_targets);
+    follow_third_party(
+        db,
+        &mut facts,
+        &mut def_map,
+        &mut qual_map,
+        &mut follow_targets,
+    );
 
     Ok(facts)
 }
@@ -394,7 +400,10 @@ fn collect_functions(
                         file: self.ctx.rel.clone(),
                         name_start: u32::from(func.name.range.start()),
                     };
-                    if func.decorator_list.iter().any(|d| decorator_is_property(&d.expression))
+                    if func
+                        .decorator_list
+                        .iter()
+                        .any(|d| decorator_is_property(&d.expression))
                     {
                         self.property_defs.insert(key.clone());
                     }
@@ -1403,17 +1412,13 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
 
         self.pending_literals = call.arguments.args.iter().map(literal_arg).collect();
-        self.pending_callables =
-            self.resolve_positional_callables(call.arguments.args.as_ref());
+        self.pending_callables = self.resolve_positional_callables(call.arguments.args.as_ref());
 
         if let Some(kind) = self.is_offload_callee(&call.func) {
             // Passing a callable param into a real offload → this function is a wrapper.
             if let Some(arg) = call.arguments.args.first()
                 && let Expr::Name(n) = arg
-                && self
-                    .current_param_names
-                    .iter()
-                    .any(|p| p == n.id.as_str())
+                && self.current_param_names.iter().any(|p| p == n.id.as_str())
             {
                 self.facts.functions[caller.index()].is_offload_wrapper = true;
             }
@@ -1682,9 +1687,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         // attribute names as offload (a project function may share those names).
         let q = self.external_qualname(func)?;
         match q.as_str() {
-            "asyncio.to_thread" | "asyncio.threads.to_thread" => {
-                Some(OffloadKind::AsyncioToThread)
-            }
+            "asyncio.to_thread" | "asyncio.threads.to_thread" => Some(OffloadKind::AsyncioToThread),
             "anyio.to_thread.run_sync" => Some(OffloadKind::AnyioToThread),
             "starlette.concurrency.run_in_threadpool" => Some(OffloadKind::StarletteThreadpool),
             "concurrent.futures.Executor.submit"
@@ -1813,8 +1816,8 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             let DefinitionKind::Function(fdef) = kind else {
                 continue;
             };
-            let parsed =
-                parsed_module(self.model.db(), def.python_file(self.model.db())).load(self.model.db());
+            let parsed = parsed_module(self.model.db(), def.python_file(self.model.db()))
+                .load(self.model.db());
             let node = fdef.node(&parsed);
             let std_path = PathBuf::from(sys.as_str());
             let (pkg, ver) = package_meta_for_path(&std_path)
@@ -2052,9 +2055,7 @@ fn route_handler_arg(call: &ast::ExprCall) -> Option<&Expr> {
         Expr::Name(n) => Some(n.id.as_str()),
         _ => None,
     };
-    let Some(name) = attr_name else {
-        return None;
-    };
+    let name = attr_name?;
 
     match name {
         "add_api_route" | "add_route" => {
@@ -2167,8 +2168,7 @@ fn follow_third_party(
     }
 
     for ((pkg, ver), wanted) in &by_package {
-        let loaded =
-            materialize_cached_functions(facts, pkg, ver, wanted, &mut qual_to_id);
+        let loaded = materialize_cached_functions(facts, pkg, ver, wanted, &mut qual_to_id);
         for q in &loaded {
             if let Some(id) = qual_to_id.get(q) {
                 reachable_fns.insert(*id);
@@ -2315,11 +2315,7 @@ fn extract_third_party_function(
 
     // Find the function node by name_start.
     let mut found: Option<&ast::StmtFunctionDef> = None;
-    fn find_fn<'a>(
-        body: &'a [Stmt],
-        name_start: u32,
-        out: &mut Option<&'a ast::StmtFunctionDef>,
-    ) {
+    fn find_fn<'a>(body: &'a [Stmt], name_start: u32, out: &mut Option<&'a ast::StmtFunctionDef>) {
         for stmt in body {
             match stmt {
                 Stmt::FunctionDef(f) => {

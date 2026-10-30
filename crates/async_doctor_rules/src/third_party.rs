@@ -5,9 +5,7 @@
 
 use async_doctor_core::{SinkHit, SinkTable};
 
-use crate::{
-    BuiltinSink, RULE_BLOCKING_DB, RULE_BLOCKING_HTTP, StdlibSinkTable,
-};
+use crate::{BuiltinSink, RULE_BLOCKING_DB, RULE_BLOCKING_HTTP, StdlibSinkTable};
 
 /// Combined stdlib + third-party sink table.
 #[derive(Debug, Default, Clone)]
@@ -81,9 +79,7 @@ pub fn is_async_counterpart(qualname: &str) -> bool {
         return true;
     }
     // elasticsearch async
-    if q.starts_with("elasticsearch.AsyncElasticsearch")
-        || q.starts_with("elasticsearch.Async")
-    {
+    if q.starts_with("elasticsearch.AsyncElasticsearch") || q.starts_with("elasticsearch.Async") {
         return true;
     }
     // grpc aio
@@ -189,21 +185,15 @@ fn match_family(q: &str) -> Option<SinkHit> {
         )));
     }
     // urllib3
-    if q.starts_with("urllib3.PoolManager.")
+    if (q.starts_with("urllib3.PoolManager.")
         || q.starts_with("urllib3.HTTPConnectionPool.")
         || q.starts_with("urllib3.HTTPSConnectionPool.")
         || q == "urllib3.request"
         || q.starts_with("urllib3.util.retry.")
+        || q.ends_with("PoolManager.request")
+        || q.ends_with(".urlopen"))
+        && (q.contains("request") || q.ends_with(".urlopen") || q == "urllib3.request")
     {
-        if q.contains("request") || q.ends_with(".urlopen") || q.ends_with(".urlopen") {
-            return Some(hit(&BuiltinSink::finding(
-                "urllib3.request",
-                RULE_BLOCKING_HTTP,
-                "Use an async HTTP client (`httpx.AsyncClient`), or offload.",
-            )));
-        }
-    }
-    if q == "urllib3.request" || q.ends_with("PoolManager.request") || q.ends_with(".urlopen") {
         return Some(hit(&BuiltinSink::finding(
             "urllib3.request",
             RULE_BLOCKING_HTTP,
@@ -235,15 +225,15 @@ fn match_family(q: &str) -> Option<SinkHit> {
             "Use `sqlalchemy.ext.asyncio.AsyncSession` instead of sync `Session`.",
         )));
     }
-    if q.starts_with("sqlalchemy.engine.Engine.") && !q.contains("begin") {
-        // connect / execute on Engine
-        if q.ends_with(".connect") || q.ends_with(".execute") || q.ends_with(".raw_connection") {
-            return Some(hit(&BuiltinSink::finding(
-                "sqlalchemy.engine.Engine.connect",
-                RULE_BLOCKING_DB,
-                "Use `sqlalchemy.ext.asyncio.create_async_engine` / `AsyncEngine`.",
-            )));
-        }
+    if q.starts_with("sqlalchemy.engine.Engine.")
+        && !q.contains("begin")
+        && (q.ends_with(".connect") || q.ends_with(".execute") || q.ends_with(".raw_connection"))
+    {
+        return Some(hit(&BuiltinSink::finding(
+            "sqlalchemy.engine.Engine.connect",
+            RULE_BLOCKING_DB,
+            "Use `sqlalchemy.ext.asyncio.create_async_engine` / `AsyncEngine`.",
+        )));
     }
     // Engine.begin / Connection — only meaningful when used; Connection.execute always blocks
     if q == "sqlalchemy.engine.Connection.execute"
@@ -269,20 +259,19 @@ fn match_family(q: &str) -> Option<SinkHit> {
         )));
     }
     // psycopg / psycopg2
-    if q.starts_with("psycopg2.") || (q.starts_with("psycopg.") && !q.starts_with("psycopg.Async"))
-    {
-        if q.contains("connect")
+    if (q.starts_with("psycopg2.")
+        || (q.starts_with("psycopg.") && !q.starts_with("psycopg.Async")))
+        && (q.contains("connect")
             || q.contains("execute")
             || q.contains("fetch")
             || q.contains("cursor")
-            || q.contains("commit")
-        {
-            return Some(hit(&BuiltinSink::finding(
-                "psycopg.connect",
-                RULE_BLOCKING_DB,
-                "Use `psycopg` async (`AsyncConnection`) / `asyncpg`, or offload.",
-            )));
-        }
+            || q.contains("commit"))
+    {
+        return Some(hit(&BuiltinSink::finding(
+            "psycopg.connect",
+            RULE_BLOCKING_DB,
+            "Use `psycopg` async (`AsyncConnection`) / `asyncpg`, or offload.",
+        )));
     }
     // pymysql
     if q.starts_with("pymysql.") {
@@ -293,47 +282,48 @@ fn match_family(q: &str) -> Option<SinkHit> {
         )));
     }
     // pymongo sync
-    if q.starts_with("pymongo.") && !q.starts_with("pymongo.asynchronous.") {
-        if q.contains("find")
+    if q.starts_with("pymongo.")
+        && !q.starts_with("pymongo.asynchronous.")
+        && (q.contains("find")
             || q.contains("insert")
             || q.contains("update")
             || q.contains("delete")
             || q.contains("aggregate")
             || q.ends_with(".MongoClient")
-            || q.contains("MongoClient")
-        {
-            return Some(hit(&BuiltinSink::finding(
-                "pymongo.collection.Collection.find",
-                RULE_BLOCKING_DB,
-                "Use `motor` (async) instead of sync `pymongo`.",
-            )));
-        }
+            || q.contains("MongoClient"))
+    {
+        return Some(hit(&BuiltinSink::finding(
+            "pymongo.collection.Collection.find",
+            RULE_BLOCKING_DB,
+            "Use `motor` (async) instead of sync `pymongo`.",
+        )));
     }
     // boto3 / botocore
-    if q.starts_with("boto3.") || q.starts_with("botocore.") {
-        if q.contains("client") || q.contains("resource") || q.contains(".call") || q.ends_with("._make_api_call")
+    if (q.starts_with("boto3.") || q.starts_with("botocore."))
+        && (q.contains("client")
+            || q.contains("resource")
+            || q.contains(".call")
+            || q.ends_with("._make_api_call")
             || q.contains("make_api_call")
-            || method_looks_like_aws_op(q)
-        {
-            return Some(hit(&BuiltinSink::finding(
-                "botocore.client.BaseClient._make_api_call",
-                RULE_BLOCKING_HTTP,
-                "Use `aioboto3` / `aiobotocore` instead of sync `boto3`.",
-            )));
-        }
+            || method_looks_like_aws_op(q))
+    {
+        return Some(hit(&BuiltinSink::finding(
+            "botocore.client.BaseClient._make_api_call",
+            RULE_BLOCKING_HTTP,
+            "Use `aioboto3` / `aiobotocore` instead of sync `boto3`.",
+        )));
     }
     // openai sync client
-    if q.starts_with("openai.OpenAI.")
-        || q.starts_with("openai.resources.")
-        || (q.starts_with("openai.") && q.contains("completions") && !q.contains("Async"))
+    if !q.contains("Async")
+        && (q.starts_with("openai.OpenAI.")
+            || q.starts_with("openai.resources.")
+            || (q.starts_with("openai.") && q.contains("completions")))
     {
-        if !q.contains("Async") {
-            return Some(hit(&BuiltinSink::finding(
-                "openai.OpenAI",
-                RULE_BLOCKING_HTTP,
-                "Use `openai.AsyncOpenAI` instead of sync `OpenAI`.",
-            )));
-        }
+        return Some(hit(&BuiltinSink::finding(
+            "openai.OpenAI",
+            RULE_BLOCKING_HTTP,
+            "Use `openai.AsyncOpenAI` instead of sync `OpenAI`.",
+        )));
     }
     // anthropic sync
     if q.starts_with("anthropic.Anthropic.")
@@ -376,18 +366,20 @@ fn match_family(q: &str) -> Option<SinkHit> {
         )));
     }
     // grpc sync stubs
-    if q.starts_with("grpc.") && !q.contains("aio") {
-        if q.contains("UnaryUnaryMultiCallable")
+    if q.starts_with("grpc.")
+        && !q.contains("aio")
+        && (q.contains("UnaryUnaryMultiCallable")
             || q.ends_with(".__call__")
             || q.contains(".future")
             || q.contains("Channel")
-        {
-            return Some(hit(&BuiltinSink::finding(
-                "grpc.Channel",
-                RULE_BLOCKING_HTTP,
-                "Use `grpc.aio` channel/stubs instead of sync gRPC.",
-            )));
-        }
+            || q.contains("insecure_channel")
+            || q.contains("secure_channel"))
+    {
+        return Some(hit(&BuiltinSink::finding(
+            "grpc.Channel",
+            RULE_BLOCKING_HTTP,
+            "Use `grpc.aio` channel/stubs instead of sync gRPC.",
+        )));
     }
     None
 }
@@ -758,14 +750,20 @@ mod tests {
     #[test]
     fn sqlalchemy_async_session_never_fires() {
         let t = BuiltinSinkTable::new();
-        assert!(t.lookup("sqlalchemy.ext.asyncio.AsyncSession.execute").is_none());
+        assert!(
+            t.lookup("sqlalchemy.ext.asyncio.AsyncSession.execute")
+                .is_none()
+        );
         assert!(t.lookup("sqlalchemy.orm.Session.execute").is_some());
     }
 
     #[test]
     fn openai_async_never_fires() {
         let t = BuiltinSinkTable::new();
-        assert!(t.lookup("openai.AsyncOpenAI.chat.completions.create").is_none());
+        assert!(
+            t.lookup("openai.AsyncOpenAI.chat.completions.create")
+                .is_none()
+        );
         assert!(t.lookup("openai.OpenAI").is_some());
     }
 

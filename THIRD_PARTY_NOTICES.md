@@ -25,6 +25,19 @@ the Python standard library.
 - Copyright: the typeshed contributors
 - License text: <https://github.com/python/typeshed/blob/main/LICENSE>
 
+## Fixture stub packages (tests only)
+
+`fixtures/m2_third_party_rules/.venv` contains **clean-room** minimal stubs of
+third-party APIs (`requests`, `httpx`, `redis`, `sqlalchemy`, …) used only so
+ty can resolve types in tests. They are not copies of those projects' source
+and are not shipped in the `async-doctor` binary.
+
+## Design provenance
+
+Architecture ideas (call-graph reachability, offload cuts, agent-first JSON)
+were derived from public docs and the project's own design canvas. **No code**
+was copied from hydroid, strato, or react-doctor.
+
 ## Other Rust dependencies
 
 Remaining crates are recorded in `Cargo.lock`. Most are MIT and/or Apache-2.0;
