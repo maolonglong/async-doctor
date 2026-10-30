@@ -465,17 +465,18 @@ pub(crate) fn extract_third_party_function(
         .map(module_name_from_relative)
         .unwrap_or_default();
     // Stable path so cold extract and cache materialization emit identical JSON.
-    // Module already includes the top-level package (`libx.core` → `site-packages/libx/core.py`).
+    // Prefer the real site-/dist-packages-relative path so packages that live
+    // at `acmecache/__init__.py` are not displayed as `acmecache.py`.
     // System dist-packages use the `dist-packages/` prefix (same third-party policy).
     let tree = if abs.contains("/dist-packages/") {
         "dist-packages"
     } else {
         "site-packages"
     };
-    let rel = if !module.is_empty() {
-        format!("{tree}/{}.py", module.replace('.', "/"))
-    } else if let Some(rest) = third_party_module_path(&abs) {
+    let rel = if let Some(rest) = third_party_module_path(&abs) {
         format!("{tree}/{rest}")
+    } else if !module.is_empty() {
+        format!("{tree}/{}.py", module.replace('.', "/"))
     } else {
         abs.clone()
     };
