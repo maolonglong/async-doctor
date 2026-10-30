@@ -1,6 +1,6 @@
 //! Site-packages helpers: dist-info metadata, follow targets, and package cache I/O.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -154,11 +154,18 @@ pub fn is_followable_site_packages_py(path_str: &str) -> bool {
     path_str_is_third_party_python(&s) && s.ends_with(".py") && !s.ends_with(".pyi")
 }
 
-/// In-memory batch of package caches to flush once at the end of a follow pass.
+type PackageCacheKey = (String, String, String);
+
+/// Per-scan package-cache index: load each on-disk entry at most once, materialize
+/// from the in-memory map, and flush only packages dirtied by upserts.
 pub struct PackageCacheBatch {
     root: PathBuf,
-    /// (package, version, fingerprint) → cache being built this run.
-    caches: BTreeMap<(String, String, String), PackageCache>,
+    /// (package, version, fingerprint) → cache loaded or created this scan.
+    caches: BTreeMap<PackageCacheKey, PackageCache>,
+    /// Keys already probed on disk (hit or miss) so we never re-read/re-parse.
+    probed: BTreeSet<PackageCacheKey>,
+    /// Packages mutated via [`Self::upsert_function`] — only these are written.
+    dirty: BTreeSet<PackageCacheKey>,
 }
 
 impl PackageCacheBatch {
@@ -166,20 +173,52 @@ impl PackageCacheBatch {
         Self {
             root: cache_root,
             caches: BTreeMap::new(),
+            probed: BTreeSet::new(),
+            dirty: BTreeSet::new(),
         }
     }
 
-    fn cache_mut(&mut self, package: &str, version: &str, fingerprint: &str) -> &mut PackageCache {
-        let key = (
+    fn key(package: &str, version: &str, fingerprint: &str) -> PackageCacheKey {
+        (
             package.to_string(),
             version.to_string(),
             fingerprint.to_string(),
-        );
-        let root = self.root.clone();
-        self.caches.entry(key).or_insert_with(|| {
-            load_package_cache(&root, package, version, fingerprint)
-                .unwrap_or_else(|| PackageCache::new(package, version))
-        })
+        )
+    }
+
+    /// Ensure this package's on-disk cache has been probed once this scan.
+    /// Disk hits are stored in [`Self::caches`]; misses are remembered in
+    /// [`Self::probed`] without inserting an empty entry.
+    pub fn ensure_loaded(&mut self, package: &str, version: &str, fingerprint: &str) {
+        let key = Self::key(package, version, fingerprint);
+        if !self.probed.insert(key.clone()) {
+            return;
+        }
+        if let Some(cache) = load_package_cache(&self.root, package, version, fingerprint) {
+            self.caches.insert(key, cache);
+        }
+    }
+
+    /// True when a compatible on-disk (or already-loaded) cache exists for this key.
+    pub fn has(&self, package: &str, version: &str, fingerprint: &str) -> bool {
+        self.caches
+            .contains_key(&Self::key(package, version, fingerprint))
+    }
+
+    pub fn get(&self, package: &str, version: &str, fingerprint: &str) -> Option<&PackageCache> {
+        self.caches.get(&Self::key(package, version, fingerprint))
+    }
+
+    fn cache_mut(&mut self, package: &str, version: &str, fingerprint: &str) -> &mut PackageCache {
+        let key = Self::key(package, version, fingerprint);
+        self.dirty.insert(key.clone());
+        if !self.caches.contains_key(&key) {
+            self.probed.insert(key.clone());
+            let cache = load_package_cache(&self.root, package, version, fingerprint)
+                .unwrap_or_else(|| PackageCache::new(package, version));
+            self.caches.insert(key.clone(), cache);
+        }
+        self.caches.get_mut(&key).expect("cache just inserted")
     }
 
     /// Record one analyzed third-party function under its External qualname key.
@@ -259,16 +298,22 @@ impl PackageCacheBatch {
     /// run (present in some package's `functions`). Otherwise warm reinjection
     /// would follow budget-skipped targets that cold never extracted → extra
     /// site-packages candidates and cold≠warm.
+    ///
+    /// `analyzed` spans every loaded package (read or write) so cross-package
+    /// follow_targets stay valid when the callee was only materialized.
     pub fn flush(&self) {
-        let analyzed: std::collections::BTreeSet<String> = self
+        let analyzed: BTreeSet<String> = self
             .caches
             .values()
             .flat_map(|c| c.functions.keys().cloned())
             .collect();
-        for ((_, _, fp), cache) in &self.caches {
+        for key in &self.dirty {
+            let Some(cache) = self.caches.get(key) else {
+                continue;
+            };
             let mut to_save = cache.clone();
             to_save.follow_targets.retain(|q, _| analyzed.contains(q));
-            let _ = save_package_cache(&self.root, &to_save, fp);
+            let _ = save_package_cache(&self.root, &to_save, &key.2);
         }
     }
 }
@@ -393,10 +438,13 @@ fn parse_literal(s: &str) -> Option<LiteralArg> {
 /// Only the explicitly requested keys are loaded — no transitive closure.
 /// Nested callees are followed by later budgeted waves (same as cold extract),
 /// so warm runs cannot bypass [`crate::extract::FOLLOW_BUDGET_DEFAULT`].
+///
+/// Reads go through [`PackageCacheBatch`] so each package JSON is parsed once
+/// per scan, not once per follow wave.
 #[allow(clippy::too_many_arguments)]
-pub fn materialize_cached_functions(
+pub(crate) fn materialize_cached_functions(
     facts: &mut ProjectFacts,
-    cache_root: &Path,
+    cache_batch: &mut PackageCacheBatch,
     package: &str,
     version: &str,
     fingerprint: &str,
@@ -405,22 +453,56 @@ pub fn materialize_cached_functions(
     id_to_external_key: &mut HashMap<FunctionId, String>,
     follow_targets: &mut HashMap<String, FollowTarget>,
 ) -> Vec<String> {
-    let Some(cache) = load_package_cache(cache_root, package, version, fingerprint) else {
+    cache_batch.ensure_loaded(package, version, fingerprint);
+    if !cache_batch.has(package, version, fingerprint) {
         return Vec::new();
+    }
+
+    // Probe cross-package follow_target caches once (shared index) before we
+    // borrow this package's entry for reinjection / materialization.
+    let cross_probes: Vec<(String, String, String, String)> = {
+        let cache = cache_batch
+            .get(package, version, fingerprint)
+            .expect("has() true");
+        cache
+            .follow_targets
+            .iter()
+            .filter_map(|(q, t)| {
+                if cache.functions.contains_key(q) {
+                    return None;
+                }
+                match (&t.package_name, &t.package_version, &t.package_fingerprint) {
+                    (Some(pn), Some(pv), Some(pfp)) => {
+                        Some((pn.clone(), pv.clone(), pfp.clone(), q.clone()))
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
     };
+    for (pn, pv, pfp, _) in &cross_probes {
+        cache_batch.ensure_loaded(pn, pv, pfp);
+    }
+    let loadable_cross: BTreeSet<String> = cross_probes
+        .into_iter()
+        .filter(|(pn, pv, pfp, q)| {
+            cache_batch
+                .get(pn, pv, pfp)
+                .is_some_and(|c| c.functions.contains_key(q))
+        })
+        .map(|(_, _, _, q)| q)
+        .collect();
+
+    let cache = cache_batch
+        .get(package, version, fingerprint)
+        .expect("has() true");
+
     // Re-inject only follow targets that were analyzed (present in this cache's
     // functions, or loadable from the target's own package cache). Prevents warm
     // from following budget-skipped callees cold never extracted.
     for (q, t) in &cache.follow_targets {
-        if !cache.functions.contains_key(q) {
-            let loadable = match (&t.package_name, &t.package_version, &t.package_fingerprint) {
-                (Some(pn), Some(pv), Some(pfp)) => load_package_cache(cache_root, pn, pv, pfp)
-                    .is_some_and(|c| c.functions.contains_key(q)),
-                _ => false,
-            };
-            if !loadable {
-                continue;
-            }
+        if !cache.functions.contains_key(q) && !loadable_cross.contains(q) {
+            continue;
         }
         follow_targets
             .entry(q.clone())

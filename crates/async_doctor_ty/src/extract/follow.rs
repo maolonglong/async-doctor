@@ -75,8 +75,7 @@ pub(crate) fn follow_third_party(
     let sinks = BuiltinSinkTable::new();
     let mut qual_to_id: BTreeMap<String, FunctionId> = BTreeMap::new();
     let mut id_to_external_key: HashMap<FunctionId, String> = HashMap::new();
-    let cache_root = effective_cache_root(cache_dir);
-    let mut cache_batch = PackageCacheBatch::new(cache_root.clone());
+    let mut cache_batch = PackageCacheBatch::new(effective_cache_root(cache_dir));
     let mut by_caller = edges_by_caller(facts);
 
     // Forward BFS from async entries over Project edges (BTreeSet worklist = sorted).
@@ -157,7 +156,7 @@ pub(crate) fn follow_third_party(
         let edge_before = facts.edges.len();
         let loaded = materialize_cached_functions(
             facts,
-            &cache_root,
+            &mut cache_batch,
             pkg,
             ver,
             fp,
@@ -301,7 +300,7 @@ pub(crate) fn follow_third_party(
             let edge_before = facts.edges.len();
             let loaded = materialize_cached_functions(
                 facts,
-                &cache_root,
+                &mut cache_batch,
                 pkg,
                 ver,
                 fp,

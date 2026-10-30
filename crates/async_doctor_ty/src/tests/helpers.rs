@@ -6,8 +6,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use tempfile::TempDir;
 
+use crate::scan::scan_path_with_cache_budget;
 use crate::sitepkgs::clear_package_meta_memo;
-use crate::{scan_path, scan_path_with_cache, scan_path_with_cache_budget};
+use crate::{scan_path, scan_path_with_cache};
 
 pub(crate) fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures")

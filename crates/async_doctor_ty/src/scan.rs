@@ -5,7 +5,9 @@ use std::path::Path;
 use async_doctor_core::{AnalyzeOptions, Report, analyze_with_options};
 use async_doctor_rules::BuiltinSinkTable;
 
-use crate::extract::{extract_path, extract_path_with_cache, extract_path_with_cache_budget};
+#[cfg(test)]
+use crate::extract::extract_path_with_cache_budget;
+use crate::extract::{extract_path, extract_path_with_cache};
 
 /// Scan a project directory or a single `.py` file with default options.
 pub fn scan_path(path: &Path) -> anyhow::Result<Report> {
@@ -48,7 +50,8 @@ pub fn scan_path_with_options_and_cache(
 ///
 /// Test seam only — production callers use [`scan_path_with_cache`] (default
 /// budget). Avoids process-global env mutation under parallel `cargo test`.
-pub fn scan_path_with_cache_budget(
+#[cfg(test)]
+pub(crate) fn scan_path_with_cache_budget(
     path: &Path,
     cache_dir: Option<&Path>,
     follow_budget: usize,

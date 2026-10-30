@@ -23,8 +23,9 @@ use files::extract_files;
 use follow::DEFAULT_FOLLOW_BUDGET;
 use path::{absolute_utf8, discover_python_files};
 
-/// Default third-party follow budget (re-exported for tests).
-pub const FOLLOW_BUDGET_DEFAULT: usize = DEFAULT_FOLLOW_BUDGET;
+/// Default third-party follow budget (test seam — not public API).
+#[cfg(test)]
+pub(crate) const FOLLOW_BUDGET_DEFAULT: usize = DEFAULT_FOLLOW_BUDGET;
 
 /// Scan a project directory or a single `.py` file into graded facts.
 pub fn extract_path(path: &Path) -> anyhow::Result<ProjectFacts> {
@@ -42,7 +43,7 @@ pub fn extract_path_with_cache(
 
 /// Like [`extract_path_with_cache`], but with an injectable third-party follow
 /// budget (test seam only — not a user-facing config).
-pub fn extract_path_with_cache_budget(
+pub(crate) fn extract_path_with_cache_budget(
     path: &Path,
     cache_dir: Option<&Path>,
     follow_budget: usize,
