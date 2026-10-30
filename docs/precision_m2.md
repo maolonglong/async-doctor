@@ -25,16 +25,17 @@ Regression: `m2_analysis_is_byte_identical_across_runs` (N=5).
 
 | Corpus | Files | Cold | Warm | Peak RSS (child max) |
 | --- | ---: | ---: | ---: | ---: |
+| litellm `litellm/` (no project venv) | 2997 | **26.0s** (was 57.8s) | 25.0s | ~1.84 GiB |
 | litellm 1000-file subset | 1000 | **8.4s** (was 17.5s) | 8.3s | ~642 MiB |
 | open-webui `backend/` | 290 | **4.9s** (was 5.1s) | 4.8s | ~335 MiB |
 | `fixtures/m2_sitepkgs_cache` (+ stub `.venv`) | tiny | 33 ms | **23 ms** | ~31 MiB |
 | `fixtures/m2_third_party_rules` | tiny + stubs | 34 ms | 29 ms | ~31 MiB |
 
-Full litellm package (~2997 files) remeasured in the same run (see PR
-evidence). No-venv speedup vs the pre-fix M2 binary comes from indexing
-edges by caller (`O(E)` build, `O(degree)` walk) instead of
+No-venv speedup vs the pre-fix M2 binary comes from indexing edges by
+caller (`O(E)` build, `O(degree)` extend) instead of
 `facts.edges.iter().filter(|e| e.caller == fid)` / full edge rewrites after
-every extraction.
+every extraction. litellm cold is now ~0.9× the earlier M1-era ~29s baseline
+cited in review (target was ≤1.2×).
 
 Warm runs with a real site-packages follow path are faster because the
 versioned package cache (`v{schema}/{tool}/{package}/{version}.json`) stores
