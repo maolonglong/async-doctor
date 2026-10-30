@@ -1,7 +1,7 @@
 //! Per-scan package-cache batch and warm materialization.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use async_doctor_core::{
     CallEdge, CallKind, CalleeRef, ConditionTag, EntryLabel, FunctionFact, FunctionId, LiteralArg,
@@ -15,6 +15,53 @@ use crate::cache::{
 };
 
 use super::FollowTarget;
+
+/// Internal test hook (debug builds only). Set via `Command::env` on child
+/// scanners — never documented as user config. Inert when unset; compiled out
+/// of the pause paths under `not(debug_assertions)`.
+#[cfg(debug_assertions)]
+const TEST_CACHE_RACE_ENV: &str = "__AD_TEST_CACHE_RACE";
+
+#[cfg(debug_assertions)]
+fn test_cache_race_enabled() -> bool {
+    std::env::var_os(TEST_CACHE_RACE_ENV).is_some_and(|v| !v.is_empty())
+}
+
+/// After each on-disk package write, pause so a peer can observe a partial set.
+#[cfg(debug_assertions)]
+fn race_gap_after_package_write() {
+    if !test_cache_race_enabled() {
+        return;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(40));
+}
+
+/// After a from-disk materialize sees unresolved cross-package probes, wait
+/// until those package files exist on disk — but leave sticky misses in place.
+/// Widens the miss→materialize window so a peer flush can land mid-check.
+#[cfg(debug_assertions)]
+fn race_hold_sticky_miss_until_peer_files(root: &Path, unresolved: &[(String, String, String)]) {
+    if !test_cache_race_enabled() || unresolved.is_empty() {
+        return;
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+    for (pn, pv, pfp) in unresolved {
+        while std::time::Instant::now() < deadline {
+            if load_package_cache(root, pn, pv, pfp).is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        // Intentionally do not load: sticky miss must survive until reprobe /
+        // extract fallback (or, without those, until findings are dropped).
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn race_gap_after_package_write() {}
+
+#[cfg(not(debug_assertions))]
+fn race_hold_sticky_miss_until_peer_files(_root: &Path, _unresolved: &[(String, String, String)]) {}
 
 type PackageCacheKey = (String, String, String);
 
@@ -212,6 +259,7 @@ impl PackageCacheBatch {
             let mut to_save = cache.clone();
             to_save.follow_targets.retain(|q, _| analyzed.contains(q));
             let _ = save_package_cache(&self.root, &to_save, &key.2);
+            race_gap_after_package_write();
         }
     }
 }
@@ -391,23 +439,23 @@ pub(crate) fn materialize_cached_functions(
         .map(|(_, _, _, q)| q.clone())
         .collect();
 
-    // Snapshot consistency: if any cross-package follow_target from this cache
-    // entry is not loadable, a peer may have written a partial set of package
-    // files (or we sticky-missed before the peer finished). Re-probe misses
-    // once; if still incomplete, fall back to ty extract — cache hit/miss may
-    // change speed, never results.
+    let unresolved: Vec<(String, String, String)> = cross_probes
+        .iter()
+        .filter(|(_, _, _, q)| !loadable_cross.contains(q))
+        .map(|(pn, pv, pfp, _)| (pn.clone(), pv.clone(), pfp.clone()))
+        .collect();
+    // Debug-only test hook (before reprobe): wait until peer files exist while
+    // keeping sticky misses, so CI debug builds reproduce the race reliably.
+    if cache_batch.is_from_disk(package, version, fingerprint) && !unresolved.is_empty() {
+        race_hold_sticky_miss_until_peer_files(&cache_batch.root, &unresolved);
+    }
+    // Snapshot consistency: re-probe misses once; if still incomplete, fall
+    // back to ty extract — cache hit/miss may change speed, never results.
     // Only enforce for on-disk hits. In-progress upserts naturally list
     // follow_targets for not-yet-analyzed callees and must not force extract.
-    if cache_batch.is_from_disk(package, version, fingerprint)
-        && cross_probes
-            .iter()
-            .any(|(_, _, _, q)| !loadable_cross.contains(q))
-    {
+    if cache_batch.is_from_disk(package, version, fingerprint) && !unresolved.is_empty() {
         let mut seen_reprobe: BTreeSet<(String, String, String)> = BTreeSet::new();
-        for (pn, pv, pfp, q) in &cross_probes {
-            if loadable_cross.contains(q) {
-                continue;
-            }
+        for (pn, pv, pfp) in &unresolved {
             if seen_reprobe.insert((pn.clone(), pv.clone(), pfp.clone())) {
                 cache_batch.reprobe(pn, pv, pfp);
             }
