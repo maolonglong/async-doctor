@@ -139,6 +139,11 @@ pub struct CallEdge {
     /// Awaited *async* APIs are not sync-IO sinks; awaited *sync* sinks still
     /// run on the event loop before `await` and must be reported.
     pub is_awaited: bool,
+    /// Whether the resolved callee definition is an `async def` (coroutine).
+    /// `Some(true)` / `Some(false)` from ty (including through MRO / `super`);
+    /// `None` when unresolved — name-based async-counterpart rules are the
+    /// fallback only in that case.
+    pub callee_is_coroutine: Option<bool>,
     /// True when this call is an argument to an offload wrapper and was
     /// *evaluated* (eager `to_thread(f())`) rather than passed as a callable.
     pub is_eager_offload_arg: bool,

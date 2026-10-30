@@ -31,6 +31,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         range: TextRange,
         kind: CallKind,
         is_offload_wrapper: bool,
+        callee_is_coroutine: Option<bool>,
     ) {
         // Bare generator call (`g = gen()`) must not propagate; only when consumed.
         if let CalleeRef::Project(id) = &callee
@@ -40,6 +41,12 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         {
             return;
         }
+
+        // Project callees always know async-ness from FunctionFact.
+        let callee_is_coroutine = match &callee {
+            CalleeRef::Project(id) => Some(self.facts.function(*id).is_async),
+            _ => callee_is_coroutine,
+        };
 
         let key = match &callee {
             CalleeRef::Project(id) => format!("P{}", id.0),
@@ -67,10 +74,55 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             keyword_callables: std::mem::take(&mut self.pending_keyword_callables),
             param_guard: self.active_param_guard,
             is_awaited: self.pending_is_awaited,
+            callee_is_coroutine,
             is_eager_offload_arg: self.in_eager_offload_arg,
             context_from_caller: None,
         });
         self.pending_is_awaited = false;
+    }
+
+    /// Resolve whether `func` is an `async def` via ty definitions (MRO / `super`
+    /// included). `None` when the definition cannot be recovered.
+    pub(crate) fn resolve_callee_is_coroutine(&self, func: &Expr) -> Option<bool> {
+        if let Some(fid) = self.resolve_project_function(func) {
+            return Some(self.facts.function(fid).is_async);
+        }
+        let resolved = match func {
+            Expr::Name(name) => definitions_for_name(
+                self.model,
+                name.id.as_str(),
+                name.into(),
+                ImportAliasResolution::ResolveAliases,
+            ),
+            Expr::Attribute(attr) => definitions_for_attribute(self.model, attr),
+            _ => Vec::new(),
+        };
+        for r in &resolved {
+            let Some(def) = r.definition() else {
+                continue;
+            };
+            let kind = def.kind(self.model.db());
+            let DefinitionKind::Function(fdef) = kind else {
+                continue;
+            };
+            let parsed = parsed_module(self.model.db(), def.python_file(self.model.db()))
+                .load(self.model.db());
+            return Some(fdef.node(&parsed).is_async);
+        }
+        // Type-based FunctionLiteral / BoundMethod → definition.
+        let ty = func.inferred_type(self.model)?;
+        let env = self.model.program_environment();
+        let typedef = ty.definition(self.model.db(), &env)?;
+        let TypeDefinition::Function(def) = typedef else {
+            return None;
+        };
+        let kind = def.kind(self.model.db());
+        let DefinitionKind::Function(fdef) = kind else {
+            return None;
+        };
+        let parsed =
+            parsed_module(self.model.db(), def.python_file(self.model.db())).load(self.model.db());
+        Some(fdef.node(&parsed).is_async)
     }
 
     pub(crate) fn is_offload_callee(&self, func: &Expr) -> Option<OffloadKind> {

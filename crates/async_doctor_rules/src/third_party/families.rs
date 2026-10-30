@@ -208,11 +208,13 @@ pub(super) fn match_family(q: &str) -> Option<SinkHit> {
             "Use `aioboto3` / `aiobotocore` instead of sync `boto3`.",
         )));
     }
-    // openai sync client
+    // openai sync client / sync resource *public* methods only — never
+    // `openai.lib._parsing._completions.*`, private `_Stream` helpers, or
+    // anything that merely contains the substring "completions".
     if !q.contains("Async")
         && (q.starts_with("openai.OpenAI.")
-            || q.starts_with("openai.resources.")
-            || (q.starts_with("openai.") && q.contains("completions")))
+            || (q.starts_with("openai.resources.")
+                && !q.split('.').any(|seg| seg.starts_with('_'))))
     {
         return Some(hit(&BuiltinSink::finding(
             "openai.OpenAI",

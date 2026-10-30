@@ -250,6 +250,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 call.range(),
                 CallKind::Call,
                 true,
+                None,
             );
             self.pending_literals.clear();
             self.pending_callables.clear();
@@ -267,6 +268,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 call.range(),
                 CallKind::Call,
                 false,
+                None,
             );
             self.pending_literals.clear();
             self.pending_callables.clear();
@@ -288,7 +290,8 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             } else {
                 CallKind::Call
             };
-            self.push_edge(caller, callee, call.range(), kind, false);
+            let is_coro = self.resolve_callee_is_coroutine(&call.func);
+            self.push_edge(caller, callee, call.range(), kind, false, is_coro);
         }
         self.pending_literals.clear();
         self.pending_callables.clear();
@@ -429,6 +432,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             attr.range(),
             CallKind::PropertyGet,
             false,
+            Some(self.facts.function(fid).is_async),
         );
     }
 

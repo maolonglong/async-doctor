@@ -375,6 +375,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                     for_stmt.iter.range(),
                     CallKind::ForIter,
                     false,
+                    None,
                 );
             }
         }
@@ -419,6 +420,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                         item.context_expr.range(),
                         CallKind::WithEnter,
                         false,
+                        None,
                     );
                 }
                 if let Some(callee) = self.resolve_dunder(&item.context_expr, "__exit__") {
@@ -428,6 +430,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                         item.context_expr.range(),
                         CallKind::WithExit,
                         false,
+                        None,
                     );
                 }
             }

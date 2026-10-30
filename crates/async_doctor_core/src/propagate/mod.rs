@@ -110,10 +110,15 @@ pub fn analyze_with_options(
         }
         match &edge.callee {
             CalleeRef::External { qualname } => {
-                // Awaited *async* APIs are excluded by `SinkTable::lookup` (async
-                // counterparts return None). Awaited *sync* sinks still block on
-                // the loop before `await` (e.g. `await redis.Redis().get(...)`)
-                // and must seed. Do not blanket-skip on `is_awaited`.
+                // Structural: a resolved `async def` callee never seeds as sync IO,
+                // even when its External qualname looks like a sync sink family
+                // (subclass / wrapper of AsyncClient, etc.).
+                if edge.callee_is_coroutine == Some(true) {
+                    continue;
+                }
+                // Name-based async-counterpart rules are only a fallback when
+                // ty could not resolve coroutine-ness. Awaited *sync* defs
+                // (e.g. `await redis.Redis().get(...)`) still seed.
                 if let Some(hit) = sinks.lookup(qualname) {
                     if hit.with_only && !matches!(edge.kind, CallKind::WithEnter) {
                         continue;

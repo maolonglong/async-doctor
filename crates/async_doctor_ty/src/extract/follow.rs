@@ -114,9 +114,10 @@ pub(crate) fn follow_third_party(
                     }
                 }
                 CalleeRef::External { qualname } => {
-                    // Do not follow awaited known-async APIs (redis.asyncio /
-                    // AsyncConnection / …) — their internals are not sync-IO evidence.
-                    // Unknown third-party async (e.g. libz.fetch → time.sleep) still follows.
+                    // Known async APIs (name rules): never follow. Unknown
+                    // third-party `async def` (e.g. libz.fetch → time.sleep) still
+                    // follows; structural `callee_is_coroutine` blocks *seeding*
+                    // async callees that merely look like sync sinks by name.
                     if edge.is_awaited && is_async_counterpart(qualname) {
                         continue;
                     }

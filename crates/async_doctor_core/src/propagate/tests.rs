@@ -92,6 +92,7 @@ fn edge(
         keyword_callables: vec![],
         param_guard: None,
         is_awaited: false,
+        callee_is_coroutine: None,
         is_eager_offload_arg: false,
         context_from_caller: None,
     }

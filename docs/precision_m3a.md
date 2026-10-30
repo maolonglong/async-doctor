@@ -21,4 +21,5 @@ finding actionable. **False positives are worse than misses.**
 - Bare `engine.begin()` and bare `pubsub.listen()` (not entered / not consumed)
 - `asyncio.to_thread(work)` / `run_in_executor(None, work)` with a callable ref
 - Awaited async HTTP clients (`httpx.AsyncClient`, `elasticsearch.AsyncElasticsearch`)
-  — including definition-qualified paths like `httpx._client.AsyncClient.get`
+- Subclasses / wrappers of async clients (structural `async def` callee — not name rules)
+- `AsyncOpenAI` stream / `openai.lib._parsing._completions` helpers (not sync `OpenAI`)

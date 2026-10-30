@@ -90,6 +90,7 @@ pub(super) fn materialize_higher_order(facts: &ProjectFacts) -> ProjectFacts {
                 keyword_callables: vec![],
                 param_guard: param_edge.param_guard,
                 is_awaited: param_edge.is_awaited,
+                callee_is_coroutine: param_edge.callee_is_coroutine,
                 is_eager_offload_arg: param_edge.is_eager_offload_arg,
                 // Only valid when reverse-walk came from this call site.
                 context_from_caller: Some(out.edges[ei].caller),

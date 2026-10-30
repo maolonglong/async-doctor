@@ -55,6 +55,9 @@ pub struct CachedEdge {
     /// Call was under `await` when recorded.
     #[serde(default)]
     pub is_awaited: bool,
+    /// Resolved `async def` callee when known (`None` = unresolved / legacy cache).
+    #[serde(default)]
+    pub callee_is_coroutine: Option<bool>,
 }
 
 /// Per-function summary stored in the package cache.
@@ -380,6 +383,7 @@ mod tests {
                     param_guard_index: None,
                     param_guard_inverted: None,
                     is_awaited: false,
+                    callee_is_coroutine: None,
                 }],
             },
         );

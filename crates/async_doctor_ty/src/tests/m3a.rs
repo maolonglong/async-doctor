@@ -155,6 +155,31 @@ fn m3a_awaited_async_http_clients_never_fire() {
 }
 
 #[test]
+fn m3a_structural_async_subclass_wrapper_openai_stream() {
+    let dir = clone_fixture("m3a_async_structural_ok");
+    let cache = fresh_cache_dir("m3a-struct-async");
+    let report = scan_path_with_cache(&dir, Some(&cache)).unwrap();
+    let names: Vec<_> = report
+        .findings
+        .iter()
+        .map(|f| f.entry.name.as_str())
+        .collect();
+    for banned in [
+        "neg_subclass",
+        "neg_non_async_named_wrapper",
+        "neg_async_openai_stream",
+    ] {
+        assert!(
+            !names.contains(&banned),
+            "{banned} must stay clean (structural async / narrow openai): {names:?} findings={:?}",
+            report.findings
+        );
+    }
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&cache);
+}
+
+#[test]
 fn m3a_asyncio_pipeline_execute_still_clean() {
     // Regression: awaited asyncio pipe.execute must not become a sync sink
     // after removing the blanket is_awaited skip.

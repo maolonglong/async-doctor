@@ -63,6 +63,16 @@ fn openai_async_never_fires() {
             .is_none()
     );
     assert!(t.lookup("openai.OpenAI").is_some());
+    assert!(t.lookup("openai.OpenAI.chat.completions.create").is_some());
+    // Helpers under openai.lib that merely contain "completions" must not match.
+    assert!(
+        t.lookup("openai.lib._parsing._completions._materialize_input_tools")
+            .is_none()
+    );
+    assert!(
+        t.lookup("openai.resources.chat.completions.AsyncCompletions.create")
+            .is_none()
+    );
 }
 
 #[test]
