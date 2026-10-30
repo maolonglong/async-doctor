@@ -748,8 +748,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             return;
         }
 
-        let callee = self.resolve_callee(&call.func);
-        self.push_edge(caller, callee, call.range(), CallKind::Call, false);
+        if let Some(callee) = self.resolve_callee(&call.func) {
+            self.push_edge(caller, callee, call.range(), CallKind::Call, false);
+        }
     }
 
     fn note_task_spawn(&mut self, call: &ast::ExprCall) {
@@ -839,7 +840,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                         Some(OffloadKind::AnyioToThread)
                     }
                     "run_in_threadpool" => Some(OffloadKind::StarletteThreadpool),
-                    "submit" | "map" => Some(OffloadKind::ThreadPoolExecutor),
+                    // Do not guess bare `.submit`/`.map` without a typed Executor.
                     _ => None,
                 }
             }
@@ -890,35 +891,31 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
     }
 
-    fn resolve_callee(&self, func: &Expr) -> CalleeRef {
-        // Dynamic: getattr(...)
+    fn resolve_callee(&self, func: &Expr) -> Option<CalleeRef> {
+        // Dynamic: getattr(...)  — never guess by name; emit unresolved candidate.
         if matches!(func, Expr::Call(c) if is_getattr_call(&c.func)) {
-            return CalleeRef::Unresolved {
+            return Some(CalleeRef::Unresolved {
                 reason: "unresolved".into(),
-            };
+            });
         }
 
         if let Some(fid) = self.resolve_project_function(func) {
-            return CalleeRef::Project(fid);
+            return Some(CalleeRef::Project(fid));
         }
 
         if let Some(q) = self.external_qualname(func) {
-            return CalleeRef::External { qualname: q };
+            return Some(CalleeRef::External { qualname: q });
         }
 
-        // If the call target involves subscript / weird forms, mark unresolved.
+        // Clearly dynamic / registry-style callables → candidates.
+        // Plain unresolved Name/Attribute: omit the edge (cannot prove a sink).
         match func {
             Expr::Subscript(_) | Expr::Call(_) | Expr::BoolOp(_) | Expr::If(_) => {
-                CalleeRef::Unresolved {
+                Some(CalleeRef::Unresolved {
                     reason: "unresolved".into(),
-                }
+                })
             }
-            _ => {
-                // Could not prove a target — candidate, don't guess by name.
-                CalleeRef::Unresolved {
-                    reason: "unresolved".into(),
-                }
-            }
+            _ => None,
         }
     }
 

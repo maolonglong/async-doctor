@@ -166,37 +166,45 @@ langgraph, home-assistant core, plus small fixtures per rule/pattern.
 | M3 | Agent integration | `why`, `--changed`, `--baseline`, inline ignore, SARIF, Skill, Stop hooks |
 | M4 | Benchmarks + 0.1 | Public corpora, precision tuning, PyPI; then evaluate MCP |
 
-## M0 delivered here
+## M0 delivered
 
 - Workspace crates: `async_doctor_core`, `async_doctor_rules`, `async_doctor_ty`,
   `async_doctor` (binary name `async-doctor`).
 - All ty/ruff usage isolated in `async_doctor_ty`, pinned to **0.0.20**.
-- Custom salsa `AsyncDoctorDb` implementing `ty_python_semantic::Db` (and the
-  lower Db traits it requires).
-- Direct `time.sleep` / `from time import sleep` inside `async def` → finding
-  with file:line, text + JSON (`schemaVersion` 1), exit codes per decisions.
-- Negative fixtures: sync `def`, `if TYPE_CHECKING`.
-- maturin `bindings = "bin"`; `THIRD_PARTY_NOTICES.md` for typeshed Apache-2.0.
-- CI: fmt, clippy, test.
+- Custom salsa `AsyncDoctorDb` implementing `ty_python_semantic::Db`.
+- Direct `time.sleep` inside `async def`, JSON/text, exit codes, maturin.
 - **No config file.**
 
-### API deviations from the draft narrative
+## M1 delivered here
 
-The design doc sketched hydroid's 0.0.15-era wiring. Against **0.0.20**:
+- Type-resolved call graph in the adapter (`SemanticModel` +
+  `definitions_for_name` / `definitions_for_attribute` / `HasType`).
+- Blocking propagation from stdlib sinks up the reverse call graph to
+  `async def` entries; shortest evidence chain via BFS.
+- Offload cuts: `asyncio.to_thread`, `run_in_executor`,
+  `anyio.to_thread.run_sync`, `starlette.concurrency.run_in_threadpool`,
+  `ThreadPoolExecutor.submit/map`, plus callable refs / `partial` / lambdas
+  passed to those. Eager `to_thread(f())` still reports.
+- Entry labels inferred (`route` / `lifecycle` / `task` / `other`). Sync
+  FastAPI/Starlette-style route handlers are not entries.
+- Unresolved dynamic dispatch → `candidates` (`reason=unresolved`).
+  Metadata IO → candidates. Findings only when provable.
+- `conditions[]`: `unconditional` / `loop` / `async-branch` / `all-paths`;
+  literal-constant dead-branch pruning (`if False`, `TYPE_CHECKING`).
+- Stable `id`: hash(rule + entry qualname + sink qualname + chain qualnames
+  + occurrence). **Not** line/column.
+- Async-twin names only in `fix.hint`.
+- Site-packages following remains **M2**.
 
-- `ProgramSettings` lives in `ty_python_core::program` (not re-exported as a
-  ty_python_semantic type for construction); it now also carries
+### API notes (ty 0.0.20)
+
+- `ProgramSettings` lives in `ty_python_core::program`; carries
   `python_environment`.
-- `SearchPaths::try_register_static_roots` is used after
+- `SearchPaths::try_register_static_roots` after
   `SearchPathSettings::to_search_paths(..., &FallibleStrategy)`.
-- Parsing goes through `ruff_db::parsed::parsed_module` keyed by
-  `PythonFile` / `ProgramFile`, not a bare parser call.
-- M0 resolves `time.sleep` via import bindings on the AST (sufficient for
-  *direct* calls); typed call-graph resolution is M1.
-- Finding `id` hashes rule + entry file + **qualified** entry name
-  (`Class.method` when nested) + sink + call site (file/line/column).
-- Direct findings do not descend into **lambda** bodies (deferred); inline
-  **comprehensions** still report.
-- Syntax-error files set `complete=false` and a `skipped` entry; CLI warns on
-  stderr. Exit code still follows findings only.
+- Parsing via `ruff_db::parsed::parsed_module` on `ProgramFile`.
+- Return-type inference enabled (`ReturnTypeInference::Always`) so typed
+  receivers resolve more often.
+- Lambda bodies stay deferred unless the lambda is invoked; offload-passed
+  lambdas are cut.
 - Path argument may be a project directory or a single `.py` file.
