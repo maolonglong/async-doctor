@@ -40,6 +40,21 @@ async def use_redis_sync():
     r.get("k")
 
 
+async def use_redis_pipeline_buffering_ok():
+    # Negative: set/get on a Pipeline only buffer — not findings.
+    r = redis.Redis()
+    pipe = r.pipeline()
+    pipe.set("k", "v")
+    pipe.get("k")
+
+
+async def use_redis_pipeline_execute():
+    r = redis.Redis()
+    pipe = r.pipeline()
+    pipe.set("k", "v")
+    pipe.execute()
+
+
 async def use_redis_async_ok():
     r = redis.asyncio.Redis()
     await r.get("k")
