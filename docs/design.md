@@ -250,8 +250,12 @@ langgraph, home-assistant core, plus small fixtures per rule/pattern.
   async-twin fix hints; async counterparts never fire. Redis sync `Pipeline`
   buffering (`set`/`get`/…) is not IO — only sync `Pipeline.execute()` blocks;
   `redis.asyncio` / `await pipe.execute()` never fire.
-- **Higher-order** callable arguments; **ty-resolved** offload only, plus
-  inferred wrappers whose bodies call a real offload primitive.
+- **Higher-order** callable arguments (positional + kwargs, `partial`, bound
+  methods) with cheap call-context sensitivity so bindings do not leak across
+  call sites; **ty-resolved** offload only, plus inferred wrappers whose bodies
+  call a real offload primitive. Optional/union receivers narrowed by
+  `isinstance` / `is not None`. Proven in-memory buffers (`BytesIO` /
+  `StringIO`) are never blocking-file sinks (skip open/Image.open follow).
 - Nested defs keyed by full scope; lambda assign+call; `@property` gets;
   genexpr consumption; imperative FastAPI/Starlette routes / `include_router`.
 - `--show-unresolved` aggregates by callee pattern (ranked by entries).
