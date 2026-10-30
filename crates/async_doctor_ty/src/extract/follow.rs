@@ -14,7 +14,9 @@ use ty_python_semantic::SemanticModel;
 
 use crate::cache::{effective_cache_root, third_party_module_path};
 use crate::db::AsyncDoctorDb;
-use crate::sitepkgs::{FollowTarget, PackageCacheBatch, materialize_cached_functions};
+use crate::sitepkgs::{
+    FollowTarget, PackageCacheBatch, PackageMetaMemo, materialize_cached_functions,
+};
 
 use super::collector::CallCollector;
 use super::constants::body_has_yield;
@@ -63,12 +65,17 @@ pub(crate) const DEFAULT_FOLLOW_BUDGET: usize = 256;
 /// `follow_budget` caps how many third-party functions may be followed after the
 /// initial first-party-reachable wave. Cold extract and warm cache materialization
 /// must charge this identically — never transitively materialize past the cut.
+///
+/// `package_meta` is the eighth argument (per-scan memo); kept flat so cold/warm
+/// call sites stay obvious rather than hiding behind a scratch struct.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn follow_third_party(
     db: &AsyncDoctorDb,
     facts: &mut ProjectFacts,
     def_map: &mut HashMap<DefKey, FunctionId>,
     qual_map: &mut HashMap<(String, String), FunctionId>,
     follow_targets: &mut HashMap<String, FollowTarget>,
+    package_meta: &mut PackageMetaMemo,
     cache_dir: Option<&Path>,
     follow_budget: usize,
 ) {
@@ -179,9 +186,15 @@ pub(crate) fn follow_third_party(
                 continue;
             };
             let edge_before = facts.edges.len();
-            if let Some(id) =
-                extract_third_party_function(db, facts, def_map, qual_map, follow_targets, &target)
-            {
+            if let Some(id) = extract_third_party_function(
+                db,
+                facts,
+                def_map,
+                qual_map,
+                follow_targets,
+                package_meta,
+                &target,
+            ) {
                 qual_to_id.insert(q.clone(), id);
                 id_to_external_key.insert(id, q.clone());
                 reachable_fns.insert(id);
@@ -214,9 +227,15 @@ pub(crate) fn follow_third_party(
             continue;
         };
         let edge_before = facts.edges.len();
-        if let Some(id) =
-            extract_third_party_function(db, facts, def_map, qual_map, follow_targets, &target)
-        {
+        if let Some(id) = extract_third_party_function(
+            db,
+            facts,
+            def_map,
+            qual_map,
+            follow_targets,
+            package_meta,
+            &target,
+        ) {
             qual_to_id.insert(q.clone(), id);
             id_to_external_key.insert(id, q.clone());
             reachable_fns.insert(id);
@@ -332,9 +351,15 @@ pub(crate) fn follow_third_party(
                 continue;
             };
             let edge_before = facts.edges.len();
-            if let Some(id) =
-                extract_third_party_function(db, facts, def_map, qual_map, follow_targets, &target)
-            {
+            if let Some(id) = extract_third_party_function(
+                db,
+                facts,
+                def_map,
+                qual_map,
+                follow_targets,
+                package_meta,
+                &target,
+            ) {
                 qual_to_id.insert(qualname.clone(), id);
                 id_to_external_key.insert(id, qualname.clone());
                 reachable_fns.insert(id);
@@ -367,9 +392,15 @@ pub(crate) fn follow_third_party(
                 continue;
             };
             let edge_before = facts.edges.len();
-            if let Some(id) =
-                extract_third_party_function(db, facts, def_map, qual_map, follow_targets, &target)
-            {
+            if let Some(id) = extract_third_party_function(
+                db,
+                facts,
+                def_map,
+                qual_map,
+                follow_targets,
+                package_meta,
+                &target,
+            ) {
                 qual_to_id.insert(q.clone(), id);
                 id_to_external_key.insert(id, q.clone());
                 reachable_fns.insert(id);
@@ -409,12 +440,14 @@ pub(crate) fn rewrite_external_to_project(
 }
 
 /// Parse one site-packages function and collect its call edges into `facts`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn extract_third_party_function(
     db: &AsyncDoctorDb,
     facts: &mut ProjectFacts,
     def_map: &mut HashMap<DefKey, FunctionId>,
     qual_map: &mut HashMap<(String, String), FunctionId>,
     follow_targets: &mut HashMap<String, FollowTarget>,
+    package_meta: &mut PackageMetaMemo,
     target: &FollowTarget,
 ) -> Option<FunctionId> {
     let file = system_path_to_file(db, &target.path).ok()?;
@@ -571,6 +604,7 @@ pub(crate) fn extract_third_party_function(
         property_defs: &property_defs,
         task_targets: &mut task_targets,
         follow_targets,
+        package_meta,
         module_constants: &module_constants,
         current_fn: Some(id),
         current_param_names: param_names_for_visit,
@@ -590,6 +624,8 @@ pub(crate) fn extract_third_party_function(
         occurrence_counter: HashMap::new(),
         pending_literals: Vec::new(),
         pending_callables: Vec::new(),
+        pending_keyword_callables: Vec::new(),
+        narrowed_locals: HashMap::new(),
         local_lambdas: HashMap::new(),
         local_genexprs: HashMap::new(),
     };
