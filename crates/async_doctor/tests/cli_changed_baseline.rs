@@ -401,3 +401,110 @@ fn tool_error_exit_2_for_bad_baseline() {
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
 }
+
+#[test]
+fn changed_rejects_basename_suffix_across_scan_root() {
+    // Root pos.py changed; scan svc/ which has its own app/pos.py with sleep.
+    // Exact path equality must not treat root pos.py as matching svc/app/pos.py.
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    git(root, &["init", "-b", "main"]);
+    git(root, &["config", "user.email", "a@b.c"]);
+    git(root, &["config", "user.name", "a"]);
+    fs::create_dir_all(root.join("svc/app")).unwrap();
+    fs::write(root.join("pos.py"), "def sync():\n    return 1\n").unwrap();
+    fs::write(
+        root.join("svc/app/pos.py"),
+        "import time\n\nasync def handler():\n    time.sleep(1)\n",
+    )
+    .unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "init"]);
+
+    fs::write(root.join("pos.py"), "def sync():\n    return 2\n").unwrap();
+    let out = bin()
+        .args(["--format", "json", "--changed=HEAD"])
+        .arg(root.join("svc"))
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={} stdout={}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        v["findings"].as_array().unwrap().is_empty(),
+        "root pos.py must not match svc/app/pos.py: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn changed_shallow_detached_without_base_falls_back_to_full_scan() {
+    // Simulate GitHub Actions' default shape: shallow clone of a feature branch,
+    // detached HEAD, no origin/main. Must not silently report clean.
+    let src = TempDir::new().unwrap();
+    let src_root = src.path();
+    git(src_root, &["init", "-b", "main"]);
+    git(src_root, &["config", "user.email", "a@b.c"]);
+    git(src_root, &["config", "user.name", "a"]);
+    fs::write(
+        src_root.join("app.py"),
+        "async def handler():\n    return 1\n",
+    )
+    .unwrap();
+    git(src_root, &["add", "."]);
+    git(src_root, &["commit", "-m", "clean"]);
+    git(src_root, &["checkout", "-b", "feat"]);
+    fs::write(
+        src_root.join("app.py"),
+        "import time\n\nasync def handler():\n    time.sleep(1)\n",
+    )
+    .unwrap();
+    git(src_root, &["add", "."]);
+    git(src_root, &["commit", "-m", "add sleep"]);
+
+    let dst = TempDir::new().unwrap();
+    let dst_root = dst.path().join("clone");
+    let st = Command::new("git")
+        .args([
+            "clone",
+            "--depth",
+            "1",
+            "--branch",
+            "feat",
+            src_root.to_str().unwrap(),
+            dst_root.to_str().unwrap(),
+        ])
+        .status()
+        .unwrap();
+    assert!(st.success());
+    git(&dst_root, &["checkout", "--detach"]);
+
+    let out = bin()
+        .args(["--format", "json", "--changed"])
+        .arg(&dst_root)
+        .env_remove("GITHUB_BASE_REF")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stderr={stderr} stdout={}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        stderr.contains("reporting all findings") || stderr.contains("could not resolve"),
+        "expected full-scan note, got: {stderr}"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        v["findings"].as_array().unwrap().len(),
+        1,
+        "shallow detached must surface the sleep finding"
+    );
+}

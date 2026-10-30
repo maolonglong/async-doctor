@@ -56,8 +56,12 @@ pub struct Cli {
     /// Use `--changed` for the merge-base with the default branch plus
     /// uncommitted changes, or `--changed=GIT_REF` for an explicit ref.
     /// (`=` is required so the project path is not swallowed.) Analysis still
-    /// covers the whole project; only reporting is filtered. Outside a git
-    /// repo (or when the base cannot be resolved), falls back to a full report.
+    /// covers the whole project; only reporting is filtered.
+    ///
+    /// Base detection order: `GITHUB_BASE_REF`, branch upstream, `origin/HEAD`,
+    /// `origin/main|master`, local `main|master`. Outside a git repo — or when
+    /// no base can be resolved (typical shallow detached CI checkout) — prints
+    /// a note and falls back to the full report (never silently diffs HEAD).
     #[arg(
         long,
         num_args = 0..=1,

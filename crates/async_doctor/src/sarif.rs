@@ -3,10 +3,12 @@
 //! Artifact URIs are repo-root-relative (via git toplevel when available) so
 //! scanning a subdirectory still maps correctly in GitHub code scanning.
 //! `%SRCROOT%` is an absolute `file:` URI (SARIF1004).
+//! Third-party / outside-repo hops use absolute `file://` URIs with no
+//! `uriBaseId` (never `site-packages/...` under `%SRCROOT%`).
 
 use std::path::{Path, PathBuf};
 
-use async_doctor_core::Report;
+use async_doctor_core::{ChainStep, Report};
 use async_doctor_rules::rule_doc;
 use serde_json::{Value, json};
 
@@ -60,18 +62,18 @@ pub fn report_to_sarif(report: &Report, scan_root: &Path, src_root: &Path) -> Va
 
     let mut results = Vec::new();
     for f in &report.findings {
-        let entry_uri = repo_uri(&f.entry.file, &scan_root, &src_root);
-        let (prim_file, prim_line) = f
+        let entry_loc = in_repo_location(&f.entry.file, false, &scan_root, &src_root);
+        let (prim_file, prim_line, prim_third) = f
             .chain
             .first()
-            .map(|s| (s.file.as_str(), s.line))
-            .unwrap_or((f.entry.file.as_str(), f.entry.line));
-        let prim_uri = repo_uri(prim_file, &scan_root, &src_root);
+            .map(|s| (s.file.as_str(), s.line, s.third_party))
+            .unwrap_or((f.entry.file.as_str(), f.entry.line, false));
+        let prim_loc = in_repo_location(prim_file, prim_third, &scan_root, &src_root);
 
         let mut thread_locations = Vec::new();
         thread_locations.push(json!({
             "location": physical_location(
-                &entry_uri,
+                &entry_loc,
                 f.entry.line,
                 &format!(
                     "async entry `{}` ({})",
@@ -81,10 +83,11 @@ pub fn report_to_sarif(report: &Report, scan_root: &Path, src_root: &Path) -> Va
             )
         }));
         for step in &f.chain {
-            let uri = repo_uri(&step.file, &scan_root, &src_root);
-            thread_locations.push(json!({
-                "location": physical_location(&uri, step.line, &step.text)
-            }));
+            if let Some(loc) = step_location(step, &scan_root, &src_root) {
+                thread_locations.push(json!({
+                    "location": physical_location(&loc, step.line, &step.text)
+                }));
+            }
         }
 
         results.push(json!({
@@ -92,15 +95,13 @@ pub fn report_to_sarif(report: &Report, scan_root: &Path, src_root: &Path) -> Va
             "level": "error",
             "message": {
                 "text": format!(
-                    "[{}] reachable from {} {}:{} — {}",
+                    "[{}] reachable from {} — {}",
                     f.rule,
                     f.entry.name,
-                    entry_uri,
-                    f.entry.line,
                     f.fix.hint
                 )
             },
-            "locations": [physical_location(&prim_uri, prim_line, &f.fix.hint)],
+            "locations": [physical_location(&prim_loc, prim_line, &f.fix.hint)],
             "partialFingerprints": {
                 "asyncDoctor/findingId": f.id,
             },
@@ -151,16 +152,50 @@ fn rule_display(rule: &str) -> (String, String) {
     }
 }
 
-fn repo_uri(path: &str, scan_root: &Path, src_root: &Path) -> String {
+enum ArtifactUri {
+    /// Relative to `%SRCROOT%`.
+    RepoRelative(String),
+    /// Absolute `file://` URI (third-party / outside the repo).
+    AbsoluteFile(String),
+}
+
+fn step_location(step: &ChainStep, scan_root: &Path, src_root: &Path) -> Option<ArtifactUri> {
+    Some(in_repo_location(
+        &step.file,
+        step.third_party,
+        scan_root,
+        src_root,
+    ))
+}
+
+fn in_repo_location(
+    path: &str,
+    third_party: bool,
+    scan_root: &Path,
+    src_root: &Path,
+) -> ArtifactUri {
     let abs = if Path::new(path).is_absolute() {
         PathBuf::from(path)
     } else {
         scan_root.join(path)
     };
     let abs = abs.canonicalize().unwrap_or(abs);
+
+    if third_party {
+        return ArtifactUri::AbsoluteFile(file_uri_file(&abs));
+    }
     match abs.strip_prefix(src_root) {
-        Ok(rel) => normalize_path(&rel.to_string_lossy()),
-        Err(_) => normalize_path(path),
+        Ok(rel) => {
+            let rel = normalize_path(&rel.to_string_lossy());
+            // site-packages under a venv inside the repo still must not use SRCROOT
+            // as if it were project source — prefer absolute file://.
+            if rel.contains("site-packages/") || rel.contains("dist-packages/") {
+                ArtifactUri::AbsoluteFile(file_uri_file(&abs))
+            } else {
+                ArtifactUri::RepoRelative(rel)
+            }
+        }
+        Err(_) => ArtifactUri::AbsoluteFile(file_uri_file(&abs)),
     }
 }
 
@@ -168,7 +203,6 @@ fn file_uri_dir(path: &Path) -> String {
     let abs = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let mut s = abs.to_string_lossy().replace('\\', "/");
     if !s.starts_with('/') {
-        // Windows drive paths → /C:/...
         s = format!("/{s}");
     }
     if !s.ends_with('/') {
@@ -177,13 +211,28 @@ fn file_uri_dir(path: &Path) -> String {
     format!("file://{s}")
 }
 
-fn physical_location(uri: &str, line: u32, message: &str) -> Value {
+fn file_uri_file(path: &Path) -> String {
+    let abs = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let mut s = abs.to_string_lossy().replace('\\', "/");
+    if !s.starts_with('/') {
+        s = format!("/{s}");
+    }
+    format!("file://{s}")
+}
+
+fn physical_location(uri: &ArtifactUri, line: u32, message: &str) -> Value {
+    let artifact = match uri {
+        ArtifactUri::RepoRelative(rel) => json!({
+            "uri": rel,
+            "uriBaseId": "%SRCROOT%",
+        }),
+        ArtifactUri::AbsoluteFile(file) => json!({
+            "uri": file,
+        }),
+    };
     json!({
         "physicalLocation": {
-            "artifactLocation": {
-                "uri": uri,
-                "uriBaseId": "%SRCROOT%",
-            },
+            "artifactLocation": artifact,
             "region": {
                 "startLine": line.max(1),
             }

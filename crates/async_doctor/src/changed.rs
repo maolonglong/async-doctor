@@ -1,8 +1,9 @@
 //! `--changed` reporting filter: full analysis, narrow reporting.
 //!
 //! Changed paths are always repo-root-relative. Finding paths (relative to the
-//! scan root) are normalized to the same basis before comparison — so scanning
-//! `backend/` while `tools/helpers.py` changed does not false-match.
+//! scan root) are normalized to the same basis before **exact** comparison —
+//! so scanning `svc/` while only root `pos.py` changed does not match
+//! `svc/app/pos.py`.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -11,7 +12,7 @@ use std::process::Command;
 use anyhow::{Context, bail};
 use async_doctor_core::{Candidate, Finding, Report};
 
-use crate::paths::{normalize_path, paths_equal};
+use crate::paths::normalize_path;
 
 /// Outcome of resolving the changed-file set for `--changed`.
 #[derive(Debug)]
@@ -143,7 +144,8 @@ fn path_in_changed(
     let Some(repo_rel) = to_repo_relative(path, scan_root, repo_root) else {
         return false;
     };
-    changed.iter().any(|c| paths_equal(c, &repo_rel))
+    // Exact equality after repo-root normalization — never component suffix.
+    changed.contains(&repo_rel)
 }
 
 /// Convert a finding path (relative to `scan_root`) into a repo-root-relative path.
@@ -161,31 +163,76 @@ fn to_repo_relative(path: &str, scan_root: &Path, repo_root: &Path) -> Option<St
     Some(normalize_path(&rel.to_string_lossy()))
 }
 
+/// Resolve merge-base with a usable default branch.
+///
+/// Skips candidates whose merge-base equals `HEAD` (not ahead of that ref) —
+/// otherwise a shallow detached feature checkout that only has `origin/feat`
+/// would silently diff against itself and report clean. Never falls back to
+/// bare `HEAD`. Callers treat `Err` as FullScan with a note.
 fn default_merge_base(repo_root: &Path) -> anyhow::Result<String> {
+    let head = git_stdout(repo_root, &["rev-parse", "HEAD"])
+        .context("rev-parse HEAD")?
+        .trim()
+        .to_string();
     let mut last_err = None;
-    for branch in candidate_base_refs(repo_root) {
-        match git_stdout(repo_root, &["merge-base", "HEAD", &branch]) {
+    let mut skipped_same_as_head = Vec::new();
+    let candidates = candidate_base_refs(repo_root);
+    if candidates.is_empty() {
+        bail!(
+            "no base branch found (tried GITHUB_BASE_REF, origin/HEAD, \
+             origin/main|master, main|master); shallow or detached checkout?"
+        );
+    }
+    for branch in &candidates {
+        match git_stdout(repo_root, &["merge-base", "HEAD", branch]) {
             Ok(out) => {
                 let mb = out.trim();
-                if !mb.is_empty() {
-                    return Ok(mb.to_string());
+                if mb.is_empty() {
+                    continue;
                 }
+                if mb == head {
+                    skipped_same_as_head.push(branch.clone());
+                    continue;
+                }
+                return Ok(mb.to_string());
             }
             Err(e) => last_err = Some(e),
         }
     }
-    // Fetch-free fallback: diff against HEAD itself (uncommitted only).
-    if git_stdout(repo_root, &["rev-parse", "--verify", "HEAD"]).is_ok() {
-        return Ok("HEAD".to_string());
+    if !skipped_same_as_head.is_empty() {
+        bail!(
+            "no usable base (merge-base equals HEAD for [{}]); \
+             shallow or detached checkout without the PR base branch?",
+            skipped_same_as_head.join(", ")
+        );
     }
     match last_err {
-        Some(e) => Err(e).context("git merge-base"),
-        None => bail!("could not determine a merge-base (no default branch, no HEAD)"),
+        Some(e) => Err(e).context(format!(
+            "git merge-base HEAD with candidates [{}]",
+            candidates.join(", ")
+        )),
+        None => bail!(
+            "could not determine a merge-base with [{}]",
+            candidates.join(", ")
+        ),
     }
 }
 
 fn candidate_base_refs(repo_root: &Path) -> Vec<String> {
     let mut out = Vec::new();
+
+    // GitHub Actions: GITHUB_BASE_REF is the PR base branch name (e.g. "main").
+    if let Ok(base) = std::env::var("GITHUB_BASE_REF") {
+        let base = base.trim();
+        if !base.is_empty() {
+            for candidate in [format!("origin/{base}"), base.to_string()] {
+                if git_stdout(repo_root, &["rev-parse", "--verify", &candidate]).is_ok() {
+                    out.push(candidate);
+                }
+            }
+        }
+    }
+
     // Upstream of current branch (works in many CI checkouts).
     if let Ok(up) = git_stdout(
         repo_root,
@@ -201,6 +248,8 @@ fn candidate_base_refs(repo_root: &Path) -> Vec<String> {
             out.push(up.to_string());
         }
     }
+
+    // origin/HEAD → typically origin/main.
     if let Ok(sym) = git_stdout(repo_root, &["symbolic-ref", "refs/remotes/origin/HEAD"]) {
         let s = sym.trim();
         if let Some(name) = s.strip_prefix("refs/remotes/") {
@@ -208,14 +257,22 @@ fn candidate_base_refs(repo_root: &Path) -> Vec<String> {
         } else if !s.is_empty() {
             out.push(s.to_string());
         }
+    } else if let Ok(sym) = git_stdout(repo_root, &["rev-parse", "--abbrev-ref", "origin/HEAD"]) {
+        let s = sym.trim();
+        if !s.is_empty() && s != "origin/HEAD" {
+            out.push(s.to_string());
+        }
     }
+
     for candidate in ["origin/main", "origin/master", "main", "master"] {
         if git_stdout(repo_root, &["rev-parse", "--verify", candidate]).is_ok() {
             out.push(candidate.to_string());
         }
     }
-    out.sort();
-    out.dedup();
+
+    // Preserve insertion order (GITHUB_BASE_REF first) while deduping.
+    let mut seen = HashSet::new();
+    out.retain(|c| seen.insert(c.clone()));
     out
 }
 
@@ -308,6 +365,32 @@ mod tests {
         report.findings = vec![finding("app.py")];
         let changed = HashSet::from(["backend/app.py".into()]);
         let filtered = filter_report(report, &changed, &backend, repo);
+        assert_eq!(filtered.findings.len(), 1);
+    }
+
+    #[test]
+    fn filter_rejects_basename_suffix_false_match() {
+        // Repro: root pos.py changed; scan svc/; svc/app/pos.py must NOT match.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        let svc = repo.join("svc/app");
+        std::fs::create_dir_all(&svc).unwrap();
+        std::fs::write(repo.join("pos.py"), "").unwrap();
+        std::fs::write(svc.join("pos.py"), "").unwrap();
+
+        let mut report = Report::empty_complete();
+        report.findings = vec![finding("app/pos.py")]; // relative to svc/
+        let changed = HashSet::from(["pos.py".into()]);
+        let filtered = filter_report(report, &changed, &repo.join("svc"), repo);
+        assert!(
+            filtered.findings.is_empty(),
+            "root pos.py must not match svc/app/pos.py"
+        );
+
+        let mut report = Report::empty_complete();
+        report.findings = vec![finding("app/pos.py")];
+        let changed = HashSet::from(["svc/app/pos.py".into()]);
+        let filtered = filter_report(report, &changed, &repo.join("svc"), repo);
         assert_eq!(filtered.findings.len(), 1);
     }
 }

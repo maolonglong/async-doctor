@@ -76,8 +76,10 @@ if [[ "$CODE" -eq 0 ]]; then
   exit 0
 fi
 
-if [[ "$CODE" -eq 2 ]]; then
-  echo "note: async-doctor tool error (exit 2); allowing stop. Output:" >&2
+# Only exit 1 means findings. Anything else (2=tool error, 101=panic,
+# 137=killed, …) must NOT block / follow up — allow the stop with a note.
+if [[ "$CODE" -ne 1 ]]; then
+  echo "note: async-doctor exited ${CODE} (not findings); allowing stop. Output:" >&2
   echo "$OUT" >&2
   if [[ "$AGENT" == "cursor" ]]; then echo '{}'; fi
   exit 0

@@ -170,7 +170,7 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::from(report.exit_code() as u8))
 }
 
-fn rewrite_why_commands(report: &mut Report, scan_path: &Path) {
+pub(crate) fn rewrite_why_commands(report: &mut Report, scan_path: &Path) {
     let path_arg = cli_path_arg(scan_path);
     let rewrite = |why: &mut String| {
         if let Some(rest) = why.strip_prefix("async-doctor why ") {

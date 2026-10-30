@@ -12,8 +12,10 @@ Zero-config static analysis for Python: finds sync/blocking IO reachable from
 ## Quick start
 
 ```bash
-# From a built wheel (no Rust toolchain required):
-uvx async-doctor .
+# Install a release wheel (maturin), then run:
+maturin build --release
+uv pip install ./target/wheels/async_doctor-*.whl
+async-doctor .
 
 # Or during development:
 cargo run -p async_doctor -- .
@@ -80,12 +82,12 @@ Ship-ready snippets under [`integrations/`](integrations/):
 
 ## Packaging
 
-Wheels are built with [maturin](https://www.maturin.rs/) (`bindings = "bin"`),
-so `uvx` / `uv run` install a native `async-doctor` binary.
+Wheels are built with [maturin](https://www.maturin.rs/) (`bindings = "bin"`):
 
 ```bash
 maturin build --release
-uvx --from ./target/wheels/async_doctor-*.whl async-doctor --help
+uv pip install ./target/wheels/async_doctor-*.whl
+async-doctor --help
 ```
 
 ## License

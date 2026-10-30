@@ -12,8 +12,8 @@ Cursor from the stdin JSON payload (or set `ASYNC_DOCTOR_HOOK_AGENT=claude|curso
 | Situation | Claude Code | Cursor |
 |-----------|-------------|--------|
 | Clean (`async-doctor` exit 0) | exit 0 — allow stop | `{}` on stdout |
-| Findings (exit 1) | **exit 2** + reason on stderr (and `{"decision":"block","reason":…}` on stdout) — continues the turn | `{"followup_message":…}` on stdout — auto follow-up |
-| Tool / infra failure (missing binary, not a git repo, exit 2) | **exit 0** + note on stderr — do not block | `{}` + note |
+| Findings (exit **1** only) | **exit 2** + reason on stderr (and `{"decision":"block","reason":…}` on stdout) — continues the turn | `{"followup_message":…}` on stdout — auto follow-up |
+| Any other exit (2 / panic 101 / kill 137 / missing binary / not a git repo) | **exit 0** + note on stderr — do not block | `{}` + note |
 | `stop_hook_active: true` / high `loop_count` | exit 0 — avoid loops | `{}` — avoid loops |
 
 Claude Code: only exit **2** blocks Stop (exit 1 is a non-blocking hook error).
