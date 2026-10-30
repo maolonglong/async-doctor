@@ -26,6 +26,7 @@ pub(crate) fn extract_files(
     db: &AsyncDoctorDb,
     files: Vec<PathBuf>,
     cache_dir: Option<&Path>,
+    follow_budget: usize,
 ) -> anyhow::Result<ProjectFacts> {
     let mut facts = ProjectFacts {
         complete: true,
@@ -191,6 +192,7 @@ pub(crate) fn extract_files(
         &mut qual_map,
         &mut follow_targets,
         cache_dir,
+        follow_budget,
     );
 
     // Stable edge order so cold extract vs warm cache materialization agree.

@@ -51,11 +51,18 @@ pub(crate) fn extend_edges_by_caller(
     }
 }
 
+/// Default budget for following calls into third-party code after the first wave.
+pub(crate) const DEFAULT_FOLLOW_BUDGET: usize = 256;
+
 /// After first-party extraction, follow External callees into site-packages `.py` sources.
 ///
 /// Determinism: BTreeSet/BTreeMap everywhere; sorted queues; sink-table Externals are
 /// **never** rewritten to Project (so rule-table findings cannot be dropped by follow).
 /// Budget applies only to non-sink follow candidates, sorted by (caller_count desc, qualname).
+///
+/// `follow_budget` caps how many third-party functions may be followed after the
+/// initial first-party-reachable wave. Cold extract and warm cache materialization
+/// must charge this identically — never transitively materialize past the cut.
 pub(crate) fn follow_third_party(
     db: &AsyncDoctorDb,
     facts: &mut ProjectFacts,
@@ -63,6 +70,7 @@ pub(crate) fn follow_third_party(
     qual_map: &mut HashMap<(String, String), FunctionId>,
     follow_targets: &mut HashMap<String, FollowTarget>,
     cache_dir: Option<&Path>,
+    follow_budget: usize,
 ) {
     let sinks = BuiltinSinkTable::new();
     let mut qual_to_id: BTreeMap<String, FunctionId> = BTreeMap::new();
@@ -221,9 +229,9 @@ pub(crate) fn follow_third_party(
     rewrite_external_to_project(facts, &qual_to_id, &sinks);
 
     // Further waves until fixpoint or budget — a single extra wave misses deep
-    // site-packages chains (liba→libb→libc→libd→sleep) and made cold miss
-    // paths that warm transitive cache materialization could still expose.
-    const FOLLOW_BUDGET: usize = 256;
+    // site-packages chains (liba→libb→libc→libd→sleep). Cold extract and warm
+    // cache hits must charge `follow_budget` the same way (one unit per
+    // materialized/extracted function, no free transitive closure).
     let mut followed: usize = 0;
     loop {
         let mut wave_candidates: BTreeMap<String, u32> = BTreeMap::new();
@@ -261,7 +269,7 @@ pub(crate) fn follow_third_party(
         let mut ranked: Vec<(u32, String)> =
             wave_candidates.into_iter().map(|(q, n)| (n, q)).collect();
         ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-        let remaining = FOLLOW_BUDGET.saturating_sub(followed);
+        let remaining = follow_budget.saturating_sub(followed);
         if remaining == 0 {
             break;
         }
@@ -318,7 +326,7 @@ pub(crate) fn follow_third_party(
             if qual_to_id.contains_key(&qualname) {
                 continue;
             }
-            if followed >= FOLLOW_BUDGET {
+            if followed >= follow_budget {
                 break;
             }
             let Some(target) = follow_targets.get(&qualname).cloned() else {
@@ -353,7 +361,7 @@ pub(crate) fn follow_third_party(
             }
         }
         for q in &wave_no_meta {
-            if qual_to_id.contains_key(q) || followed >= FOLLOW_BUDGET {
+            if qual_to_id.contains_key(q) || followed >= follow_budget {
                 continue;
             }
             let Some(target) = follow_targets.get(q).cloned() else {

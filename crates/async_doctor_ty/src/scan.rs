@@ -5,7 +5,7 @@ use std::path::Path;
 use async_doctor_core::{AnalyzeOptions, Report, analyze_with_options};
 use async_doctor_rules::BuiltinSinkTable;
 
-use crate::extract::{extract_path, extract_path_with_cache};
+use crate::extract::{extract_path, extract_path_with_cache, extract_path_with_cache_budget};
 
 /// Scan a project directory or a single `.py` file with default options.
 pub fn scan_path(path: &Path) -> anyhow::Result<Report> {
@@ -41,5 +41,22 @@ pub fn scan_path_with_options_and_cache(
         &facts,
         &BuiltinSinkTable::new(),
         options,
+    ))
+}
+
+/// Scan with an explicit cache directory and injectable follow budget.
+///
+/// Test seam only — production callers use [`scan_path_with_cache`] (default
+/// budget). Avoids process-global env mutation under parallel `cargo test`.
+pub fn scan_path_with_cache_budget(
+    path: &Path,
+    cache_dir: Option<&Path>,
+    follow_budget: usize,
+) -> anyhow::Result<Report> {
+    let facts = extract_path_with_cache_budget(path, cache_dir, follow_budget)?;
+    Ok(analyze_with_options(
+        &facts,
+        &BuiltinSinkTable::new(),
+        AnalyzeOptions::default(),
     ))
 }
