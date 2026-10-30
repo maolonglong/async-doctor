@@ -1,6 +1,11 @@
 //! Long-form rule help for `async-doctor explain` and docs anchors.
 //!
-//! Anchors match headings in `docs/rules.md` (`#blocking-sleep`, …).
+//! Absolute docs URLs point at the public GitHub tree so installed binaries
+//! still have a clickable link.
+
+/// Canonical rules document on GitHub (main branch).
+pub const DOCS_RULES_BASE: &str =
+    "https://github.com/maolonglong/async-doctor/blob/main/docs/rules.md";
 
 /// Stable documentation for one built-in rule.
 #[derive(Debug, Clone, Copy)]
@@ -21,16 +26,21 @@ impl RuleDoc {
         format!("#{}", self.id)
     }
 
+    /// Absolute docs URL for agents and installed binaries.
+    pub fn docs_url(&self) -> String {
+        format!("{DOCS_RULES_BASE}{}", self.docs_anchor())
+    }
+
     /// Full text printed by `async-doctor explain <rule-id>`.
     pub fn explain_text(&self) -> String {
         format!(
-            "{id} — {title}\n\n{summary}\n\nWhy it matters\n{body}\n\nHow to fix\n{fix}\n\nDocs: docs/rules.md{anchor}\n",
+            "{id} — {title}\n\n{summary}\n\nWhy it matters\n{body}\n\nHow to fix\n{fix}\n\nDocs: {url}\n",
             id = self.id,
             title = self.title,
             summary = self.summary,
             body = self.body,
             fix = self.fix,
-            anchor = self.docs_anchor(),
+            url = self.docs_url(),
         )
     }
 }
@@ -147,6 +157,14 @@ pub fn docs_anchor_for(rule: &str) -> String {
     }
 }
 
+/// Absolute docs URL for a rule id.
+pub fn docs_url_for(rule: &str) -> String {
+    match rule_doc(rule) {
+        Some(doc) => doc.docs_url(),
+        None => format!("{DOCS_RULES_BASE}#{rule}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,9 +189,12 @@ mod tests {
     }
 
     #[test]
-    fn explain_mentions_fix_and_anchor() {
+    fn explain_mentions_fix_and_absolute_url() {
         let text = rule_doc("blocking-sleep").unwrap().explain_text();
         assert!(text.contains("asyncio.sleep"));
         assert!(text.contains("#blocking-sleep"));
+        assert!(
+            text.contains("https://github.com/maolonglong/async-doctor/blob/main/docs/rules.md")
+        );
     }
 }

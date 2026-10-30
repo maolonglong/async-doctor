@@ -40,6 +40,10 @@ pub struct Cli {
     /// Include `reason=unresolved` candidates in the report (hidden by default).
     #[arg(long)]
     pub show_unresolved: bool,
+
+    /// Print every finding with its full chain (default human output is grouped).
+    #[arg(long)]
+    pub expand: bool,
 }
 
 #[derive(Subcommand, Debug)]
