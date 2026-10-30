@@ -211,16 +211,22 @@ langgraph, home-assistant core, plus small fixtures per rule/pattern.
 
 ## M2 delivered here
 
-- **Site-packages follow** for functions reachable from project async entries,
+- **Third-party follow** for functions reachable from project async entries,
   down to stdlib blocking primitives; third-party hops marked on `chain[]`.
   Sink-table Externals are never rewritten to Project (deterministic; no lost
   direct findings). Follow budget is relevance-ranked and sorted.
+  **Policy:** both venv/`site-packages` and system `dist-packages` are
+  third-party — they are followed when reachable, tagged `is_third_party`, and
+  **never** treated as finding entries. Attribute Externals prefer the
+  *receiver type* over mixin defining classes (redis `Pipeline` vs
+  `CoreCommands`). Awaited calls are never sync-IO sinks.
 - **Per-`(package, version)` disk cache** under the user cache dir, keyed by
   External qualname and versioned by tool + schema; full edge summaries;
-  atomic batched writes. Cold and warm runs must agree.
+  atomic batched writes. Cold and warm runs must agree byte-for-byte.
 - **Built-in third-party rule table** (type-based + C-extension shortcut) with
-  async-twin fix hints; async counterparts never fire. Redis `Pipeline`
-  buffering (`set`/`get`/…) is not IO — only `execute()` blocks.
+  async-twin fix hints; async counterparts never fire. Redis sync `Pipeline`
+  buffering (`set`/`get`/…) is not IO — only sync `Pipeline.execute()` blocks;
+  `redis.asyncio` / `await pipe.execute()` never fire.
 - **Higher-order** callable arguments; **ty-resolved** offload only, plus
   inferred wrappers whose bodies call a real offload primitive.
 - Nested defs keyed by full scope; lambda assign+call; `@property` gets;

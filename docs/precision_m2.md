@@ -8,7 +8,8 @@ Clean-room evaluation of async-doctor M2. Numbers from this agent run
 | Family | Positive | Async / negative |
 | --- | --- | --- |
 | requests / httpx sync / redis / sqlalchemy Session / psycopg2 / pymysql / pymongo / boto3 / openai / anthropic / kafka / elasticsearch / grpc | reported with async-twin fix hints | `httpx.AsyncClient`, `redis.asyncio`, `AsyncSession`, `AsyncOpenAI` do **not** fire |
-| redis `Pipeline` | `pipe.execute()` finding | `pipe.set` / `pipe.get` / `client.pipeline()` never fire |
+| redis sync `Pipeline` (real hierarchy stubs) | `pipe.execute()` finding | mixin-defined `pipe.set`/`get`, `client.pipeline()`, `await` asyncio `pipe.execute()` never fire |
+| Third-party async (`libz.fetch`) | finding entry is first-party `handler` | site-/dist-packages async defs are never entries |
 | Higher-order `apply(fn)` | chain through `fn()` to sink | — |
 | Custom offload wrapper | `real_wrapper` → `asyncio.to_thread` cuts | fake project `to_thread` still reports |
 | Nested `inner` collision | only `outer_a.inner` via `handler_a` | `handler_b` / `outer_b.inner` clean |

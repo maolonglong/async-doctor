@@ -207,29 +207,29 @@ fn match_family(q: &str) -> Option<SinkHit> {
             "Use an async HTTP client (`httpx.AsyncClient`), or offload.",
         )));
     }
-    // redis Pipeline / client.Pipeline: command buffering is not IO; only execute() blocks.
-    // `client.pipeline()` itself only constructs a buffer — never a sink.
-    if is_redis_pipeline_buffering(q) || q.ends_with(".pipeline") {
+    // redis: decide by *receiver type* (segment `Pipeline`), not defining-class
+    // mixins (`CoreCommands.set` → normalize → `redis.Redis.set`).
+    // Sync Pipeline buffering is not IO; only sync Pipeline.execute blocks.
+    // `redis.asyncio.*` is handled by `is_async_counterpart` (and awaited calls
+    // are rejected in propagate regardless).
+    if is_redis_sync_pipeline_receiver(q) {
+        if is_redis_pipeline_execute_method(q) {
+            return Some(hit(&BuiltinSink::finding(
+                "redis.client.Pipeline.execute",
+                RULE_BLOCKING_DB,
+                "Use `redis.asyncio` pipelines (`await pipe.execute()`), or offload.",
+            )));
+        }
+        // pipe.set / pipe.get / client.pipeline() — buffer only.
         return None;
     }
-    // Pipeline.execute (any redis.*Pipeline layout) is the buffering→IO boundary.
-    if q.contains("Pipeline")
-        && (q.ends_with(".execute")
-            || q.ends_with(".execute_command")
-            || q.ends_with(".immediate_execute_command"))
-        && !q.starts_with("redis.asyncio.")
-    {
-        return Some(hit(&BuiltinSink::finding(
-            "redis.client.Pipeline.execute",
-            RULE_BLOCKING_DB,
-            "Use `redis.asyncio` pipelines (`await pipe.execute()`), or offload.",
-        )));
+    if q.ends_with(".pipeline") {
+        return None;
     }
-    // redis sync client (not asyncio, not Pipeline buffering)
+    // redis sync client (not asyncio, not a Pipeline receiver)
     if (q.starts_with("redis.Redis.") || q.starts_with("redis.StrictRedis."))
         && !q.starts_with("redis.asyncio.")
-        && !q.contains("Pipeline")
-        && !q.ends_with(".pipeline")
+        && !is_redis_sync_pipeline_receiver(q)
     {
         return Some(hit(&BuiltinSink::finding(
             "redis.Redis.execute_command",
@@ -411,20 +411,31 @@ fn match_family(q: &str) -> Option<SinkHit> {
     None
 }
 
-/// `client.pipeline()` / `pipe.set()` / `pipe.get()` only buffer; `pipe.execute()` blocks.
-fn is_redis_pipeline_buffering(q: &str) -> bool {
-    let is_pipeline = q.contains("Pipeline") || q.contains("pipeline.Pipeline");
-    if !is_pipeline {
+/// True when the External qualname is a method on a *sync* redis Pipeline receiver.
+///
+/// Expects receiver-based keys like `redis.client.Pipeline.set` (not mixin
+/// `redis.commands.core.CoreCommands.set`). Async pipelines live under
+/// `redis.asyncio` and are excluded here.
+fn is_redis_sync_pipeline_receiver(q: &str) -> bool {
+    if q.contains("asyncio") {
         return false;
     }
-    // execute / execute_command on a pipeline are real IO.
-    if q.ends_with(".execute")
+    // Path segment exactly `Pipeline` (redis.client.Pipeline / redis.Pipeline / …).
+    q.split('.').any(|seg| seg == "Pipeline")
+}
+
+fn is_redis_pipeline_execute_method(q: &str) -> bool {
+    q.ends_with(".execute")
         || q.ends_with(".execute_command")
         || q.ends_with(".immediate_execute_command")
-    {
+}
+
+/// `client.pipeline()` / `pipe.set()` / `pipe.get()` only buffer; sync `pipe.execute()` blocks.
+fn is_redis_pipeline_buffering(q: &str) -> bool {
+    if !is_redis_sync_pipeline_receiver(q) {
         return false;
     }
-    true
+    !is_redis_pipeline_execute_method(q)
 }
 
 fn method_looks_like_aws_op(q: &str) -> bool {
@@ -799,6 +810,7 @@ mod tests {
     #[test]
     fn redis_pipeline_buffering_never_fires_execute_does() {
         let t = BuiltinSinkTable::new();
+        // Receiver-type Pipeline keys (post receiver-preferring extraction).
         assert!(t.lookup("redis.client.Pipeline.set").is_none());
         assert!(t.lookup("redis.client.Pipeline.get").is_none());
         assert!(t.lookup("redis.client.Pipeline.delete").is_none());
@@ -807,6 +819,10 @@ mod tests {
         assert!(t.lookup("redis.client.Pipeline.execute").is_some());
         assert!(t.lookup("redis.Pipeline.execute").is_some());
         assert!(t.lookup("redis.Redis.get").is_some());
+        // Mixin defining-class alone still looks like Redis IO — extraction must
+        // emit receiver-based keys instead. Async Pipeline.execute must never fire.
+        assert!(t.lookup("redis.asyncio.client.Pipeline.execute").is_none());
+        assert!(t.lookup("redis.asyncio.Pipeline.execute").is_none());
     }
 
     #[test]

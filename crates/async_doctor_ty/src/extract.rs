@@ -26,6 +26,7 @@ use ty_python_semantic::{
     HasType, ImportAliasResolution, SemanticModel, definitions_for_attribute, definitions_for_name,
 };
 
+use crate::cache::third_party_module_path;
 use crate::db::AsyncDoctorDb;
 use crate::sitepkgs::{
     FollowTarget, PackageCacheBatch, is_followable_site_packages_py, materialize_cached_functions,
@@ -282,6 +283,7 @@ fn extract_files(db: &AsyncDoctorDb, files: Vec<PathBuf>) -> anyhow::Result<Proj
             in_lambda: false,
             skip_lambda_body: false,
             in_callee_position: false,
+            await_depth: 0,
             occurrence_counter: HashMap::new(),
             pending_literals: Vec::new(),
             pending_callables: Vec::new(),
@@ -859,6 +861,8 @@ struct CallCollector<'a, 'db> {
     skip_lambda_body: bool,
     /// True while visiting `call.func` — suppress PropertyGet on that Attribute.
     in_callee_position: bool,
+    /// Nesting depth under `await` expressions — awaited calls are never sync sinks.
+    await_depth: u32,
     occurrence_counter: HashMap<(FunctionId, String), u32>,
     /// Literals for the call currently being recorded (set by handle_call).
     pending_literals: Vec<Option<LiteralArg>>,
@@ -943,6 +947,11 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                     self.visit_parameters(parameters);
                 }
                 // Do not walk lambda body by default (deferred execution).
+            }
+            Expr::Await(await_expr) => {
+                self.await_depth += 1;
+                self.visit_expr(&await_expr.value);
+                self.await_depth -= 1;
             }
             Expr::Call(call) => {
                 self.handle_call(call);
@@ -1679,6 +1688,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             positional_literals: std::mem::take(&mut self.pending_literals),
             positional_callables: std::mem::take(&mut self.pending_callables),
             param_guard: self.active_param_guard,
+            is_awaited: self.await_depth > 0,
         });
     }
 
@@ -1896,27 +1906,14 @@ impl<'a, 'db> CallCollector<'a, 'db> {
     }
 
     fn external_qualname(&self, func: &Expr) -> Option<String> {
-        // For attributes, prefer `{receiver_type}.{attr}` so methods like
-        // `Path.read_text` keep the class even when the stub definition is odd.
+        // For attributes, ALWAYS prefer `{receiver_type}.{attr}` over the
+        // defining class. Mixin-inherited methods (e.g. redis CoreCommands.set
+        // on a Pipeline instance) must key off the *receiver* so Pipeline
+        // buffering is not mistaken for Redis IO.
         if let Expr::Attribute(attr) = func
             && let Some(recv) = self.type_instance_qualname(&attr.value)
         {
-            let candidate = format!("{recv}.{}", attr.attr.as_str());
-            // Also try definition-based (may include mixins / aliases).
-            let resolved = definitions_for_attribute(self.model, attr);
-            for r in &resolved {
-                if let Some(def) = r.definition()
-                    && let Some(q) = qualname_from_definition(self.model, def)
-                {
-                    // Prefer the longer / more specific name when both exist.
-                    if q.ends_with(&format!(".{}", attr.attr.as_str()))
-                        && q.matches('.').count() >= candidate.matches('.').count()
-                    {
-                        return Some(q);
-                    }
-                }
-            }
-            return Some(candidate);
+            return Some(format!("{recv}.{}", attr.attr.as_str()));
         }
 
         // Prefer definitions_for_* → file_to_module + name + enclosing class.
@@ -2002,8 +1999,7 @@ fn module_of_definition<'db>(
     match file.path(db) {
         FilePath::System(sys) => {
             let s = sys.as_str().replace('\\', "/");
-            if let Some(idx) = s.rfind("/site-packages/") {
-                let rest = &s[idx + "/site-packages/".len()..];
+            if let Some(rest) = third_party_module_path(&s) {
                 return Some(module_name_from_relative(rest));
             }
             // Best-effort: file stem when we cannot recover the package path.
@@ -2381,19 +2377,21 @@ fn extract_third_party_function(
     let source = source_text(db, file);
     let index = line_index(db, file);
     let abs = target.path.as_str().replace('\\', "/");
-    let module = {
-        if let Some(idx) = abs.rfind("/site-packages/") {
-            module_name_from_relative(&abs[idx + "/site-packages/".len()..])
-        } else {
-            String::new()
-        }
-    };
+    let module = third_party_module_path(&abs)
+        .map(module_name_from_relative)
+        .unwrap_or_default();
     // Stable path so cold extract and cache materialization emit identical JSON.
     // Module already includes the top-level package (`libx.core` → `site-packages/libx/core.py`).
+    // System dist-packages use the `dist-packages/` prefix (same third-party policy).
+    let tree = if abs.contains("/dist-packages/") {
+        "dist-packages"
+    } else {
+        "site-packages"
+    };
     let rel = if !module.is_empty() {
-        format!("site-packages/{}.py", module.replace('.', "/"))
-    } else if let Some(idx) = abs.rfind("/site-packages/") {
-        format!("site-packages/{}", &abs[idx + "/site-packages/".len()..])
+        format!("{tree}/{}.py", module.replace('.', "/"))
+    } else if let Some(rest) = third_party_module_path(&abs) {
+        format!("{tree}/{rest}")
     } else {
         abs.clone()
     };
@@ -2537,6 +2535,7 @@ fn extract_third_party_function(
         in_lambda: false,
         skip_lambda_body: false,
         in_callee_position: false,
+        await_depth: 0,
         occurrence_counter: HashMap::new(),
         pending_literals: Vec::new(),
         pending_callables: Vec::new(),

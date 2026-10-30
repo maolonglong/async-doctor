@@ -1,6 +1,6 @@
 //! Blocking propagation: mark sinks, BFS reverse call graph, grade findings.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use crate::graph::{
     AnalyzeOptions, CallKind, CalleeRef, ConditionTag, FunctionId, LiteralArg, ParamGuard,
@@ -110,6 +110,7 @@ fn materialize_higher_order(facts: &ProjectFacts) -> ProjectFacts {
                 positional_literals: vec![],
                 positional_callables: vec![],
                 param_guard: param_edge.param_guard,
+                is_awaited: param_edge.is_awaited,
             });
         }
     }
@@ -137,7 +138,9 @@ pub fn analyze_with_options(
         unresolved_summary: Vec::new(),
     };
 
-    let mut reverse: HashMap<FunctionId, Vec<usize>> = HashMap::new();
+    // BTreeMap + sorted preds so reverse-graph walk order is stable across
+    // cold extract vs warm cache materialization (edge insertion order differs).
+    let mut reverse: BTreeMap<FunctionId, Vec<usize>> = BTreeMap::new();
     for (idx, edge) in facts.edges.iter().enumerate() {
         if edge.is_offload_wrapper {
             continue;
@@ -145,6 +148,18 @@ pub fn analyze_with_options(
         if let CalleeRef::Project(callee) = edge.callee {
             reverse.entry(callee).or_default().push(idx);
         }
+    }
+    for idxs in reverse.values_mut() {
+        idxs.sort_by(|&a, &b| {
+            let ea = &facts.edges[a];
+            let eb = &facts.edges[b];
+            (ea.line, ea.occurrence, ea.text.as_str(), a).cmp(&(
+                eb.line,
+                eb.occurrence,
+                eb.text.as_str(),
+                b,
+            ))
+        });
     }
 
     #[derive(Clone)]
@@ -165,6 +180,10 @@ pub fn analyze_with_options(
         }
         match &edge.callee {
             CalleeRef::External { qualname } => {
+                // Awaited calls are never sync-IO sinks (e.g. `await pipe.execute()`).
+                if edge.is_awaited {
+                    continue;
+                }
                 if let Some(hit) = sinks.lookup(qualname) {
                     if hit.with_only && !matches!(edge.kind, CallKind::WithEnter) {
                         continue;
@@ -203,7 +222,7 @@ pub fn analyze_with_options(
         for path in paths {
             let entry_id = path.entry;
             let entry = facts.function(entry_id);
-            if entry.is_sync_route || !entry.is_async {
+            if entry.is_sync_route || !entry.is_async || entry.is_third_party {
                 continue;
             }
 
@@ -618,11 +637,12 @@ struct PathToEntry {
 
 fn shortest_paths_to_async_entries(
     facts: &ProjectFacts,
-    reverse: &HashMap<FunctionId, Vec<usize>>,
+    reverse: &BTreeMap<FunctionId, Vec<usize>>,
     seed_caller: FunctionId,
 ) -> Vec<PathToEntry> {
     let seed_fn = facts.function(seed_caller);
-    if seed_fn.is_async && !seed_fn.is_sync_route {
+    // Third-party async helpers (site-packages / dist-packages) are never entries.
+    if seed_fn.is_async && !seed_fn.is_sync_route && !seed_fn.is_third_party {
         return vec![PathToEntry {
             entry: seed_caller,
             edges: vec![],
@@ -649,7 +669,7 @@ fn shortest_paths_to_async_entries(
             }
             via_edge.insert(pred, edge_idx);
             let pred_fn = facts.function(pred);
-            if pred_fn.is_async && !pred_fn.is_sync_route {
+            if pred_fn.is_async && !pred_fn.is_sync_route && !pred_fn.is_third_party {
                 let mut edges = Vec::new();
                 let mut cur = pred;
                 while cur != seed_caller {
@@ -787,6 +807,7 @@ mod tests {
             positional_literals: vec![],
             positional_callables: vec![],
             param_guard: None,
+            is_awaited: false,
         }
     }
 
