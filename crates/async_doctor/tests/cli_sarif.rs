@@ -156,6 +156,55 @@ fn sarif_uris_are_repo_root_relative_when_scanning_subdir() {
 }
 
 #[test]
+fn sarif_third_party_hops_use_real_absolute_file_uri() {
+    // Synthetic report paths are `site-packages/...`; SARIF must resolve them to
+    // the real file under the fixture (not file://<scan-root>/site-packages/...
+    // when that join would be wrong / nonexistent for venv layouts).
+    let dir = fixture("m2_cache_multipkg");
+    let out = bin()
+        .args(["--format", "sarif"])
+        .arg(&dir)
+        .output()
+        .expect("run");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let doc: Value = serde_json::from_slice(&out.stdout).expect("sarif json");
+    let flows = doc["runs"][0]["results"][0]["codeFlows"][0]["threadFlows"][0]["locations"]
+        .as_array()
+        .expect("locations");
+    let mut saw_third_party = false;
+    for loc in flows {
+        let art = &loc["location"]["physicalLocation"]["artifactLocation"];
+        let uri = art["uri"].as_str().unwrap_or("");
+        if uri.contains("site-packages") || uri.contains("libx") {
+            saw_third_party = true;
+            assert!(
+                uri.starts_with("file://"),
+                "third-party hop must be absolute file://, got {uri}"
+            );
+            assert!(
+                art.get("uriBaseId").is_none(),
+                "third-party hop must not use uriBaseId: {art}"
+            );
+            // The path after file:// must exist on disk.
+            let path = uri.trim_start_matches("file://");
+            assert!(
+                std::path::Path::new(path).is_file(),
+                "SARIF third-party uri must point at a real file: {uri}"
+            );
+        }
+    }
+    assert!(
+        saw_third_party,
+        "expected a third-party site-packages hop in codeFlows"
+    );
+}
+
+#[test]
 fn sarif_clean_project_has_empty_results() {
     let file = fixture("negative_sync.py");
     let out = bin()
