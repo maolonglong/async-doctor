@@ -67,8 +67,32 @@ pub(super) fn match_family(q: &str) -> Option<SinkHit> {
         // pipe.set / pipe.get / client.pipeline() — buffer only.
         return None;
     }
-    if q.ends_with(".pipeline") {
+    // Factories that return clients/pipelines/pubsub handles are not IO.
+    if q.ends_with(".pipeline") || q.ends_with(".pubsub") {
         return None;
+    }
+    // redis sync PubSub.listen() — blocks only when the generator is consumed.
+    if (q == "redis.PubSub.listen"
+        || q == "redis.client.PubSub.listen"
+        || q.ends_with(".PubSub.listen"))
+        && !q.contains("asyncio")
+    {
+        return Some(hit(&BuiltinSink::finding_consume_only(
+            "redis.PubSub.listen",
+            RULE_BLOCKING_DB,
+            "Use `redis.asyncio` pub/sub (`async for msg in pubsub.listen()`), or offload.",
+        )));
+    }
+    // Other sync PubSub command methods (subscribe/get_message/…) block on use.
+    if (q.starts_with("redis.PubSub.") || q.starts_with("redis.client.PubSub."))
+        && !q.contains("asyncio")
+        && !q.ends_with(".listen")
+    {
+        return Some(hit(&BuiltinSink::finding(
+            "redis.PubSub.get_message",
+            RULE_BLOCKING_DB,
+            "Use `redis.asyncio` pub/sub instead of sync `PubSub`.",
+        )));
     }
     // redis sync client (not asyncio, not a Pipeline receiver)
     if (q.starts_with("redis.Redis.") || q.starts_with("redis.StrictRedis."))

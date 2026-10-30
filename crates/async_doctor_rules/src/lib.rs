@@ -31,6 +31,9 @@ pub struct BuiltinSink {
     pub candidate_reason: Option<&'static str>,
     /// Only fire for `with` enter edges (e.g. `with Engine.begin()`).
     pub with_only: bool,
+    /// Only fire when the call is consumed as a generator/iterator
+    /// (e.g. `for msg in pubsub.listen()`).
+    pub consume_only: bool,
 }
 
 impl BuiltinSink {
@@ -46,6 +49,7 @@ impl BuiltinSink {
             candidate_only: false,
             candidate_reason: None,
             with_only: false,
+            consume_only: false,
         }
     }
 
@@ -61,6 +65,23 @@ impl BuiltinSink {
             candidate_only: false,
             candidate_reason: None,
             with_only: true,
+            consume_only: false,
+        }
+    }
+
+    pub const fn finding_consume_only(
+        qualname: &'static str,
+        rule: &'static str,
+        fix_hint: &'static str,
+    ) -> Self {
+        Self {
+            qualname,
+            rule,
+            fix_hint,
+            candidate_only: false,
+            candidate_reason: None,
+            with_only: false,
+            consume_only: true,
         }
     }
 
@@ -77,6 +98,7 @@ impl BuiltinSink {
             candidate_only: true,
             candidate_reason: Some(reason),
             with_only: false,
+            consume_only: false,
         }
     }
 
@@ -88,6 +110,7 @@ impl BuiltinSink {
             candidate_only: self.candidate_only,
             candidate_reason: self.candidate_reason,
             with_only: self.with_only,
+            consume_only: self.consume_only,
         }
     }
 }

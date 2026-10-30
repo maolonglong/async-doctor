@@ -66,6 +66,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             positional_callables: std::mem::take(&mut self.pending_callables),
             param_guard: self.active_param_guard,
             is_awaited: self.pending_is_awaited,
+            is_eager_offload_arg: self.in_eager_offload_arg,
         });
         self.pending_is_awaited = false;
     }

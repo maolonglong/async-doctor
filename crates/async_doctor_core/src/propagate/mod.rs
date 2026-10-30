@@ -33,6 +33,9 @@ pub struct SinkHit {
     pub candidate_reason: Option<&'static str>,
     /// When true, only fire for `with` / context-manager enter edges (e.g. Engine.begin).
     pub with_only: bool,
+    /// When true, only fire when the call is consumed as a generator/iterator
+    /// (e.g. `for msg in pubsub.listen()` / comprehension over `listen()`).
+    pub consume_only: bool,
 }
 
 /// Lookup sinks and optional async-twin hint text for a resolved external name.
@@ -107,12 +110,20 @@ pub fn analyze_with_options(
         }
         match &edge.callee {
             CalleeRef::External { qualname } => {
-                // Awaited calls are never sync-IO sinks (e.g. `await pipe.execute()`).
-                if edge.is_awaited {
-                    continue;
-                }
+                // Awaited *async* APIs are excluded by `SinkTable::lookup` (async
+                // counterparts return None). Awaited *sync* sinks still block on
+                // the loop before `await` (e.g. `await redis.Redis().get(...)`)
+                // and must seed. Do not blanket-skip on `is_awaited`.
                 if let Some(hit) = sinks.lookup(qualname) {
                     if hit.with_only && !matches!(edge.kind, CallKind::WithEnter) {
+                        continue;
+                    }
+                    if hit.consume_only
+                        && !matches!(
+                            edge.kind,
+                            CallKind::GeneratorConsume | CallKind::ForIter
+                        )
+                    {
                         continue;
                     }
                     seeds.push(Seed {
@@ -227,6 +238,20 @@ pub fn analyze_with_options(
                     }
 
                     let mut hint = hit.fix_hint.to_string();
+                    // Eager offload may mark the edge into the sink's caller
+                    // (`to_thread(work())` → work → sleep) rather than the sink edge.
+                    let eager_offload = seed_edge.is_eager_offload_arg
+                        || path
+                            .edges
+                            .iter()
+                            .any(|&i| facts.edges[i].is_eager_offload_arg);
+                    if eager_offload {
+                        hint = format!(
+                            "{hint} This call runs on the event loop before offload — \
+                             pass the callable (e.g. `asyncio.to_thread(f, ...)`) \
+                             rather than calling it (`to_thread(f())`)."
+                        );
+                    }
                     if let Some(twin) = async_twin_hint(facts, entry_id, &path) {
                         hint = format!("{hint} Async twin available: `{twin}`.");
                     }

@@ -330,6 +330,8 @@ fn edge_to_cached(e: &CallEdge, id_to_external_key: &HashMap<FunctionId, String>
         param_guard_index: e.param_guard.map(|g| g.index),
         param_guard_inverted: e.param_guard.map(|g| g.inverted),
         is_awaited: e.is_awaited,
+        // Eager offload is a first-party call-site property; third-party cache
+        // never records it (serde default false on read).
     }
 }
 
@@ -605,6 +607,7 @@ pub(crate) fn materialize_cached_functions(
                 positional_callables,
                 param_guard,
                 is_awaited: edge.is_awaited,
+                is_eager_offload_arg: false,
             });
         }
     }

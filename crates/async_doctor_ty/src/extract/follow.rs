@@ -586,6 +586,8 @@ pub(crate) fn extract_third_party_function(
         skip_lambda_body: false,
         in_callee_position: false,
         pending_is_awaited: false,
+        pending_with_enter: false,
+        in_eager_offload_arg: false,
         async_with_receivers: HashMap::new(),
         occurrence_counter: HashMap::new(),
         pending_literals: Vec::new(),

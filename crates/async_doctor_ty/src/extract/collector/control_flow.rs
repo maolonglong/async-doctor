@@ -359,7 +359,17 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             && !with_stmt.is_async
         {
             for item in &with_stmt.items {
-                if let Some(callee) = self.resolve_dunder(&item.context_expr, "__enter__") {
+                // `with engine.begin() as conn:` — the Call itself is the enter site
+                // for with_only sinks (Engine.begin). Dunder __enter__ on the *return*
+                // type is secondary and often unnamed for stubs.
+                if let Expr::Call(call) = &item.context_expr {
+                    self.pending_with_enter = true;
+                    self.handle_call(call, false);
+                    self.pending_with_enter = false;
+                    self.walk_call_children(call);
+                } else if let Some(callee) =
+                    self.resolve_dunder(&item.context_expr, "__enter__")
+                {
                     self.push_edge(
                         caller,
                         callee,
@@ -389,7 +399,8 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                     self.visit_expr(&item.context_expr);
                 }
                 self.note_async_with_receiver(item);
-            } else {
+            } else if !matches!(item.context_expr, Expr::Call(_)) {
+                // Sync `with Call(...)` already recorded above as WithEnter.
                 self.visit_expr(&item.context_expr);
             }
             if let Some(opt) = &item.optional_vars {

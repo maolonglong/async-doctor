@@ -24,6 +24,10 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 if i == 0 && is_callable_ref(arg) {
                     continue;
                 }
+                // Non-callable (or non-first) args of an offload are evaluated on
+                // the event loop before the offload runs — mark eager.
+                let prev_eager = self.in_eager_offload_arg;
+                self.in_eager_offload_arg = true;
                 if consumer {
                     self.consuming_generator = true;
                 }
@@ -31,9 +35,15 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 if consumer {
                     self.consuming_generator = false;
                 }
+                self.in_eager_offload_arg = prev_eager;
             }
             for kw in &call.arguments.keywords {
+                let prev_eager = self.in_eager_offload_arg;
+                if !is_callable_ref(&kw.value) {
+                    self.in_eager_offload_arg = true;
+                }
                 self.visit_expr(&kw.value);
+                self.in_eager_offload_arg = prev_eager;
             }
         } else if consumer {
             self.in_callee_position = true;
@@ -248,9 +258,15 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
 
         if let Some(callee) = self.resolve_callee(&call.func) {
-            let kind = if self.consuming_generator
-                && matches!(&callee, CalleeRef::Project(id) if self.facts.function(*id).is_generator)
+            let kind = if self.pending_with_enter {
+                CallKind::WithEnter
+            } else if self.consuming_generator
+                && (matches!(
+                    &callee,
+                    CalleeRef::Project(id) if self.facts.function(*id).is_generator
+                ) || matches!(&callee, CalleeRef::External { .. }))
             {
+                // Project generators and external consume-only sinks (`listen()`).
                 CallKind::GeneratorConsume
             } else {
                 CallKind::Call

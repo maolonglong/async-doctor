@@ -15,6 +15,7 @@ impl SinkTable for TestSinks {
                 candidate_only: false,
                 candidate_reason: None,
                 with_only: false,
+                consume_only: false,
             }),
             "builtins.open" => Some(SinkHit {
                 rule: "blocking-file",
@@ -23,6 +24,7 @@ impl SinkTable for TestSinks {
                 candidate_only: false,
                 candidate_reason: None,
                 with_only: false,
+                consume_only: false,
             }),
             "io.TextIOWrapper.read" => Some(SinkHit {
                 rule: "blocking-file",
@@ -31,6 +33,7 @@ impl SinkTable for TestSinks {
                 candidate_only: false,
                 candidate_reason: None,
                 with_only: false,
+                consume_only: false,
             }),
             "os.stat" => Some(SinkHit {
                 rule: "blocking-file",
@@ -39,6 +42,7 @@ impl SinkTable for TestSinks {
                 candidate_only: true,
                 candidate_reason: Some("metadata"),
                 with_only: false,
+                consume_only: false,
             }),
             _ => None,
         }
@@ -87,6 +91,7 @@ fn edge(
         positional_callables: vec![],
         param_guard: None,
         is_awaited: false,
+        is_eager_offload_arg: false,
     }
 }
 

@@ -78,6 +78,7 @@ pub(super) fn materialize_higher_order(facts: &ProjectFacts) -> ProjectFacts {
                 positional_callables: vec![],
                 param_guard: param_edge.param_guard,
                 is_awaited: param_edge.is_awaited,
+                is_eager_offload_arg: param_edge.is_eager_offload_arg,
             });
         }
     }
