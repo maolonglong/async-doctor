@@ -5,7 +5,7 @@ use std::path::Path;
 use async_doctor_core::{AnalyzeOptions, Report, analyze_with_options};
 use async_doctor_rules::BuiltinSinkTable;
 
-use crate::extract::extract_path;
+use crate::extract::{extract_path, extract_path_with_cache};
 
 /// Scan a project directory or a single `.py` file with default options.
 pub fn scan_path(path: &Path) -> anyhow::Result<Report> {
@@ -15,6 +15,28 @@ pub fn scan_path(path: &Path) -> anyhow::Result<Report> {
 /// Scan with explicit grading/reporting options (CLI flags).
 pub fn scan_path_with_options(path: &Path, options: AnalyzeOptions) -> anyhow::Result<Report> {
     let facts = extract_path(path)?;
+    Ok(analyze_with_options(
+        &facts,
+        &BuiltinSinkTable::new(),
+        options,
+    ))
+}
+
+/// Scan with an explicit third-party package cache directory.
+///
+/// Tests must pass an isolated `cache_dir` instead of mutating process-wide
+/// `XDG_CACHE_HOME` (races under parallel `cargo test`).
+pub fn scan_path_with_cache(path: &Path, cache_dir: Option<&Path>) -> anyhow::Result<Report> {
+    scan_path_with_options_and_cache(path, AnalyzeOptions::default(), cache_dir)
+}
+
+/// Scan with grading options and an explicit cache directory.
+pub fn scan_path_with_options_and_cache(
+    path: &Path,
+    options: AnalyzeOptions,
+    cache_dir: Option<&Path>,
+) -> anyhow::Result<Report> {
+    let facts = extract_path_with_cache(path, cache_dir)?;
     Ok(analyze_with_options(
         &facts,
         &BuiltinSinkTable::new(),

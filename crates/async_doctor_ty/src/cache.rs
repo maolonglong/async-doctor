@@ -1,12 +1,16 @@
 //! On-disk cache for third-party (site-packages) analysis results.
 //!
 //! Layout:
-//! `$XDG_CACHE_HOME/async-doctor/v{schema}/{tool}/{package}/{version}.json`
-//! (falls back to `~/.cache/async-doctor/...`).
+//! `{cache_root}/v{schema}/{tool}/{package}/{version}-{fingerprint}.json`
+//!
+//! `cache_root` defaults to `$XDG_CACHE_HOME/async-doctor` (or `~/.cache/...`)
+//! but callers (and tests) may inject an explicit root — never rely on mutating
+//! process-wide env vars under parallel `cargo test`.
 //!
 //! Function keys are always the External qualname used at the call site
-//! (e.g. `requests.api.get`, `libx.core.fetch`). Schema/tool versions are
-//! part of the path so stale caches never load.
+//! (e.g. `requests.api.get`, `libx.core.fetch`). Schema/tool versions plus a
+//! package content fingerprint are part of the path so editable/patched
+//! installs with the same version do not reuse a stale cache.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -14,8 +18,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// Bump when the on-disk JSON shape changes incompatibly.
-pub const CACHE_SCHEMA_VERSION: u32 = 2;
+/// Bump when the on-disk JSON shape / key layout changes incompatibly.
+pub const CACHE_SCHEMA_VERSION: u32 = 3;
 
 /// Tool version embedded in the cache path (from this crate's Cargo.toml).
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -66,6 +70,17 @@ pub struct CachedFunction {
     pub edges: Vec<CachedEdge>,
 }
 
+/// Enough to re-follow a cross-package External on a warm run without ty.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CachedFollowTarget {
+    pub qualname: String,
+    pub path: String,
+    pub name_start: u32,
+    pub package_name: Option<String>,
+    pub package_version: Option<String>,
+    pub package_fingerprint: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PackageCache {
     pub schema_version: u32,
@@ -74,6 +89,11 @@ pub struct PackageCache {
     pub version: String,
     /// Keyed by External qualname (sorted for stable files).
     pub functions: BTreeMap<String, CachedFunction>,
+    /// Cross-package (and same-package) follow targets discovered while
+    /// analyzing this package — warm runs re-inject these so later waves can
+    /// extract callees that first-party code never mentioned directly.
+    #[serde(default)]
+    pub follow_targets: BTreeMap<String, CachedFollowTarget>,
 }
 
 impl PackageCache {
@@ -84,6 +104,7 @@ impl PackageCache {
             package: package.to_string(),
             version: version.to_string(),
             functions: BTreeMap::new(),
+            follow_targets: BTreeMap::new(),
         }
     }
 
@@ -92,8 +113,8 @@ impl PackageCache {
     }
 }
 
-/// Resolve the async-doctor user cache directory root (before versioned subdirs).
-pub fn cache_root() -> PathBuf {
+/// Resolve the default async-doctor user cache directory root.
+pub fn default_cache_root() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_CACHE_HOME")
         && !xdg.is_empty()
     {
@@ -103,6 +124,13 @@ pub fn cache_root() -> PathBuf {
         return PathBuf::from(home).join(".cache").join("async-doctor");
     }
     std::env::temp_dir().join("async-doctor-cache")
+}
+
+/// Prefer an explicit root (tests / tooling); otherwise the user default.
+pub fn effective_cache_root(explicit: Option<&Path>) -> PathBuf {
+    explicit
+        .map(Path::to_path_buf)
+        .unwrap_or_else(default_cache_root)
 }
 
 fn sanitize(component: &str) -> String {
@@ -118,17 +146,130 @@ fn sanitize(component: &str) -> String {
         .collect()
 }
 
-fn package_cache_path(package: &str, version: &str) -> PathBuf {
-    cache_root()
-        .join(format!("v{CACHE_SCHEMA_VERSION}"))
+fn package_cache_path(root: &Path, package: &str, version: &str, fingerprint: &str) -> PathBuf {
+    root.join(format!("v{CACHE_SCHEMA_VERSION}"))
         .join(sanitize(TOOL_VERSION))
         .join(sanitize(package))
-        .join(format!("{}.json", sanitize(version)))
+        .join(format!(
+            "{}-{}.json",
+            sanitize(version),
+            sanitize(fingerprint)
+        ))
+}
+
+/// Fingerprint package contents so editable/patched installs invalidate cache.
+///
+/// Combines `*.dist-info/RECORD` bytes (when present) with sorted
+/// `(relpath,len,mtime)` of neighboring `.py` files so a locally patched
+/// package with an unchanged version/RECORD still misses the stale cache.
+pub fn package_content_fingerprint(dist_info_or_pkg_dir: &Path) -> String {
+    let (dist_info, pkg_dir) = if dist_info_or_pkg_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.ends_with(".dist-info"))
+    {
+        let parent = dist_info_or_pkg_dir
+            .parent()
+            .unwrap_or(dist_info_or_pkg_dir);
+        let stem = dist_info_or_pkg_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .trim_end_matches(".dist-info");
+        let top = stem.split('-').next().unwrap_or(stem);
+        // Dist names use dashes; import packages often use underscores.
+        let candidates = [top.to_string(), top.replace('-', "_")];
+        let pkg = candidates
+            .iter()
+            .map(|c| parent.join(c))
+            .find(|p| p.is_dir())
+            .unwrap_or_else(|| parent.join(top));
+        (dist_info_or_pkg_dir.to_path_buf(), pkg)
+    } else {
+        let base = if dist_info_or_pkg_dir.is_file() {
+            dist_info_or_pkg_dir
+                .parent()
+                .unwrap_or(dist_info_or_pkg_dir)
+                .to_path_buf()
+        } else {
+            dist_info_or_pkg_dir.to_path_buf()
+        };
+        (PathBuf::new(), base)
+    };
+
+    let mut blob = Vec::new();
+    let record = dist_info.join("RECORD");
+    if record.is_file()
+        && let Ok(bytes) = fs::read(&record)
+    {
+        blob.extend_from_slice(b"RECORD:");
+        blob.extend_from_slice(&bytes);
+    }
+    let mut entries: Vec<(String, u64, u64)> = Vec::new();
+    collect_py_fingerprints(&pkg_dir, &pkg_dir, &mut entries);
+    entries.sort();
+    blob.extend_from_slice(b"|PY:");
+    blob.extend_from_slice(format!("{entries:?}").as_bytes());
+    short_hash(&blob)
+}
+
+fn collect_py_fingerprints(base: &Path, dir: &Path, out: &mut Vec<(String, u64, u64)>) {
+    let Ok(walker) = fs::read_dir(dir) else {
+        return;
+    };
+    for ent in walker.flatten() {
+        let p = ent.path();
+        if p.is_dir() {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name == "__pycache__" || name.ends_with(".dist-info") {
+                continue;
+            }
+            collect_py_fingerprints(base, &p, out);
+            continue;
+        }
+        if p.extension().and_then(|e| e.to_str()) != Some("py") {
+            continue;
+        }
+        if let Ok(meta) = ent.metadata() {
+            let rel = p
+                .strip_prefix(base)
+                .map(|r| r.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|_| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string()
+                });
+            let len = meta.len();
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            out.push((rel, len, mtime));
+        }
+    }
+}
+
+fn short_hash(bytes: &[u8]) -> String {
+    // Cheap stable FNV-1a 64-bit → 16 hex chars (no extra crate).
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in bytes {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 /// Load a cached package summary when present and compatible.
-pub fn load_package_cache(package: &str, version: &str) -> Option<PackageCache> {
-    let path = package_cache_path(package, version);
+pub fn load_package_cache(
+    root: &Path,
+    package: &str,
+    version: &str,
+    fingerprint: &str,
+) -> Option<PackageCache> {
+    let path = package_cache_path(root, package, version, fingerprint);
     let data = fs::read_to_string(path).ok()?;
     let cache: PackageCache = serde_json::from_str(&data).ok()?;
     if !cache.is_compatible() {
@@ -141,8 +282,12 @@ pub fn load_package_cache(package: &str, version: &str) -> Option<PackageCache> 
 }
 
 /// Persist a package summary atomically (temp file + rename).
-pub fn save_package_cache(cache: &PackageCache) -> std::io::Result<()> {
-    let path = package_cache_path(&cache.package, &cache.version);
+pub fn save_package_cache(
+    root: &Path,
+    cache: &PackageCache,
+    fingerprint: &str,
+) -> std::io::Result<()> {
+    let path = package_cache_path(root, &cache.package, &cache.version, fingerprint);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -150,7 +295,6 @@ pub fn save_package_cache(cache: &PackageCache) -> std::io::Result<()> {
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, &data)?;
-    // rename is atomic on the same filesystem.
     fs::rename(&tmp, &path)?;
     Ok(())
 }
@@ -199,8 +343,7 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("async-doctor-cache-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        // SAFETY: isolated test dir via XDG_CACHE_HOME.
-        unsafe { std::env::set_var("XDG_CACHE_HOME", &dir) };
+        let root = dir.join("async-doctor");
 
         let mut cache = PackageCache::new("demo", "1.0.0");
         cache.functions.insert(
@@ -235,17 +378,17 @@ mod tests {
                 }],
             },
         );
-        save_package_cache(&cache).unwrap();
-        let loaded = load_package_cache("demo", "1.0.0").unwrap();
+        save_package_cache(&root, &cache, "fpdeadbeef").unwrap();
+        let loaded = load_package_cache(&root, "demo", "1.0.0", "fpdeadbeef").unwrap();
         assert_eq!(
             loaded.functions.get("demo.mod.fn").unwrap().key,
             "demo.mod.fn"
         );
         assert!(loaded.functions.contains_key("demo.mod.fn"));
-        // Wrong key format must miss.
         assert!(!loaded.functions.contains_key("demo.mod:fn"));
+        // Different fingerprint must miss.
+        assert!(load_package_cache(&root, "demo", "1.0.0", "otherfp").is_none());
 
         let _ = fs::remove_dir_all(&dir);
-        unsafe { std::env::remove_var("XDG_CACHE_HOME") };
     }
 }

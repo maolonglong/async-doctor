@@ -219,9 +219,18 @@ langgraph, home-assistant core, plus small fixtures per rule/pattern.
   third-party — they are followed when reachable, tagged `is_third_party`, and
   **never** treated as finding entries. Attribute Externals prefer the
   *receiver type* over mixin defining classes (redis `Pipeline` vs
-  `CoreCommands`). Awaited calls are never sync-IO sinks.
-- **Per-`(package, version)` disk cache** under the user cache dir, keyed by
-  External qualname and versioned by tool + schema; full edge summaries;
+  `CoreCommands`). Only the Call that is the *direct* operand of `await` /
+  `async for` iter / `async with` context is marked `is_awaited` (nested
+  argument calls like `await send(open(p).read())` stay sync sinks). Awaited
+  known-async APIs are not followed into library internals; reverse
+  propagation stops at third-party async. Third-party sinks under a
+  parameter/branch guard (e.g. PIL `if is_path(fp):`) demote to candidates.
+- **Per-`(package, version, content-fingerprint)` disk cache** under the user
+  cache dir (`v3/{tool}/{pkg}/{version}-{fingerprint}.json`), keyed by
+  External qualname; fingerprint mixes dist-info `RECORD` with `.py`
+  size+mtime so editable/patched installs invalidate. Callers (and tests)
+  may inject the cache root explicitly — do not rely on mutating
+  process-wide `XDG_CACHE_HOME` under parallel tests. Full edge summaries;
   atomic batched writes. Cold and warm runs must agree byte-for-byte.
 - **Built-in third-party rule table** (type-based + C-extension shortcut) with
   async-twin fix hints; async counterparts never fire. Redis sync `Pipeline`

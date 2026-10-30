@@ -11,8 +11,8 @@ use async_doctor_core::{
 use ruff_db::system::SystemPathBuf;
 
 use crate::cache::{
-    CachedEdge, CachedFunction, PackageCache, load_package_cache, path_str_is_third_party_python,
-    save_package_cache,
+    CachedEdge, CachedFollowTarget, CachedFunction, PackageCache, load_package_cache,
+    package_content_fingerprint, path_str_is_third_party_python, save_package_cache,
 };
 
 /// A third-party `.py` definition we may extract on demand.
@@ -23,6 +23,8 @@ pub struct FollowTarget {
     pub name_start: u32,
     pub package_name: Option<String>,
     pub package_version: Option<String>,
+    /// Content fingerprint for cache invalidation (RECORD / py mtimes).
+    pub package_fingerprint: Option<String>,
 }
 
 /// Parse `Name:` / `Version:` from a dist-info `METADATA` file.
@@ -48,8 +50,9 @@ pub fn parse_dist_info_metadata(text: &str) -> Option<(String, String)> {
     Some((name?, version?))
 }
 
-/// Locate neighboring `*.dist-info/METADATA` for a file under site-/dist-packages.
-pub fn package_meta_for_path(py_path: &Path) -> Option<(String, String)> {
+/// Locate neighboring `*.dist-info` for a file under site-/dist-packages.
+/// Returns `(name, version, content_fingerprint)`.
+pub fn package_meta_for_path(py_path: &Path) -> Option<(String, String, String)> {
     let s = py_path.to_string_lossy().replace('\\', "/");
     let (root, rest) = match (s.find("/site-packages/"), s.find("/dist-packages/")) {
         (Some(idx), _) => (
@@ -68,7 +71,6 @@ pub fn package_meta_for_path(py_path: &Path) -> Option<(String, String)> {
     }
 
     let mut entries: Vec<_> = fs::read_dir(&root).ok()?.flatten().collect();
-    // Deterministic order for identical meta discovery.
     entries.sort_by_key(|e| e.file_name());
     let top_norm = normalize_dist_name(&top);
     for entry in entries {
@@ -82,13 +84,17 @@ pub fn package_meta_for_path(py_path: &Path) -> Option<(String, String)> {
         if normalize_dist_name(dist_name) != top_norm {
             continue;
         }
-        let meta_path = entry.path().join("METADATA");
+        let dist_info = entry.path();
+        let meta_path = dist_info.join("METADATA");
         let text = fs::read_to_string(meta_path).ok()?;
-        if let Some(meta) = parse_dist_info_metadata(&text) {
-            return Some(meta);
+        if let Some((name, ver)) = parse_dist_info_metadata(&text) {
+            let fp = package_content_fingerprint(&dist_info);
+            return Some((name, ver, fp));
         }
     }
-    None
+    let pkg_dir = root.join(&top);
+    let fp = package_content_fingerprint(&pkg_dir);
+    Some((top, "unknown".to_string(), fp))
 }
 
 fn normalize_dist_name(name: &str) -> String {
@@ -111,36 +117,47 @@ pub fn is_followable_site_packages_py(path_str: &str) -> bool {
 }
 
 /// In-memory batch of package caches to flush once at the end of a follow pass.
-#[derive(Default)]
 pub struct PackageCacheBatch {
-    /// (package, version) → cache being built this run.
-    caches: BTreeMap<(String, String), PackageCache>,
+    root: PathBuf,
+    /// (package, version, fingerprint) → cache being built this run.
+    caches: BTreeMap<(String, String, String), PackageCache>,
 }
 
 impl PackageCacheBatch {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(cache_root: PathBuf) -> Self {
+        Self {
+            root: cache_root,
+            caches: BTreeMap::new(),
+        }
     }
 
-    fn cache_mut(&mut self, package: &str, version: &str) -> &mut PackageCache {
-        let key = (package.to_string(), version.to_string());
+    fn cache_mut(&mut self, package: &str, version: &str, fingerprint: &str) -> &mut PackageCache {
+        let key = (
+            package.to_string(),
+            version.to_string(),
+            fingerprint.to_string(),
+        );
+        let root = self.root.clone();
         self.caches.entry(key).or_insert_with(|| {
-            load_package_cache(package, version)
+            load_package_cache(&root, package, version, fingerprint)
                 .unwrap_or_else(|| PackageCache::new(package, version))
         })
     }
 
     /// Record one analyzed third-party function under its External qualname key.
+    #[allow(clippy::too_many_arguments)]
     pub fn upsert_function(
         &mut self,
         package: &str,
         version: &str,
+        fingerprint: &str,
         external_key: &str,
         func: &FunctionFact,
         edges: &[CallEdge],
         id_to_external_key: &HashMap<FunctionId, String>,
+        follow_targets: &HashMap<String, FollowTarget>,
     ) {
-        let cache = self.cache_mut(package, version);
+        let cache = self.cache_mut(package, version, fingerprint);
         let mut cached_edges: Vec<CachedEdge> = edges
             .iter()
             .filter(|e| e.caller == func.id)
@@ -161,6 +178,26 @@ impl PackageCacheBatch {
                     b.text.as_str(),
                 ))
         });
+        // Persist follow targets for External/third_party callees so warm runs
+        // can continue cross-package waves without re-querying ty.
+        for e in &cached_edges {
+            if !matches!(e.callee_kind.as_str(), "external" | "third_party") {
+                continue;
+            }
+            if let Some(t) = follow_targets.get(&e.callee_qualname) {
+                cache.follow_targets.insert(
+                    e.callee_qualname.clone(),
+                    CachedFollowTarget {
+                        qualname: t.qualname.clone(),
+                        path: t.path.as_str().to_string(),
+                        name_start: t.name_start,
+                        package_name: t.package_name.clone(),
+                        package_version: t.package_version.clone(),
+                        package_fingerprint: t.package_fingerprint.clone(),
+                    },
+                );
+            }
+        }
         cache.functions.insert(
             external_key.to_string(),
             CachedFunction {
@@ -180,8 +217,8 @@ impl PackageCacheBatch {
 
     /// Atomically write every dirty package cache once.
     pub fn flush(&self) {
-        for cache in self.caches.values() {
-            let _ = save_package_cache(cache);
+        for ((_, _, fp), cache) in &self.caches {
+            let _ = save_package_cache(&self.root, cache, fp);
         }
     }
 }
@@ -303,17 +340,34 @@ fn parse_literal(s: &str) -> Option<LiteralArg> {
 ///
 /// Keys in `wanted` must be External qualnames (same as cache keys).
 /// Returns the set of keys that were materialized from cache.
+#[allow(clippy::too_many_arguments)]
 pub fn materialize_cached_functions(
     facts: &mut ProjectFacts,
+    cache_root: &Path,
     package: &str,
     version: &str,
+    fingerprint: &str,
     wanted: &[String],
     qual_to_id: &mut BTreeMap<String, FunctionId>,
     id_to_external_key: &mut HashMap<FunctionId, String>,
+    follow_targets: &mut HashMap<String, FollowTarget>,
 ) -> Vec<String> {
-    let Some(cache) = load_package_cache(package, version) else {
+    let Some(cache) = load_package_cache(cache_root, package, version, fingerprint) else {
         return Vec::new();
     };
+    // Re-inject follow targets so later waves can extract cross-package callees.
+    for (q, t) in &cache.follow_targets {
+        follow_targets
+            .entry(q.clone())
+            .or_insert_with(|| FollowTarget {
+                qualname: t.qualname.clone(),
+                path: SystemPathBuf::from(t.path.as_str()),
+                name_start: t.name_start,
+                package_name: t.package_name.clone(),
+                package_version: t.package_version.clone(),
+                package_fingerprint: t.package_fingerprint.clone(),
+            });
+    }
     let mut loaded = Vec::new();
     // First pass: create FunctionFacts for wanted keys present in cache.
     let mut pending_edges: Vec<(FunctionId, Vec<CachedEdge>)> = Vec::new();

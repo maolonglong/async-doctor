@@ -271,7 +271,17 @@ pub fn analyze_with_options(
             if param_verdict == ParamVerdict::ProvablyFalse {
                 continue;
             }
-            let force_conditional = param_verdict == ParamVerdict::Unknown;
+            let mut force_conditional = param_verdict == ParamVerdict::Unknown;
+            // Third-party sinks under a param/branch guard (e.g. PIL `if is_path(fp):
+            // open(...)`) are not provable for arbitrary caller args → candidates.
+            if seed_caller_fn.is_third_party
+                && seed_edge
+                    .conditions
+                    .iter()
+                    .any(|c| c.is_branch_like() || matches!(c, ConditionTag::AsyncBranch))
+            {
+                force_conditional = true;
+            }
 
             match &seed.kind {
                 SeedKind::Sink(hit) => {
@@ -669,7 +679,12 @@ fn shortest_paths_to_async_entries(
             }
             via_edge.insert(pred, edge_idx);
             let pred_fn = facts.function(pred);
-            if pred_fn.is_async && !pred_fn.is_sync_route && !pred_fn.is_third_party {
+            // Never treat third-party async as an entry, and do not walk *through*
+            // it toward first-party callers (stops FPs via awaited library internals).
+            if pred_fn.is_third_party && pred_fn.is_async {
+                continue;
+            }
+            if pred_fn.is_async && !pred_fn.is_sync_route {
                 let mut edges = Vec::new();
                 let mut cur = pred;
                 while cur != seed_caller {

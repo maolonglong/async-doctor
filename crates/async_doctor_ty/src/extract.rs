@@ -26,16 +26,25 @@ use ty_python_semantic::{
     HasType, ImportAliasResolution, SemanticModel, definitions_for_attribute, definitions_for_name,
 };
 
-use crate::cache::third_party_module_path;
+use crate::cache::{effective_cache_root, third_party_module_path};
 use crate::db::AsyncDoctorDb;
 use crate::sitepkgs::{
     FollowTarget, PackageCacheBatch, is_followable_site_packages_py, materialize_cached_functions,
     package_meta_for_path,
 };
-use async_doctor_rules::BuiltinSinkTable;
+use async_doctor_rules::{BuiltinSinkTable, is_async_counterpart};
 
 /// Scan a project directory or a single `.py` file into graded facts.
 pub fn extract_path(path: &Path) -> anyhow::Result<ProjectFacts> {
+    extract_path_with_cache(path, None)
+}
+
+/// Extract call-graph facts, writing/reading the third-party package cache under
+/// `cache_dir` when provided (otherwise the user default cache root).
+pub fn extract_path_with_cache(
+    path: &Path,
+    cache_dir: Option<&Path>,
+) -> anyhow::Result<ProjectFacts> {
     let path = absolute_utf8(path)?;
     if path.as_std_path().is_file() {
         if path.extension() != Some("py") {
@@ -46,12 +55,12 @@ pub fn extract_path(path: &Path) -> anyhow::Result<ProjectFacts> {
             .map(SystemPath::to_path_buf)
             .unwrap_or_else(|| SystemPathBuf::from("."));
         let db = AsyncDoctorDb::open(&parent, None)?;
-        return extract_files(&db, vec![path.as_std_path().to_path_buf()]);
+        return extract_files(&db, vec![path.as_std_path().to_path_buf()], cache_dir);
     }
 
     let db = AsyncDoctorDb::open(&path, None)?;
     let files = discover_python_files(db.project_root().as_std_path())?;
-    extract_files(&db, files)
+    extract_files(&db, files, cache_dir)
 }
 
 fn absolute_utf8(path: &Path) -> anyhow::Result<SystemPathBuf> {
@@ -147,7 +156,11 @@ impl<'db> FileCtx<'db> {
     }
 }
 
-fn extract_files(db: &AsyncDoctorDb, files: Vec<PathBuf>) -> anyhow::Result<ProjectFacts> {
+fn extract_files(
+    db: &AsyncDoctorDb,
+    files: Vec<PathBuf>,
+    cache_dir: Option<&Path>,
+) -> anyhow::Result<ProjectFacts> {
     let mut facts = ProjectFacts {
         complete: true,
         ..ProjectFacts::default()
@@ -283,7 +296,8 @@ fn extract_files(db: &AsyncDoctorDb, files: Vec<PathBuf>) -> anyhow::Result<Proj
             in_lambda: false,
             skip_lambda_body: false,
             in_callee_position: false,
-            await_depth: 0,
+            pending_is_awaited: false,
+            async_with_receivers: HashMap::new(),
             occurrence_counter: HashMap::new(),
             pending_literals: Vec::new(),
             pending_callables: Vec::new(),
@@ -310,7 +324,44 @@ fn extract_files(db: &AsyncDoctorDb, files: Vec<PathBuf>) -> anyhow::Result<Proj
         &mut def_map,
         &mut qual_map,
         &mut follow_targets,
+        cache_dir,
     );
+
+    // Stable edge order so cold extract vs warm cache materialization agree.
+    // Never key on raw FunctionId — those differ between cold follow and warm
+    // materialization even when the semantic graph is identical.
+    {
+        let callee_key = |e: &CallEdge| -> String {
+            match &e.callee {
+                CalleeRef::External { qualname } => format!("E:{qualname}"),
+                CalleeRef::Unresolved { reason } => format!("U:{reason}"),
+                CalleeRef::Offload(k) => format!("O:{}", k.as_str()),
+                CalleeRef::ParamInvoke { index } => format!("I:{index}"),
+                CalleeRef::Project(id) => {
+                    let f = &facts.functions[id.index()];
+                    format!("P:{}:{}", f.module, f.qualname)
+                }
+            }
+        };
+        facts.edges.sort_by(|a, b| {
+            (
+                a.file.as_str(),
+                a.line,
+                a.occurrence,
+                a.text.as_str(),
+                callee_key(a),
+                a.caller.0,
+            )
+                .cmp(&(
+                    b.file.as_str(),
+                    b.line,
+                    b.occurrence,
+                    b.text.as_str(),
+                    callee_key(b),
+                    b.caller.0,
+                ))
+        });
+    }
 
     Ok(facts)
 }
@@ -861,8 +912,11 @@ struct CallCollector<'a, 'db> {
     skip_lambda_body: bool,
     /// True while visiting `call.func` — suppress PropertyGet on that Attribute.
     in_callee_position: bool,
-    /// Nesting depth under `await` expressions — awaited calls are never sync sinks.
-    await_depth: u32,
+    /// When true, the *next* recorded Call edge is the direct operand of
+    /// `await` / `async for` iter / `async with` context (nested arg calls are not).
+    pending_is_awaited: bool,
+    /// Locals bound by `async with <asyncio-redis> as name` → receiver type qual.
+    async_with_receivers: HashMap<String, String>,
     occurrence_counter: HashMap<(FunctionId, String), u32>,
     /// Literals for the call currently being recorded (set by handle_call).
     pending_literals: Vec<Option<LiteralArg>>,
@@ -949,58 +1003,18 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 // Do not walk lambda body by default (deferred execution).
             }
             Expr::Await(await_expr) => {
-                self.await_depth += 1;
-                self.visit_expr(&await_expr.value);
-                self.await_depth -= 1;
+                // Only the Call that is the *direct* await operand is marked awaited;
+                // nested calls in arguments (e.g. await send(open(p).read())) stay sync sinks.
+                if let Expr::Call(call) = await_expr.value.as_ref() {
+                    self.handle_call(call, true);
+                    self.walk_call_children(call);
+                } else {
+                    self.visit_expr(&await_expr.value);
+                }
             }
             Expr::Call(call) => {
-                self.handle_call(call);
-                // Still walk arguments for nested calls (except offloaded callable args).
-                let offload = self.is_offload_callee(&call.func);
-                let consumer = is_generator_consumer(&call.func);
-                if offload.is_some() {
-                    // Walk non-callable-ref args fully; skip Name/Attribute/Lambda/Partial first arg.
-                    for (i, arg) in call.arguments.args.iter().enumerate() {
-                        if i == 0 && is_callable_ref(arg) {
-                            // Offloaded: if lambda, do not analyze its body.
-                            continue;
-                        }
-                        // Eager: to_thread(f()) — walk the Call.
-                        if consumer {
-                            self.consuming_generator = true;
-                        }
-                        self.visit_expr(arg);
-                        if consumer {
-                            self.consuming_generator = false;
-                        }
-                    }
-                    for kw in &call.arguments.keywords {
-                        self.visit_expr(&kw.value);
-                    }
-                } else if consumer {
-                    // list(gen()) / next(gen()) — nested generator calls are consumed.
-                    self.in_callee_position = true;
-                    self.visit_expr(&call.func);
-                    self.in_callee_position = false;
-                    self.consuming_generator = true;
-                    for arg in &call.arguments.args {
-                        self.visit_expr(arg);
-                    }
-                    for kw in &call.arguments.keywords {
-                        self.visit_expr(&kw.value);
-                    }
-                    self.consuming_generator = false;
-                } else {
-                    self.in_callee_position = true;
-                    self.visit_expr(&call.func);
-                    self.in_callee_position = false;
-                    for arg in &call.arguments.args {
-                        self.visit_expr(arg);
-                    }
-                    for kw in &call.arguments.keywords {
-                        self.visit_expr(&kw.value);
-                    }
-                }
+                self.handle_call(call, false);
+                self.walk_call_children(call);
             }
             Expr::Attribute(attr) => {
                 if !self.in_callee_position {
@@ -1356,9 +1370,19 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 );
             }
         }
-        // Iterating consumes a generator produced by a call in the iter expr.
+        // `async for x in call(...)`: the iter Call is an async use of that one call.
         self.consuming_generator = true;
-        self.visit_expr(&for_stmt.iter);
+        if for_stmt.is_async {
+            if let Expr::Call(call) = for_stmt.iter.as_ref() {
+                self.handle_call(call, true);
+                self.walk_call_children(call);
+            } else {
+                self.visit_expr(&for_stmt.iter);
+            }
+            self.note_async_for_receivers(for_stmt);
+        } else {
+            self.visit_expr(&for_stmt.iter);
+        }
         self.consuming_generator = false;
         self.loop_depth += 1;
         self.visit_body_seq(&for_stmt.body);
@@ -1393,7 +1417,18 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             }
         }
         for item in &with_stmt.items {
-            self.visit_expr(&item.context_expr);
+            // `async with call(...) as x`: mark that one call awaited; bind asyncio receivers.
+            if with_stmt.is_async {
+                if let Expr::Call(call) = &item.context_expr {
+                    self.handle_call(call, true);
+                    self.walk_call_children(call);
+                } else {
+                    self.visit_expr(&item.context_expr);
+                }
+                self.note_async_with_receiver(item);
+            } else {
+                self.visit_expr(&item.context_expr);
+            }
             if let Some(opt) = &item.optional_vars {
                 self.visit_expr(opt);
             }
@@ -1401,7 +1436,180 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         self.visit_body_seq(&with_stmt.body);
     }
 
-    fn handle_call(&mut self, call: &'a ast::ExprCall) {
+    fn walk_call_children(&mut self, call: &'a ast::ExprCall) {
+        let offload = self.is_offload_callee(&call.func);
+        let consumer = is_generator_consumer(&call.func);
+        if offload.is_some() {
+            for (i, arg) in call.arguments.args.iter().enumerate() {
+                if i == 0 && is_callable_ref(arg) {
+                    continue;
+                }
+                if consumer {
+                    self.consuming_generator = true;
+                }
+                self.visit_expr(arg);
+                if consumer {
+                    self.consuming_generator = false;
+                }
+            }
+            for kw in &call.arguments.keywords {
+                self.visit_expr(&kw.value);
+            }
+        } else if consumer {
+            self.in_callee_position = true;
+            self.visit_expr(&call.func);
+            self.in_callee_position = false;
+            self.consuming_generator = true;
+            for arg in &call.arguments.args {
+                self.visit_expr(arg);
+            }
+            for kw in &call.arguments.keywords {
+                self.visit_expr(&kw.value);
+            }
+            self.consuming_generator = false;
+        } else {
+            self.in_callee_position = true;
+            self.visit_expr(&call.func);
+            self.in_callee_position = false;
+            for arg in &call.arguments.args {
+                self.visit_expr(arg);
+            }
+            for kw in &call.arguments.keywords {
+                self.visit_expr(&kw.value);
+            }
+        }
+    }
+
+    /// Bind `async with <asyncio redis pipeline()> as name` for receiver-type lookups.
+    fn note_async_with_receiver(&mut self, item: &ast::WithItem) {
+        let Some(vars) = &item.optional_vars else {
+            return;
+        };
+        let Expr::Name(name) = vars.as_ref() else {
+            return;
+        };
+        if let Some(recv) = self.asyncio_redis_pipeline_receiver(&item.context_expr) {
+            self.async_with_receivers
+                .insert(name.id.as_str().to_string(), recv);
+        }
+    }
+
+    fn note_async_for_receivers(&mut self, for_stmt: &ast::StmtFor) {
+        // `async for k in client.scan_iter(...)`: bind the iterator receiver when it
+        // is an asyncio-redis client so later uses of bound names stay async-keyed.
+        // The interesting type is on the method receiver (`client`), not the loop var.
+        let _ = for_stmt.target;
+        if let Some(recv) = self.asyncio_redis_iter_receiver(&for_stmt.iter) {
+            // Stash under a synthetic key used by attribute resolution on the same
+            // expression shape is unnecessary — scan_iter itself is the awaited-ish
+            // call. Receiver typing for the *call* uses type_instance_qualname /
+            // external_qualname on `client.scan_iter` directly. Still record the
+            // client name when the iter is `Name.attr(...)` so nested attrs on that
+            // same local prefer redis.asyncio.
+            if let Expr::Call(call) = for_stmt.iter.as_ref()
+                && let Expr::Attribute(attr) = call.func.as_ref()
+                && let Expr::Name(n) = attr.value.as_ref()
+            {
+                self.async_with_receivers
+                    .insert(n.id.as_str().to_string(), recv);
+            }
+        }
+    }
+
+    /// Resolve an asyncio-redis client/Pipeline type for `r.pipeline()` contexts.
+    fn asyncio_redis_pipeline_receiver(&self, expr: &Expr) -> Option<String> {
+        if let Some(ty) = self.type_instance_qualname(expr)
+            && is_asyncio_redis_type(&ty)
+        {
+            return Some(normalize_asyncio_redis_type(&ty));
+        }
+        if let Expr::Call(call) = expr {
+            // Bare Pipeline(...) or client.pipeline()
+            if let Expr::Attribute(attr) = call.func.as_ref()
+                && attr.attr.as_str() == "pipeline"
+            {
+                if let Some(recv) = self.type_instance_qualname(&attr.value)
+                    && is_asyncio_redis_type(&recv)
+                {
+                    if recv.contains("Pipeline") {
+                        return Some(normalize_asyncio_redis_type(&recv));
+                    }
+                    return Some("redis.asyncio.client.Pipeline".to_string());
+                }
+                // Heuristic when ty cannot resolve (dist-packages without venv):
+                // `r.pipeline()` where r was imported from redis.asyncio.
+                if self.expr_looks_like_asyncio_redis(&attr.value) {
+                    return Some("redis.asyncio.client.Pipeline".to_string());
+                }
+            }
+            if let Some(q) = self.external_qualname(&call.func)
+                && is_asyncio_redis_type(&q)
+                && q.contains("Pipeline")
+            {
+                return Some(normalize_asyncio_redis_type(&q));
+            }
+        }
+        None
+    }
+
+    /// Receiver type for `client.scan_iter(...)` / similar asyncio-redis iterators.
+    fn asyncio_redis_iter_receiver(&self, expr: &Expr) -> Option<String> {
+        let Expr::Call(call) = expr else {
+            return None;
+        };
+        let Expr::Attribute(attr) = call.func.as_ref() else {
+            return None;
+        };
+        if let Some(recv) = self.type_instance_qualname(&attr.value)
+            && is_asyncio_redis_type(&recv)
+        {
+            return Some(normalize_asyncio_redis_type(&recv));
+        }
+        if self.expr_looks_like_asyncio_redis(&attr.value) {
+            return Some("redis.asyncio.client.Redis".to_string());
+        }
+        None
+    }
+
+    /// True when an expression is known (via ty or import heuristics) to be asyncio redis.
+    fn expr_looks_like_asyncio_redis(&self, expr: &Expr) -> bool {
+        if let Some(ty) = self.type_instance_qualname(expr)
+            && is_asyncio_redis_type(&ty)
+        {
+            return true;
+        }
+        // Fall back to definition module path containing redis/asyncio.
+        let resolved = match expr {
+            Expr::Name(name) => definitions_for_name(
+                self.model,
+                name.id.as_str(),
+                name.into(),
+                ImportAliasResolution::ResolveAliases,
+            ),
+            Expr::Attribute(attr) => definitions_for_attribute(self.model, attr),
+            _ => Vec::new(),
+        };
+        for r in &resolved {
+            if let Some(def) = r.definition() {
+                let file = def.file(self.model.db());
+                if let FilePath::System(sys) = file.path(self.model.db()) {
+                    let s = sys.as_str().replace('\\', "/");
+                    if s.contains("/redis/asyncio/") || s.contains("/redis/asyncio.py") {
+                        return true;
+                    }
+                }
+                if let Some(q) = qualname_from_definition(self.model, def)
+                    && is_asyncio_redis_type(&q)
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn handle_call(&mut self, call: &'a ast::ExprCall, is_awaited: bool) {
+        self.pending_is_awaited = is_awaited;
         // Module-level and function-level: task spawns + imperative routes.
         self.note_task_spawn(call);
         self.note_imperative_route(call);
@@ -1688,8 +1896,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             positional_literals: std::mem::take(&mut self.pending_literals),
             positional_callables: std::mem::take(&mut self.pending_callables),
             param_guard: self.active_param_guard,
-            is_awaited: self.await_depth > 0,
+            is_awaited: self.pending_is_awaited,
         });
+        self.pending_is_awaited = false;
     }
 
     fn is_offload_callee(&self, func: &Expr) -> Option<OffloadKind> {
@@ -1830,9 +2039,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 .load(self.model.db());
             let node = fdef.node(&parsed);
             let std_path = PathBuf::from(sys.as_str());
-            let (pkg, ver) = package_meta_for_path(&std_path)
-                .map(|(n, v)| (Some(n), Some(v)))
-                .unwrap_or((None, None));
+            let (pkg, ver, fp) = package_meta_for_path(&std_path)
+                .map(|(n, v, f)| (Some(n), Some(v), Some(f)))
+                .unwrap_or((None, None, None));
             self.follow_targets.insert(
                 qualname.to_string(),
                 FollowTarget {
@@ -1841,6 +2050,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                     name_start: u32::from(node.name.range.start()),
                     package_name: pkg,
                     package_version: ver,
+                    package_fingerprint: fp,
                 },
             );
             return;
@@ -1910,10 +2120,25 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         // defining class. Mixin-inherited methods (e.g. redis CoreCommands.set
         // on a Pipeline instance) must key off the *receiver* so Pipeline
         // buffering is not mistaken for Redis IO.
-        if let Expr::Attribute(attr) = func
-            && let Some(recv) = self.type_instance_qualname(&attr.value)
-        {
-            return Some(format!("{recv}.{}", attr.attr.as_str()));
+        if let Expr::Attribute(attr) = func {
+            // Prefer bindings from `async with r.pipeline() as pipe`.
+            if let Expr::Name(n) = attr.value.as_ref()
+                && let Some(recv) = self.async_with_receivers.get(n.id.as_str())
+            {
+                return Some(format!("{recv}.{}", attr.attr.as_str()));
+            }
+            if let Some(recv) = self.type_instance_qualname(&attr.value) {
+                let recv = if is_asyncio_redis_type(&recv) {
+                    normalize_asyncio_redis_type(&recv)
+                } else {
+                    recv
+                };
+                return Some(format!("{recv}.{}", attr.attr.as_str()));
+            }
+            // dist-packages / weak typing: still recognize asyncio redis receivers.
+            if self.expr_looks_like_asyncio_redis(&attr.value) {
+                return Some(format!("redis.asyncio.client.Redis.{}", attr.attr.as_str()));
+            }
         }
 
         // Prefer definitions_for_* → file_to_module + name + enclosing class.
@@ -2127,11 +2352,13 @@ fn follow_third_party(
     def_map: &mut HashMap<DefKey, FunctionId>,
     qual_map: &mut HashMap<(String, String), FunctionId>,
     follow_targets: &mut HashMap<String, FollowTarget>,
+    cache_dir: Option<&Path>,
 ) {
     let sinks = BuiltinSinkTable::new();
     let mut qual_to_id: BTreeMap<String, FunctionId> = BTreeMap::new();
     let mut id_to_external_key: HashMap<FunctionId, String> = HashMap::new();
-    let mut cache_batch = PackageCacheBatch::new();
+    let cache_root = effective_cache_root(cache_dir);
+    let mut cache_batch = PackageCacheBatch::new(cache_root.clone());
     let mut by_caller = edges_by_caller(facts);
 
     // Forward BFS from async entries over Project edges (BTreeSet worklist = sorted).
@@ -2163,6 +2390,12 @@ fn follow_third_party(
                     }
                 }
                 CalleeRef::External { qualname } => {
+                    // Do not follow awaited known-async APIs (redis.asyncio /
+                    // AsyncConnection / …) — their internals are not sync-IO evidence.
+                    // Unknown third-party async (e.g. libz.fetch → time.sleep) still follows.
+                    if edge.is_awaited && is_async_counterpart(qualname) {
+                        continue;
+                    }
                     // Known sinks stay External forever — never follow/rewrite them.
                     if sinks.lookup(qualname).is_some() {
                         continue;
@@ -2174,17 +2407,21 @@ fn follow_third_party(
         }
     }
 
-    // Group by package (BTreeMap = sorted).
-    let mut by_package: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
+    // Group by package+fingerprint (BTreeMap = sorted).
+    let mut by_package: BTreeMap<(String, String, String), Vec<String>> = BTreeMap::new();
     let mut no_meta: Vec<String> = Vec::new();
     for q in &pending_externals {
         let Some(target) = follow_targets.get(q) else {
             continue;
         };
-        match (&target.package_name, &target.package_version) {
-            (Some(n), Some(v)) => {
+        match (
+            &target.package_name,
+            &target.package_version,
+            &target.package_fingerprint,
+        ) {
+            (Some(n), Some(v), Some(fp)) => {
                 by_package
-                    .entry((n.clone(), v.clone()))
+                    .entry((n.clone(), v.clone(), fp.clone()))
                     .or_default()
                     .push(q.clone());
             }
@@ -2198,15 +2435,18 @@ fn follow_third_party(
     no_meta.sort();
     no_meta.dedup();
 
-    for ((pkg, ver), wanted) in &by_package {
+    for ((pkg, ver, fp), wanted) in &by_package {
         let edge_before = facts.edges.len();
         let loaded = materialize_cached_functions(
             facts,
+            &cache_root,
             pkg,
             ver,
+            fp,
             wanted,
             &mut qual_to_id,
             &mut id_to_external_key,
+            follow_targets,
         );
         extend_edges_by_caller(facts, &mut by_caller, edge_before);
         for q in &loaded {
@@ -2229,17 +2469,20 @@ fn follow_third_party(
                 id_to_external_key.insert(id, q.clone());
                 reachable_fns.insert(id);
                 extend_edges_by_caller(facts, &mut by_caller, edge_before);
-                if let (Some(pn), Some(pv)) = (
+                if let (Some(pn), Some(pv), Some(pfp)) = (
                     facts.functions[id.index()].package_name.clone(),
                     facts.functions[id.index()].package_version.clone(),
+                    target.package_fingerprint.clone(),
                 ) {
                     cache_batch.upsert_function(
                         &pn,
                         &pv,
+                        &pfp,
                         q,
                         &facts.functions[id.index()],
                         &facts.edges,
                         &id_to_external_key,
+                        follow_targets,
                     );
                 }
             }
@@ -2264,76 +2507,166 @@ fn follow_third_party(
         }
     }
 
-    // Single rewrite pass: External → Project only when we extracted the callee
-    // AND the External is not a known sink (preserve rule-table findings).
+    // Rewrite after the initial package/cache wave.
     rewrite_external_to_project(facts, &qual_to_id, &sinks);
 
-    // Collect second-wave follow candidates deterministically, then apply budget.
-    let mut wave_candidates: BTreeMap<String, u32> = BTreeMap::new();
-    for &fid in &reachable_fns {
-        let Some(edge_ids) = by_caller.get(fid.index()) else {
-            continue;
-        };
-        for &ei in edge_ids {
-            let edge = &facts.edges[ei];
-            if edge.is_offload_wrapper {
-                continue;
-            }
-            let CalleeRef::External { qualname } = &edge.callee else {
+    // Further waves until fixpoint or budget — a single extra wave misses deep
+    // site-packages chains (liba→libb→libc→libd→sleep) and made cold miss
+    // paths that warm transitive cache materialization could still expose.
+    const FOLLOW_BUDGET: usize = 256;
+    let mut followed: usize = 0;
+    loop {
+        let mut wave_candidates: BTreeMap<String, u32> = BTreeMap::new();
+        for &fid in &reachable_fns {
+            let Some(edge_ids) = by_caller.get(fid.index()) else {
                 continue;
             };
-            if sinks.lookup(qualname).is_some() {
-                continue;
+            for &ei in edge_ids {
+                let edge = &facts.edges[ei];
+                if edge.is_offload_wrapper {
+                    continue;
+                }
+                let CalleeRef::External { qualname } = &edge.callee else {
+                    continue;
+                };
+                if edge.is_awaited && is_async_counterpart(qualname) {
+                    continue;
+                }
+                if sinks.lookup(qualname).is_some() {
+                    continue;
+                }
+                if qual_to_id.contains_key(qualname) {
+                    continue;
+                }
+                if !follow_targets.contains_key(qualname) {
+                    continue;
+                }
+                *wave_candidates.entry(qualname.clone()).or_insert(0) += 1;
             }
-            if qual_to_id.contains_key(qualname) {
-                continue;
-            }
-            if !follow_targets.contains_key(qualname) {
-                continue;
-            }
-            *wave_candidates.entry(qualname.clone()).or_insert(0) += 1;
         }
-    }
-
-    // Relevance: more callers first, then qualname ascending. Never drop sinks (already excluded).
-    const FOLLOW_BUDGET: usize = 256;
-    let mut ranked: Vec<(u32, String)> = wave_candidates.into_iter().map(|(q, n)| (n, q)).collect();
-    ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    ranked.truncate(FOLLOW_BUDGET);
-
-    for (_count, qualname) in ranked {
-        if qual_to_id.contains_key(&qualname) {
-            continue;
+        if wave_candidates.is_empty() {
+            break;
         }
-        let Some(target) = follow_targets.get(&qualname).cloned() else {
-            continue;
-        };
-        let edge_before = facts.edges.len();
-        if let Some(id) =
-            extract_third_party_function(db, facts, def_map, qual_map, follow_targets, &target)
-        {
-            qual_to_id.insert(qualname.clone(), id);
-            id_to_external_key.insert(id, qualname.clone());
-            reachable_fns.insert(id);
-            extend_edges_by_caller(facts, &mut by_caller, edge_before);
-            if let (Some(pn), Some(pv)) = (
-                facts.functions[id.index()].package_name.clone(),
-                facts.functions[id.index()].package_version.clone(),
+        // Relevance: more callers first, then qualname ascending.
+        let mut ranked: Vec<(u32, String)> =
+            wave_candidates.into_iter().map(|(q, n)| (n, q)).collect();
+        ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        let remaining = FOLLOW_BUDGET.saturating_sub(followed);
+        if remaining == 0 {
+            break;
+        }
+        ranked.truncate(remaining);
+
+        let mut progressed = false;
+        // Try cache hits for this wave's packages before extracting.
+        let mut wave_by_pkg: BTreeMap<(String, String, String), Vec<String>> = BTreeMap::new();
+        let mut wave_no_meta: Vec<String> = Vec::new();
+        for (_count, q) in &ranked {
+            let Some(target) = follow_targets.get(q) else {
+                continue;
+            };
+            match (
+                &target.package_name,
+                &target.package_version,
+                &target.package_fingerprint,
             ) {
-                cache_batch.upsert_function(
-                    &pn,
-                    &pv,
-                    &qualname,
-                    &facts.functions[id.index()],
-                    &facts.edges,
-                    &id_to_external_key,
-                );
+                (Some(n), Some(v), Some(fp)) => {
+                    wave_by_pkg
+                        .entry((n.clone(), v.clone(), fp.clone()))
+                        .or_default()
+                        .push(q.clone());
+                }
+                _ => wave_no_meta.push(q.clone()),
             }
         }
-    }
+        for ((pkg, ver, fp), wanted) in &wave_by_pkg {
+            let edge_before = facts.edges.len();
+            let loaded = materialize_cached_functions(
+                facts,
+                &cache_root,
+                pkg,
+                ver,
+                fp,
+                wanted,
+                &mut qual_to_id,
+                &mut id_to_external_key,
+                follow_targets,
+            );
+            if !loaded.is_empty() {
+                progressed = true;
+                extend_edges_by_caller(facts, &mut by_caller, edge_before);
+                for q in &loaded {
+                    if let Some(id) = qual_to_id.get(q) {
+                        reachable_fns.insert(*id);
+                    }
+                    followed += 1;
+                }
+            }
+        }
 
-    // Final rewrite after the budgeted wave.
-    rewrite_external_to_project(facts, &qual_to_id, &sinks);
+        for (_count, qualname) in ranked {
+            if qual_to_id.contains_key(&qualname) {
+                continue;
+            }
+            if followed >= FOLLOW_BUDGET {
+                break;
+            }
+            let Some(target) = follow_targets.get(&qualname).cloned() else {
+                continue;
+            };
+            let edge_before = facts.edges.len();
+            if let Some(id) =
+                extract_third_party_function(db, facts, def_map, qual_map, follow_targets, &target)
+            {
+                qual_to_id.insert(qualname.clone(), id);
+                id_to_external_key.insert(id, qualname.clone());
+                reachable_fns.insert(id);
+                extend_edges_by_caller(facts, &mut by_caller, edge_before);
+                followed += 1;
+                progressed = true;
+                if let (Some(pn), Some(pv), Some(pfp)) = (
+                    facts.functions[id.index()].package_name.clone(),
+                    facts.functions[id.index()].package_version.clone(),
+                    target.package_fingerprint.clone(),
+                ) {
+                    cache_batch.upsert_function(
+                        &pn,
+                        &pv,
+                        &pfp,
+                        &qualname,
+                        &facts.functions[id.index()],
+                        &facts.edges,
+                        &id_to_external_key,
+                        follow_targets,
+                    );
+                }
+            }
+        }
+        for q in &wave_no_meta {
+            if qual_to_id.contains_key(q) || followed >= FOLLOW_BUDGET {
+                continue;
+            }
+            let Some(target) = follow_targets.get(q).cloned() else {
+                continue;
+            };
+            let edge_before = facts.edges.len();
+            if let Some(id) =
+                extract_third_party_function(db, facts, def_map, qual_map, follow_targets, &target)
+            {
+                qual_to_id.insert(q.clone(), id);
+                id_to_external_key.insert(id, q.clone());
+                reachable_fns.insert(id);
+                extend_edges_by_caller(facts, &mut by_caller, edge_before);
+                followed += 1;
+                progressed = true;
+            }
+        }
+
+        rewrite_external_to_project(facts, &qual_to_id, &sinks);
+        if !progressed {
+            break;
+        }
+    }
 
     // One atomic write per dirty package.
     cache_batch.flush();
@@ -2535,7 +2868,8 @@ fn extract_third_party_function(
         in_lambda: false,
         skip_lambda_body: false,
         in_callee_position: false,
-        await_depth: 0,
+        pending_is_awaited: false,
+        async_with_receivers: HashMap::new(),
         occurrence_counter: HashMap::new(),
         pending_literals: Vec::new(),
         pending_callables: Vec::new(),
@@ -2552,6 +2886,25 @@ fn is_getattr_call(func: &Expr) -> bool {
         Expr::Attribute(a) => a.attr.as_str() == "getattr",
         _ => false,
     }
+}
+
+/// True for redis.asyncio types (client, pipeline, connection, …).
+fn is_asyncio_redis_type(ty: &str) -> bool {
+    ty.contains("redis.asyncio") || ty.contains("asyncio.client.Pipeline")
+}
+
+/// Canonicalize asyncio-redis type strings so site- and dist-packages agree.
+fn normalize_asyncio_redis_type(ty: &str) -> String {
+    if ty.contains("Pipeline") {
+        return "redis.asyncio.client.Pipeline".to_string();
+    }
+    if ty.contains("Redis") || ty.ends_with(".StrictRedis") {
+        return "redis.asyncio.client.Redis".to_string();
+    }
+    if let Some(rest) = ty.strip_prefix("redis.asyncio.") {
+        return format!("redis.asyncio.{rest}");
+    }
+    ty.to_string()
 }
 
 fn is_task_spawn_callee(func: &Expr) -> bool {

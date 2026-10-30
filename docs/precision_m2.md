@@ -39,7 +39,7 @@ every extraction. litellm cold is now ~0.9× the earlier M1-era ~29s baseline
 cited in review (target was ≤1.2×).
 
 Warm runs with a real site-packages follow path are faster because the
-versioned package cache (`v{schema}/{tool}/{package}/{version}.json`) stores
+versioned package cache (`v{schema}/{tool}/{package}/{version}-{fingerprint}.json`) stores
 full edge summaries under External qualname keys and materializes transitive
 callees without re-parsing.
 
