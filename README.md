@@ -23,22 +23,33 @@ cargo run -p async_doctor -- --include-non-production --show-unresolved .
 # Long-form rule help / site evidence (agent-facing):
 cargo run -p async_doctor -- explain blocking-sleep
 cargo run -p async_doctor -- why helpers.py:5 --path fixtures/m1_multihop
+
+# CI / agent loops (analysis is always whole-project; reporting is filtered):
+cargo run -p async_doctor -- --changed .
+cargo run -p async_doctor -- --changed=origin/main .
+cargo run -p async_doctor -- --write-baseline baseline.json .
+cargo run -p async_doctor -- --baseline baseline.json .
 ```
 
 Every finding includes the full call chain (file:line per hop), a concrete fix
 hint, a stable rule id, a `docsAnchor` into [docs/rules.md](docs/rules.md), and
 a runnable `why` command.
 
+Inline suppressions (reason required):
+`# async-doctor: ignore[blocking-sleep]: <why this is safe>`. Unused ignores fail
+the run.
+
 Exit codes:
 
 | Code | Meaning |
 |------|---------|
-| 0 | No findings |
-| 1 | Findings present |
+| 0 | Clean — no findings (or no *new* findings vs `--baseline`), and no unused suppressions |
+| 1 | Findings present (or unused suppressions) |
 | 2 | Tool error |
 
 Incomplete analysis sets `complete=false` in JSON (and warns on stderr); it
-does **not** use exit code 2. Candidates never affect the exit code.
+does **not** use exit code 2. Candidates never affect the exit code. Baseline
+fingerprints use stable finding ids (rule + symbol path + sink), not line numbers.
 
 By default, entries under `tests/` / `docs/` / `examples/` / `scripts/` /
 hidden dirs are skipped (count shown in the summary;

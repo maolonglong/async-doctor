@@ -12,12 +12,33 @@ use async_doctor_core::{Candidate, EntryLabel, Finding, Report};
 pub struct TextOptions {
     /// When true, print every finding with its full chain (JSON-parity volume).
     pub expand: bool,
+    /// Findings suppressed by `--baseline`.
+    pub suppressed_by_baseline: u32,
+    /// Findings suppressed by inline `# async-doctor: ignore[...]`.
+    pub suppressed_by_ignore: u32,
 }
 
 pub fn write_report(report: &Report, opts: TextOptions) -> anyhow::Result<()> {
     let mut out = std::io::stdout().lock();
     if report.findings.is_empty() {
-        writeln!(out, "No findings.")?;
+        write!(out, "No findings.")?;
+        let mut parts = Vec::new();
+        if opts.suppressed_by_baseline > 0 {
+            parts.push(format!(
+                "{} suppressed by baseline",
+                opts.suppressed_by_baseline
+            ));
+        }
+        if opts.suppressed_by_ignore > 0 {
+            parts.push(format!(
+                "{} suppressed by inline ignore",
+                opts.suppressed_by_ignore
+            ));
+        }
+        if !parts.is_empty() {
+            write!(out, " ({})", parts.join(", "))?;
+        }
+        writeln!(out)?;
     } else if opts.expand {
         writeln!(out, "Found {} finding(s):\n", report.findings.len())?;
         for finding in &report.findings {
@@ -73,6 +94,20 @@ pub fn write_report(report: &Report, opts: TextOptions) -> anyhow::Result<()> {
                 },
                 pat.sites,
                 if pat.sites == 1 { "" } else { "s" }
+            )?;
+        }
+    }
+    if !report.unused_suppressions.is_empty() {
+        writeln!(
+            out,
+            "\nUnused suppressions ({}):",
+            report.unused_suppressions.len()
+        )?;
+        for u in &report.unused_suppressions {
+            writeln!(
+                out,
+                "  {}:{}  ignore[{}] — {}",
+                u.file, u.line, u.rule, u.reason
             )?;
         }
     }
