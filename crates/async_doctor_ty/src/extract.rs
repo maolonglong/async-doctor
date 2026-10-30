@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use async_doctor_core::{
-    CallEdge, CallKind, CalleeRef, ConditionTag, EntryLabel, FunctionFact, FunctionId, OffloadKind,
-    ProjectFacts,
+    CallEdge, CallKind, CalleeRef, ConditionTag, EntryLabel, FunctionFact, FunctionId, LiteralArg,
+    OffloadKind, ParamGuard, ProjectFacts,
 };
 use ignore::WalkBuilder;
 use ruff_db::files::{File, FilePath, system_path_to_file};
@@ -249,6 +249,7 @@ fn extract_files(db: &AsyncDoctorDb, files: Vec<PathBuf>) -> anyhow::Result<Proj
             source: source.as_str().to_string(),
             index,
         };
+        let module_constants = collect_module_constants(parsed.suite());
         let mut visitor = CallCollector {
             ctx: &ctx,
             model: &model,
@@ -256,14 +257,20 @@ fn extract_files(db: &AsyncDoctorDb, files: Vec<PathBuf>) -> anyhow::Result<Proj
             def_map: &def_map,
             qual_map: &qual_map,
             task_targets: &mut task_targets,
+            module_constants: &module_constants,
             current_fn: None,
+            current_param_names: Vec::new(),
             class_stack: Vec::new(),
             dead_depth: 0,
             loop_depth: 0,
             branch_depth: 0,
+            cache_miss_depth: 0,
+            active_param_guard: None,
+            consuming_generator: false,
             in_lambda: false,
             skip_lambda_body: false,
             occurrence_counter: HashMap::new(),
+            pending_literals: Vec::new(),
         };
         for stmt in parsed.suite() {
             visitor.visit_stmt(stmt);
@@ -351,6 +358,11 @@ fn collect_functions(
                     self.qual_map
                         .insert((self.ctx.module.clone(), qualname.clone()), id);
 
+                    let param_names: Vec<String> = func
+                        .parameters
+                        .iter_non_variadic_params()
+                        .map(|a| a.parameter.name.as_str().to_string())
+                        .collect();
                     self.facts.functions.push(FunctionFact {
                         id,
                         file: self.ctx.rel.clone(),
@@ -358,9 +370,11 @@ fn collect_functions(
                         module: self.ctx.module.clone(),
                         qualname,
                         is_async: func.is_async,
+                        is_generator: body_has_yield(&func.body),
                         label,
                         is_sync_route,
                         async_twins: Vec::new(),
+                        param_names,
                     });
 
                     // Nested functions.
@@ -481,6 +495,212 @@ fn decorator_is_lifecycle(expr: &Expr) -> bool {
     }
 }
 
+/// Module-level constant value we can prove (assigned once, never reassigned).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModuleConst {
+    True,
+    False,
+    None,
+    /// Empty tuple/list/dict/set/string — falsy.
+    Empty,
+}
+
+fn body_has_yield(body: &[Stmt]) -> bool {
+    struct YieldFinder {
+        found: bool,
+    }
+    impl<'a> Visitor<'a> for YieldFinder {
+        fn visit_expr(&mut self, expr: &'a Expr) {
+            if self.found {
+                return;
+            }
+            match expr {
+                Expr::Yield(_) | Expr::YieldFrom(_) => {
+                    self.found = true;
+                }
+                _ => walk_expr(self, expr),
+            }
+        }
+        fn visit_stmt(&mut self, stmt: &'a Stmt) {
+            if self.found {
+                return;
+            }
+            // Nested function defs have their own generator status.
+            if matches!(stmt, Stmt::FunctionDef(_)) {
+                return;
+            }
+            walk_stmt(self, stmt);
+        }
+    }
+    let mut v = YieldFinder { found: false };
+    for s in body {
+        v.visit_stmt(s);
+        if v.found {
+            return true;
+        }
+    }
+    false
+}
+
+fn const_value(expr: &Expr) -> Option<ModuleConst> {
+    match expr {
+        Expr::BooleanLiteral(b) => Some(if b.value {
+            ModuleConst::True
+        } else {
+            ModuleConst::False
+        }),
+        Expr::NoneLiteral(_) => Some(ModuleConst::None),
+        Expr::Tuple(t) if t.elts.is_empty() => Some(ModuleConst::Empty),
+        Expr::List(l) if l.elts.is_empty() => Some(ModuleConst::Empty),
+        Expr::Dict(d) if d.items.is_empty() => Some(ModuleConst::Empty),
+        Expr::Set(s) if s.elts.is_empty() => Some(ModuleConst::Empty),
+        Expr::StringLiteral(s) if s.value.to_str().is_empty() => Some(ModuleConst::Empty),
+        Expr::Call(call)
+            if matches!(
+                call.func.as_ref(),
+                Expr::Name(n) if matches!(n.id.as_str(), "dict" | "list" | "set" | "tuple")
+            ) && call.arguments.args.is_empty()
+                && call.arguments.keywords.is_empty() =>
+        {
+            Some(ModuleConst::Empty)
+        }
+        _ => None,
+    }
+}
+
+fn collect_module_constants(suite: &[Stmt]) -> HashMap<String, ModuleConst> {
+    let mut assign_count: HashMap<String, u32> = HashMap::new();
+    let mut values: HashMap<String, ModuleConst> = HashMap::new();
+
+    let bump = |counts: &mut HashMap<String, u32>, name: &str| {
+        *counts.entry(name.to_string()).or_insert(0) += 1;
+    };
+
+    for stmt in suite {
+        match stmt {
+            Stmt::Assign(a) => {
+                if a.targets.len() != 1 {
+                    continue;
+                }
+                let Expr::Name(n) = &a.targets[0] else {
+                    continue;
+                };
+                let name = n.id.as_str();
+                bump(&mut assign_count, name);
+                if let Some(v) = const_value(&a.value) {
+                    values.insert(name.to_string(), v);
+                } else {
+                    values.remove(name);
+                }
+            }
+            Stmt::AnnAssign(a) => {
+                let Expr::Name(n) = a.target.as_ref() else {
+                    continue;
+                };
+                let name = n.id.as_str();
+                bump(&mut assign_count, name);
+                if let Some(val) = &a.value {
+                    if let Some(v) = const_value(val) {
+                        values.insert(name.to_string(), v);
+                    } else {
+                        values.remove(name);
+                    }
+                }
+            }
+            Stmt::AugAssign(a) => {
+                if let Expr::Name(n) = a.target.as_ref() {
+                    bump(&mut assign_count, n.id.as_str());
+                    // Force count >= 2 so we drop it as unstable.
+                    bump(&mut assign_count, n.id.as_str());
+                    values.remove(n.id.as_str());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    values.retain(|k, _| assign_count.get(k).copied().unwrap_or(0) == 1);
+    values
+}
+
+fn literal_arg(expr: &Expr) -> Option<LiteralArg> {
+    match expr {
+        Expr::BooleanLiteral(b) => Some(if b.value {
+            LiteralArg::True
+        } else {
+            LiteralArg::False
+        }),
+        Expr::NoneLiteral(_) => Some(LiteralArg::None),
+        _ => None,
+    }
+}
+
+fn is_generator_consumer(func: &Expr) -> bool {
+    match func {
+        Expr::Name(n) => matches!(
+            n.id.as_str(),
+            "list" | "tuple" | "set" | "next" | "sorted" | "frozenset"
+        ),
+        Expr::Attribute(a) => matches!(
+            a.attr.as_str(),
+            "list" | "tuple" | "set" | "next" | "sorted" | "frozenset"
+        ),
+        _ => false,
+    }
+}
+
+/// Detect `if flag:` / `if not flag:` where `flag` is a positional parameter.
+fn param_guard_from_test(test: &Expr, param_names: &[String]) -> Option<ParamGuard> {
+    let (name, inverted) = match test {
+        Expr::Name(n) => (n.id.as_str(), false),
+        Expr::UnaryOp(u) if matches!(u.op, ast::UnaryOp::Not) => match u.operand.as_ref() {
+            Expr::Name(n) => (n.id.as_str(), true),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    param_names
+        .iter()
+        .position(|p| p == name)
+        .map(|index| ParamGuard {
+            index: index as u32,
+            inverted,
+        })
+}
+
+/// Cheap cache-miss tests: `x is None`, `k not in cache`.
+fn is_cache_miss_test(test: &Expr) -> bool {
+    match test {
+        Expr::Compare(cmp) if cmp.ops.len() == 1 => {
+            let op = cmp.ops[0];
+            match op {
+                ast::CmpOp::Is => {
+                    // `cache is None`
+                    matches!(cmp.operands.get(1), Some(Expr::NoneLiteral(_)))
+                        && matches!(cmp.operands.first(), Some(Expr::Name(_)))
+                }
+                ast::CmpOp::NotIn => {
+                    // `key not in cache`
+                    matches!(cmp.operands.get(1), Some(Expr::Name(_)))
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+fn is_always_truthy(test: &Expr, constants: &HashMap<String, ModuleConst>) -> bool {
+    match test {
+        Expr::BooleanLiteral(b) => b.value,
+        Expr::Name(n) => matches!(constants.get(n.id.as_str()), Some(ModuleConst::True)),
+        Expr::UnaryOp(u) if matches!(u.op, ast::UnaryOp::Not) => {
+            is_dead_branch_test(u.operand.as_ref(), constants)
+        }
+        _ => false,
+    }
+}
+
 struct CallCollector<'a, 'db> {
     ctx: &'a FileCtx<'db>,
     model: &'a SemanticModel<'db>,
@@ -488,15 +708,23 @@ struct CallCollector<'a, 'db> {
     def_map: &'a HashMap<DefKey, FunctionId>,
     qual_map: &'a HashMap<(String, String), FunctionId>,
     task_targets: &'a mut TaskTargets,
+    module_constants: &'a HashMap<String, ModuleConst>,
     current_fn: Option<FunctionId>,
+    current_param_names: Vec<String>,
     class_stack: Vec<String>,
     dead_depth: u32,
     loop_depth: u32,
     branch_depth: u32,
+    cache_miss_depth: u32,
+    active_param_guard: Option<ParamGuard>,
+    /// True while visiting an expression that consumes a generator.
+    consuming_generator: bool,
     in_lambda: bool,
     /// When true, the enclosing lambda was passed to an offload boundary.
     skip_lambda_body: bool,
     occurrence_counter: HashMap<(FunctionId, String), u32>,
+    /// Literals for the call currently being recorded (set by handle_call).
+    pending_literals: Vec<Option<LiteralArg>>,
 }
 
 impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
@@ -516,11 +744,16 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                     .get(&(self.ctx.module.clone(), qualname))
                     .copied();
                 let prev = self.current_fn;
+                let prev_params = std::mem::take(&mut self.current_param_names);
                 self.current_fn = fid;
+                self.current_param_names = fid
+                    .map(|id| self.facts.function(id).param_names.clone())
+                    .unwrap_or_default();
                 for s in &func.body {
                     self.visit_stmt(s);
                 }
                 self.current_fn = prev;
+                self.current_param_names = prev_params;
             }
             Stmt::ClassDef(class) => {
                 self.class_stack.push(class.name.as_str().to_string());
@@ -545,6 +778,8 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 }
             }
             Stmt::With(with_stmt) => self.visit_with(with_stmt),
+            Stmt::Try(try_stmt) => self.visit_try(try_stmt),
+            Stmt::Match(match_stmt) => self.visit_match(match_stmt),
             other => walk_stmt(self, other),
         }
     }
@@ -565,6 +800,7 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 self.handle_call(call);
                 // Still walk arguments for nested calls (except offloaded callable args).
                 let offload = self.is_offload_callee(&call.func);
+                let consumer = is_generator_consumer(&call.func);
                 if offload.is_some() {
                     // Walk non-callable-ref args fully; skip Name/Attribute/Lambda/Partial first arg.
                     for (i, arg) in call.arguments.args.iter().enumerate() {
@@ -573,14 +809,36 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                             continue;
                         }
                         // Eager: to_thread(f()) — walk the Call.
+                        if consumer {
+                            self.consuming_generator = true;
+                        }
+                        self.visit_expr(arg);
+                        if consumer {
+                            self.consuming_generator = false;
+                        }
+                    }
+                    for kw in &call.arguments.keywords {
+                        self.visit_expr(&kw.value);
+                    }
+                } else if consumer {
+                    // list(gen()) / next(gen()) — nested generator calls are consumed.
+                    self.visit_expr(&call.func);
+                    self.consuming_generator = true;
+                    for arg in &call.arguments.args {
                         self.visit_expr(arg);
                     }
                     for kw in &call.arguments.keywords {
                         self.visit_expr(&kw.value);
                     }
+                    self.consuming_generator = false;
                 } else {
                     walk_expr(self, expr);
                 }
+            }
+            Expr::YieldFrom(yf) => {
+                self.consuming_generator = true;
+                self.visit_expr(&yf.value);
+                self.consuming_generator = false;
             }
             _ => walk_expr(self, expr),
         }
@@ -593,19 +851,28 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         if self.loop_depth > 0 {
             tags.push(ConditionTag::Loop);
         }
-        if self.branch_depth > 0 {
+        // Prove-only: never emit unconditional/all-paths under any guard.
+        if self.cache_miss_depth > 0 {
+            tags.push(ConditionTag::CacheMissDependent);
+        } else if self.branch_depth > 0 {
             tags.push(ConditionTag::AsyncBranch);
         } else if self.loop_depth == 0 {
             tags.push(ConditionTag::Unconditional);
-        }
-        if self.branch_depth == 0 && self.loop_depth == 0 {
             tags.push(ConditionTag::AllPaths);
         }
         tags
     }
 
     fn visit_if(&mut self, if_stmt: &'a ast::StmtIf) {
-        let dead = is_dead_branch_test(&if_stmt.test);
+        let dead = is_dead_branch_test(&if_stmt.test, self.module_constants);
+        let always = is_always_truthy(&if_stmt.test, self.module_constants);
+        let cache_miss = !dead && is_cache_miss_test(&if_stmt.test);
+        let param_guard = if dead {
+            None
+        } else {
+            param_guard_from_test(&if_stmt.test, &self.current_param_names)
+        };
+
         if dead {
             self.dead_depth += 1;
         } else {
@@ -613,11 +880,22 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
         if !dead {
             self.branch_depth += 1;
+            if cache_miss {
+                self.cache_miss_depth += 1;
+            }
+        }
+        let prev_guard = self.active_param_guard;
+        if let Some(g) = param_guard {
+            self.active_param_guard = Some(g);
         }
         for s in &if_stmt.body {
             self.visit_stmt(s);
         }
+        self.active_param_guard = prev_guard;
         if !dead {
+            if cache_miss {
+                self.cache_miss_depth -= 1;
+            }
             self.branch_depth -= 1;
         }
         if dead {
@@ -625,24 +903,98 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
 
         for clause in &if_stmt.elif_else_clauses {
-            let elif_dead = clause.test.as_ref().is_some_and(is_dead_branch_test);
+            let is_else = clause.test.is_none();
+            let elif_dead = if is_else {
+                // else of a provably-true if is unreachable.
+                always
+            } else {
+                clause
+                    .test
+                    .as_ref()
+                    .is_some_and(|t| is_dead_branch_test(t, self.module_constants))
+            };
+            let elif_cache = clause
+                .test
+                .as_ref()
+                .is_some_and(|t| !elif_dead && is_cache_miss_test(t));
+            let elif_guard = clause.test.as_ref().and_then(|t| {
+                if elif_dead {
+                    None
+                } else {
+                    param_guard_from_test(t, &self.current_param_names)
+                }
+            });
             if elif_dead {
                 self.dead_depth += 1;
             } else if let Some(test) = &clause.test {
                 self.visit_expr(test);
             }
+            // else / elif always counts as a branch when live — never unconditional.
             if !elif_dead {
                 self.branch_depth += 1;
+                if elif_cache {
+                    self.cache_miss_depth += 1;
+                }
+            }
+            let prev_guard = self.active_param_guard;
+            if let Some(g) = elif_guard {
+                self.active_param_guard = Some(g);
             }
             for s in &clause.body {
                 self.visit_stmt(s);
             }
+            self.active_param_guard = prev_guard;
             if !elif_dead {
+                if elif_cache {
+                    self.cache_miss_depth -= 1;
+                }
                 self.branch_depth -= 1;
             }
             if elif_dead {
                 self.dead_depth -= 1;
             }
+        }
+    }
+
+    fn visit_try(&mut self, try_stmt: &'a ast::StmtTry) {
+        // Any try/except/else/finally path is guarded — not unconditional.
+        self.branch_depth += 1;
+        for s in &try_stmt.body {
+            self.visit_stmt(s);
+        }
+        self.branch_depth -= 1;
+        for handler in &try_stmt.handlers {
+            let ast::ExceptHandler::ExceptHandler(h) = handler;
+            if let Some(type_) = &h.type_ {
+                self.visit_expr(type_);
+            }
+            self.branch_depth += 1;
+            for s in &h.body {
+                self.visit_stmt(s);
+            }
+            self.branch_depth -= 1;
+        }
+        self.branch_depth += 1;
+        for s in &try_stmt.orelse {
+            self.visit_stmt(s);
+        }
+        self.branch_depth -= 1;
+        // finally always runs, but keep conservative (still a try-related path).
+        self.branch_depth += 1;
+        for s in &try_stmt.finalbody {
+            self.visit_stmt(s);
+        }
+        self.branch_depth -= 1;
+    }
+
+    fn visit_match(&mut self, match_stmt: &'a ast::StmtMatch) {
+        self.visit_expr(&match_stmt.subject);
+        for case in &match_stmt.cases {
+            self.branch_depth += 1;
+            for s in &case.body {
+                self.visit_stmt(s);
+            }
+            self.branch_depth -= 1;
         }
     }
 
@@ -663,7 +1015,10 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 );
             }
         }
+        // Iterating consumes a generator produced by a call in the iter expr.
+        self.consuming_generator = true;
         self.visit_expr(&for_stmt.iter);
+        self.consuming_generator = false;
         self.loop_depth += 1;
         for s in &for_stmt.body {
             self.visit_stmt(s);
@@ -723,6 +1078,8 @@ impl<'a, 'db> CallCollector<'a, 'db> {
 
         self.note_task_spawn(call);
 
+        self.pending_literals = call.arguments.args.iter().map(literal_arg).collect();
+
         if let Some(kind) = self.is_offload_callee(&call.func) {
             self.push_edge(
                 caller,
@@ -731,6 +1088,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 CallKind::Call,
                 true,
             );
+            self.pending_literals.clear();
             return;
         }
 
@@ -745,12 +1103,21 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 CallKind::Call,
                 false,
             );
+            self.pending_literals.clear();
             return;
         }
 
         if let Some(callee) = self.resolve_callee(&call.func) {
-            self.push_edge(caller, callee, call.range(), CallKind::Call, false);
+            let kind = if self.consuming_generator
+                && matches!(&callee, CalleeRef::Project(id) if self.facts.function(*id).is_generator)
+            {
+                CallKind::GeneratorConsume
+            } else {
+                CallKind::Call
+            };
+            self.push_edge(caller, callee, call.range(), kind, false);
         }
+        self.pending_literals.clear();
     }
 
     fn note_task_spawn(&mut self, call: &ast::ExprCall) {
@@ -777,6 +1144,14 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         kind: CallKind,
         is_offload_wrapper: bool,
     ) {
+        // Bare generator call (`g = gen()`) must not propagate; only when consumed.
+        if let CalleeRef::Project(id) = &callee
+            && self.facts.function(*id).is_generator
+            && !self.consuming_generator
+        {
+            return;
+        }
+
         let key = match &callee {
             CalleeRef::Project(id) => format!("P{}", id.0),
             CalleeRef::External { qualname } => format!("E{qualname}"),
@@ -797,6 +1172,8 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             conditions: self.conditions_now(),
             occurrence,
             is_offload_wrapper,
+            positional_literals: std::mem::take(&mut self.pending_literals),
+            param_guard: self.active_param_guard,
         });
     }
 
@@ -1114,11 +1491,24 @@ fn module_of_definition<'db>(
     }
 }
 
-fn is_dead_branch_test(test: &Expr) -> bool {
+fn is_dead_branch_test(test: &Expr, constants: &HashMap<String, ModuleConst>) -> bool {
     match test {
         Expr::BooleanLiteral(b) => !b.value,
-        Expr::Name(name) => name.id.as_str() == "TYPE_CHECKING",
-        Expr::Attribute(attr) => attr.attr.as_str() == "TYPE_CHECKING",
+        Expr::NoneLiteral(_) => true,
+        Expr::Name(name) if name.id.as_str() == "TYPE_CHECKING" => true,
+        Expr::Attribute(attr) if attr.attr.as_str() == "TYPE_CHECKING" => true,
+        Expr::Name(name) => matches!(
+            constants.get(name.id.as_str()),
+            Some(ModuleConst::False | ModuleConst::None | ModuleConst::Empty)
+        ),
+        Expr::UnaryOp(u) if matches!(u.op, ast::UnaryOp::Not) => {
+            // `if not X` is dead only when X is provably truthy.
+            match u.operand.as_ref() {
+                Expr::BooleanLiteral(b) => b.value,
+                Expr::Name(n) => matches!(constants.get(n.id.as_str()), Some(ModuleConst::True)),
+                _ => false,
+            }
+        }
         _ => false,
     }
 }

@@ -187,10 +187,20 @@ langgraph, home-assistant core, plus small fixtures per rule/pattern.
   passed to those. Eager `to_thread(f())` still reports.
 - Entry labels inferred (`route` / `lifecycle` / `task` / `other`). Sync
   FastAPI/Starlette-style route handlers are not entries.
-- Unresolved dynamic dispatch → `candidates` (`reason=unresolved`).
-  Metadata IO → candidates. Findings only when provable.
-- `conditions[]`: `unconditional` / `loop` / `async-branch` / `all-paths`;
-  literal-constant dead-branch pruning (`if False`, `TYPE_CHECKING`).
+- Unresolved dynamic dispatch → `candidates` (`reason=unresolved`), hidden
+  unless `--show-unresolved`. Metadata IO → candidates. Findings only when
+  provable.
+- `conditions[]`: prove-only. `unconditional` / `all-paths` never accompany
+  `if`/`else`/`try`/`match` guards; also `loop`, `async-branch`,
+  `cache_miss_dependent`. Parameter-controlled branches → candidates
+  (`reason=conditional`) unless the guarding arg is provably truthy.
+- Dead-branch pruning for unreassigned module constants (`DEBUG = False`,
+  `_EMPTY = ()`) plus `if False` / `TYPE_CHECKING`.
+- Generators: create-without-iterate does not propagate; consume via
+  `for` / `list` / `next` / `yield from` does.
+- Zero-config scope: skip entries under tests/docs/examples/scripts/hidden
+  dirs by default (`--include-non-production` to include; count in summary).
+- Merge `open(...)` + same-entry `f.read()`/`f.write()` into one finding.
 - Stable `id`: hash(rule + entry qualname + sink qualname + chain qualnames
   + occurrence). **Not** line/column.
 - Async-twin names only in `fix.hint`.

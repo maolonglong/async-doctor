@@ -13,12 +13,18 @@ impl FunctionId {
 }
 
 /// Condition tags attached to a call site / hop.
+///
+/// Only emit a tag you can prove. `Unconditional` / `AllPaths` must not appear
+/// alongside any branch/try/match guard on the same hop or merged chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConditionTag {
     Unconditional,
     AllPaths,
     Loop,
+    /// Call sits under an `if`/`else`/`try`/`match` (or similar) guard.
     AsyncBranch,
+    /// Call sits behind a module/global cache miss check (`if _cache is None`).
+    CacheMissDependent,
     /// FastAPI/Starlette sync `def` route (threadpool) — presentation only.
     SyncEntry,
 }
@@ -30,9 +36,22 @@ impl ConditionTag {
             Self::AllPaths => "all-paths",
             Self::Loop => "loop",
             Self::AsyncBranch => "async-branch",
+            Self::CacheMissDependent => "cache_miss_dependent",
             Self::SyncEntry => "sync_entry",
         }
     }
+
+    pub fn is_branch_like(self) -> bool {
+        matches!(self, Self::AsyncBranch | Self::CacheMissDependent)
+    }
+}
+
+/// Proven constant value of a positional call argument (when known).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LiteralArg {
+    True,
+    False,
+    None,
 }
 
 /// What a call resolves to.
@@ -81,6 +100,8 @@ pub enum CallKind {
     ForIter,
     /// Property getter access that resolves to a callable / blocking property.
     PropertyGet,
+    /// Consuming a generator (for/next/list/yield from) — body may run.
+    GeneratorConsume,
 }
 
 /// One directed call-graph edge: caller → callee at a concrete site.
@@ -100,6 +121,20 @@ pub struct CallEdge {
     /// When true, this edge is an offload *wrapper* call (e.g. `to_thread(...)`).
     /// The wrapper itself is not a blocking sink; callable args are not edges.
     pub is_offload_wrapper: bool,
+    /// Positional argument literals when known (`None` = unknown / non-literal).
+    pub positional_literals: Vec<Option<LiteralArg>>,
+    /// When set, this edge only executes when positional parameter `index` is
+    /// truthy (`if param:`) or falsy (`if not param:` when `inverted`).
+    pub param_guard: Option<ParamGuard>,
+}
+
+/// Parameter-controlled branch guarding a call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ParamGuard {
+    /// Positional parameter index in the enclosing function.
+    pub index: u32,
+    /// When true, the branch is `if not param:` (taken when param is falsy).
+    pub inverted: bool,
 }
 
 /// A first-party function or method.
@@ -113,11 +148,15 @@ pub struct FunctionFact {
     /// Class-nested name (`Class.method`) or bare function name.
     pub qualname: String,
     pub is_async: bool,
+    /// True when the body contains `yield` / `yield from` (generator function).
+    pub is_generator: bool,
     pub label: EntryLabel,
     /// Sync FastAPI/Starlette route handlers run in a threadpool — not entries.
     pub is_sync_route: bool,
     /// Async twins discovered on the same class (method name → twin name), for fix hints.
     pub async_twins: Vec<(String, String)>,
+    /// Positional parameter names (for guard matching).
+    pub param_names: Vec<String>,
 }
 
 impl FunctionFact {
@@ -129,6 +168,15 @@ impl FunctionFact {
             format!("{}:{}", self.module, self.qualname)
         }
     }
+}
+
+/// Options controlling grading / reporting (CLI flags; no config file).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AnalyzeOptions {
+    /// Include entries under tests/docs/examples/scripts/hidden dirs.
+    pub include_non_production: bool,
+    /// Include `reason=unresolved` candidates in the report.
+    pub show_unresolved: bool,
 }
 
 /// All facts for one project scan (first-party only for M1).
@@ -144,4 +192,33 @@ impl ProjectFacts {
     pub fn function(&self, id: FunctionId) -> &FunctionFact {
         &self.functions[id.index()]
     }
+}
+
+/// Return true when an entry file should be omitted by default (tests/docs/…).
+pub fn is_non_production_entry_path(file: &str) -> bool {
+    let f = file.replace('\\', "/");
+    let name = f.rsplit('/').next().unwrap_or(&f);
+    if name.starts_with('.') {
+        return true;
+    }
+    if name == "conftest.py" {
+        return true;
+    }
+    if name.starts_with("test_") || name.ends_with("_test.py") {
+        return true;
+    }
+    for part in f.split('/') {
+        if part.is_empty() {
+            continue;
+        }
+        if part.starts_with('.') {
+            return true;
+        }
+        match part {
+            "tests" | "test" | "docs" | "doc" | "examples" | "example" | "scripts" | "script"
+            | "benchmarks" | "benchmark" => return true,
+            _ => {}
+        }
+    }
+    false
 }

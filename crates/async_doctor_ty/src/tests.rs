@@ -4,9 +4,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use async_doctor_core::EntryLabel;
+use async_doctor_core::{AnalyzeOptions, EntryLabel};
 
-use crate::scan_path;
+use crate::{scan_path, scan_path_with_options};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -189,15 +189,30 @@ fn getattr_is_candidate_unresolved() {
         "dyn.py",
         "import time\n\nasync def handler():\n    getattr(time, 'sleep')(1)\n",
     )]);
-    let report = scan_path(&dir).unwrap();
+    let hidden = scan_path(&dir).unwrap();
     assert!(
-        report.findings.is_empty(),
+        hidden.findings.is_empty(),
         "getattr must not be a finding: {:?}",
-        report.findings
+        hidden.findings
     );
     assert!(
+        hidden.candidates.is_empty(),
+        "unresolved candidates hidden by default: {:?}",
+        hidden.candidates
+    );
+    assert!(hidden.hidden_unresolved_candidates >= 1);
+
+    let report = scan_path_with_options(
+        &dir,
+        AnalyzeOptions {
+            include_non_production: false,
+            show_unresolved: true,
+        },
+    )
+    .unwrap();
+    assert!(
         report.candidates.iter().any(|c| c.reason == "unresolved"),
-        "expected unresolved candidate: {:?}",
+        "expected unresolved candidate with --show-unresolved: {:?}",
         report.candidates
     );
     let _ = fs::remove_dir_all(dir);
@@ -478,5 +493,241 @@ fn loop_condition_tag() {
         "{:?}",
         report.findings[0].conditions
     );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn branch_not_unconditional_or_all_paths() {
+    let dir = temp_project(&[(
+        "branch.py",
+        "import time\n\nasync def handler(flag):\n    if flag:\n        time.sleep(1)\n    else:\n        time.sleep(2)\n",
+    )]);
+    let report = scan_path(&dir).unwrap();
+    assert!(
+        !report.findings.is_empty() || !report.candidates.is_empty(),
+        "{:?}",
+        report
+    );
+    for item in report
+        .findings
+        .iter()
+        .map(|f| &f.conditions)
+        .chain(report.candidates.iter().map(|c| &c.conditions))
+    {
+        assert!(
+            !item
+                .iter()
+                .any(|c| c == "unconditional" || c == "all-paths"),
+            "branched sink must not be unconditional/all-paths: {item:?}"
+        );
+        assert!(
+            item.iter().any(|c| c == "async-branch"),
+            "expected async-branch: {item:?}"
+        );
+    }
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn param_guard_unknown_is_conditional_candidate() {
+    let dir = temp_project(&[(
+        "param.py",
+        "import time\n\ndef maybe(flag):\n    if flag:\n        time.sleep(1)\n\nasync def handler(debug):\n    maybe(debug)\n",
+    )]);
+    let report = scan_path(&dir).unwrap();
+    assert!(
+        report.findings.is_empty(),
+        "param-guarded sink must not be a finding: {:?}",
+        report.findings
+    );
+    assert!(
+        report.candidates.iter().any(|c| c.reason == "conditional"),
+        "expected conditional candidate: {:?}",
+        report.candidates
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn param_guard_false_literal_omitted() {
+    let dir = temp_project(&[(
+        "param_false.py",
+        "import time\n\ndef maybe(flag):\n    if flag:\n        time.sleep(1)\n\nasync def handler():\n    maybe(False)\n",
+    )]);
+    let report = scan_path(&dir).unwrap();
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+    assert!(report.candidates.is_empty(), "{:?}", report.candidates);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn cache_miss_dependent_tag() {
+    let dir = temp_project(&[(
+        "cache.py",
+        "import time\n\n_cache = None\n\nasync def handler():\n    global _cache\n    if _cache is None:\n        time.sleep(1)\n        _cache = 1\n",
+    )]);
+    let report = scan_path(&dir).unwrap();
+    assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+    assert!(
+        report.findings[0]
+            .conditions
+            .iter()
+            .any(|c| c == "cache_miss_dependent"),
+        "{:?}",
+        report.findings[0].conditions
+    );
+    assert!(
+        !report.findings[0]
+            .conditions
+            .iter()
+            .any(|c| c == "unconditional" || c == "all-paths"),
+        "{:?}",
+        report.findings[0].conditions
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn generator_bare_call_does_not_propagate() {
+    let dir = temp_project(&[(
+        "gen_bare.py",
+        "import time\n\ndef gen():\n    time.sleep(1)\n    yield 1\n\nasync def handler():\n    g = gen()\n",
+    )]);
+    let report = scan_path(&dir).unwrap();
+    assert!(
+        report.findings.is_empty(),
+        "bare generator call must not propagate: {:?}",
+        report.findings
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn generator_for_iter_propagates() {
+    let dir = temp_project(&[(
+        "gen_for.py",
+        "import time\n\ndef gen():\n    time.sleep(1)\n    yield 1\n\nasync def handler():\n    for _ in gen():\n        pass\n",
+    )]);
+    let report = scan_path(&dir).unwrap();
+    assert_eq!(
+        report.findings.len(),
+        1,
+        "iterating a generator must propagate: {:?}",
+        report.findings
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn generator_list_consumes() {
+    let dir = temp_project(&[(
+        "gen_list.py",
+        "import time\n\ndef gen():\n    time.sleep(1)\n    yield 1\n\nasync def handler():\n    list(gen())\n",
+    )]);
+    let report = scan_path(&dir).unwrap();
+    assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn module_const_dead_branch_pruned() {
+    let dir = temp_project(&[(
+        "const_dead.py",
+        "import time\n\nDEBUG = False\n_EMPTY = ()\n\nasync def handler():\n    if DEBUG:\n        time.sleep(1)\n    if _EMPTY:\n        time.sleep(2)\n",
+    )]);
+    let report = scan_path(&dir).unwrap();
+    assert!(
+        report.findings.is_empty(),
+        "module-const falsy branches must prune: {:?}",
+        report.findings
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn module_const_not_empty_is_live() {
+    let dir = temp_project(&[(
+        "const_live.py",
+        "import time\n\n_EMPTY = ()\n\nasync def handler():\n    if not _EMPTY:\n        time.sleep(1)\n",
+    )]);
+    let report = scan_path(&dir).unwrap();
+    assert_eq!(
+        report.findings.len(),
+        1,
+        "`if not _EMPTY` is live when _EMPTY=(): {:?}",
+        report.findings
+    );
+    assert!(
+        report.findings[0]
+            .conditions
+            .iter()
+            .any(|c| c == "async-branch"),
+        "{:?}",
+        report.findings[0].conditions
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn module_const_debug_false_else_is_branch() {
+    let dir = temp_project(&[(
+        "const_else.py",
+        "import time\n\nDEBUG = False\n\nasync def handler():\n    if DEBUG:\n        pass\n    else:\n        time.sleep(1)\n",
+    )]);
+    let report = scan_path(&dir).unwrap();
+    assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+    assert!(
+        report.findings[0]
+            .conditions
+            .iter()
+            .any(|c| c == "async-branch"),
+        "{:?}",
+        report.findings[0].conditions
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn skips_test_path_entries_by_default() {
+    let dir = temp_project(&[(
+        "tests/test_handler.py",
+        "import time\n\nasync def test_handler():\n    time.sleep(1)\n",
+    )]);
+    let report = scan_path(&dir).unwrap();
+    assert!(report.findings.is_empty(), "{:?}", report.findings);
+    assert!(report.omitted_non_production_entries >= 1);
+
+    let included = scan_path_with_options(
+        &dir,
+        AnalyzeOptions {
+            include_non_production: true,
+            show_unresolved: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(included.findings.len(), 1, "{:?}", included.findings);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn merges_open_and_read_same_entry() {
+    let dir = temp_project(&[(
+        "fileio.py",
+        "async def handler():\n    f = open('x')\n    data = f.read()\n",
+    )]);
+    let report = scan_path(&dir).unwrap();
+    assert_eq!(
+        report.findings.len(),
+        1,
+        "open+read should merge: {:?}",
+        report.findings
+    );
+    let texts: Vec<_> = report.findings[0]
+        .chain
+        .iter()
+        .map(|c| c.text.as_str())
+        .collect();
+    assert!(texts.iter().any(|t| t.contains("open")), "{texts:?}");
+    assert!(texts.iter().any(|t| t.contains("read")), "{texts:?}");
     let _ = fs::remove_dir_all(dir);
 }

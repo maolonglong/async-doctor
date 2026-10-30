@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::Context;
-use async_doctor_core::{EXIT_ERROR, Report};
+use async_doctor_core::{AnalyzeOptions, EXIT_ERROR, Report};
 use clap::{Parser, ValueEnum};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -30,6 +30,14 @@ struct Cli {
     /// Output format.
     #[arg(long, value_enum, default_value_t = Format::Text)]
     format: Format,
+
+    /// Include entries under tests/, docs/, examples/, scripts/, and hidden dirs.
+    #[arg(long)]
+    include_non_production: bool,
+
+    /// Include `reason=unresolved` candidates in the report (hidden by default).
+    #[arg(long)]
+    show_unresolved: bool,
 }
 
 fn main() -> ExitCode {
@@ -44,7 +52,11 @@ fn main() -> ExitCode {
 
 fn run() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse();
-    let report = async_doctor_ty::scan_path(&cli.path)
+    let options = AnalyzeOptions {
+        include_non_production: cli.include_non_production,
+        show_unresolved: cli.show_unresolved,
+    };
+    let report = async_doctor_ty::scan_path_with_options(&cli.path, options)
         .with_context(|| format!("failed to scan `{}`", cli.path.display()))?;
 
     if !report.complete {
@@ -71,41 +83,65 @@ fn write_text(report: &Report) -> anyhow::Result<()> {
     let mut out = std::io::stdout().lock();
     if report.findings.is_empty() {
         writeln!(out, "No findings.")?;
-        if !report.candidates.is_empty() {
+    } else {
+        writeln!(out, "Found {} finding(s):\n", report.findings.len())?;
+        for finding in &report.findings {
             writeln!(
                 out,
-                "({} candidate(s) omitted from exit status)",
-                report.candidates.len()
+                "[{}] reachable from {} {} {}:{}",
+                finding.rule,
+                finding.entry.label.as_str(),
+                finding.entry.name,
+                finding.entry.file,
+                finding.entry.line
             )?;
+            for (i, step) in finding.chain.iter().enumerate() {
+                let pipe = if i + 1 == finding.chain.len() {
+                    "└─"
+                } else {
+                    "├─"
+                };
+                writeln!(out, "  {pipe} {}:{}  {}", step.file, step.line, step.text)?;
+            }
+            if !finding.conditions.is_empty() {
+                writeln!(out, "  conditions: {}", finding.conditions.join(", "))?;
+            }
+            writeln!(out, "  fix: {}", finding.fix.hint)?;
+            writeln!(out, "  why: {}", finding.why)?;
+            writeln!(out)?;
         }
-        return Ok(());
     }
 
-    writeln!(out, "Found {} finding(s):\n", report.findings.len())?;
-    for finding in &report.findings {
+    if !report.candidates.is_empty() {
         writeln!(
             out,
-            "[{}] reachable from {} {} {}:{}",
-            finding.rule,
-            finding.entry.label.as_str(),
-            finding.entry.name,
-            finding.entry.file,
-            finding.entry.line
+            "({} candidate(s) omitted from exit status)",
+            report.candidates.len()
         )?;
-        for (i, step) in finding.chain.iter().enumerate() {
-            let pipe = if i + 1 == finding.chain.len() {
-                "└─"
+    }
+    if report.omitted_non_production_entries > 0 {
+        writeln!(
+            out,
+            "(skipped {} non-production async entr{}, use --include-non-production to include)",
+            report.omitted_non_production_entries,
+            if report.omitted_non_production_entries == 1 {
+                "y"
             } else {
-                "├─"
-            };
-            writeln!(out, "  {pipe} {}:{}  {}", step.file, step.line, step.text)?;
-        }
-        if !finding.conditions.is_empty() {
-            writeln!(out, "  conditions: {}", finding.conditions.join(", "))?;
-        }
-        writeln!(out, "  fix: {}", finding.fix.hint)?;
-        writeln!(out, "  why: {}", finding.why)?;
-        writeln!(out)?;
+                "ies"
+            }
+        )?;
+    }
+    if report.hidden_unresolved_candidates > 0 {
+        writeln!(
+            out,
+            "(hid {} unresolved candidate{}, use --show-unresolved to include)",
+            report.hidden_unresolved_candidates,
+            if report.hidden_unresolved_candidates == 1 {
+                ""
+            } else {
+                "s"
+            }
+        )?;
     }
     Ok(())
 }
