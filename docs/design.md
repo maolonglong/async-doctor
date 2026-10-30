@@ -193,3 +193,10 @@ The design doc sketched hydroid's 0.0.15-era wiring. Against **0.0.20**:
   `PythonFile` / `ProgramFile`, not a bare parser call.
 - M0 resolves `time.sleep` via import bindings on the AST (sufficient for
   *direct* calls); typed call-graph resolution is M1.
+- Finding `id` hashes rule + entry file + **qualified** entry name
+  (`Class.method` when nested) + sink + call site (file/line/column).
+- Direct findings do not descend into **lambda** bodies (deferred); inline
+  **comprehensions** still report.
+- Syntax-error files set `complete=false` and a `skipped` entry; CLI warns on
+  stderr. Exit code still follows findings only.
+- Path argument may be a project directory or a single `.py` file.

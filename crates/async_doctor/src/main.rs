@@ -23,7 +23,7 @@ enum Format {
                   Zero-config: point at a project directory and run."
 )]
 struct Cli {
-    /// Project directory to scan (default: current directory).
+    /// Project directory or a single `.py` file to scan (default: current directory).
     #[arg(default_value = ".")]
     path: PathBuf,
 
