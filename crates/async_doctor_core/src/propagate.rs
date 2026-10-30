@@ -42,6 +42,15 @@ fn materialize_higher_order(facts: &ProjectFacts) -> ProjectFacts {
 
     let mut out = facts.clone();
 
+    // Index edges by caller once — avoid O(E²) scans.
+    let mut by_caller: Vec<Vec<usize>> = vec![Vec::new(); out.functions.len()];
+    for (i, edge) in out.edges.iter().enumerate() {
+        let c = edge.caller.index();
+        if c < by_caller.len() {
+            by_caller[c].push(i);
+        }
+    }
+
     // Mark call edges to inferred offload wrappers as offload cuts.
     for edge in &mut out.edges {
         if let CalleeRef::Project(fid) = edge.callee
@@ -54,35 +63,43 @@ fn materialize_higher_order(facts: &ProjectFacts) -> ProjectFacts {
 
     // Resolve ParamInvoke via caller's positional_callables.
     let mut extras: Vec<CallEdge> = Vec::new();
-    let edge_snapshot = out.edges.clone();
-    for edge in &edge_snapshot {
-        if edge.is_offload_wrapper {
+    let n_edges = out.edges.len();
+    for ei in 0..n_edges {
+        if out.edges[ei].is_offload_wrapper {
             continue;
         }
-        let CalleeRef::Project(callee_id) = edge.callee else {
+        let CalleeRef::Project(callee_id) = out.edges[ei].callee else {
             continue;
         };
-        for param_edge in &edge_snapshot {
-            if param_edge.caller != callee_id {
-                continue;
-            }
-            let CalleeRef::ParamInvoke { index } = param_edge.callee else {
-                continue;
-            };
-            let Some(Some(fid)) = edge.positional_callables.get(index as usize) else {
+        let Some(param_edge_idxs) = by_caller.get(callee_id.index()) else {
+            continue;
+        };
+        for &pei in param_edge_idxs {
+            let CalleeRef::ParamInvoke { index } = out.edges[pei].callee else {
                 continue;
             };
-            let already = out.edges.iter().any(|e| {
-                e.caller == callee_id
-                    && matches!(e.callee, CalleeRef::Project(id) if id == *fid)
-                    && e.line == param_edge.line
-            });
+            let Some(Some(fid)) = out.edges[ei]
+                .positional_callables
+                .get(index as usize)
+                .copied()
+            else {
+                continue;
+            };
+            let param_edge = &out.edges[pei];
+            let already = by_caller
+                .get(callee_id.index())
+                .into_iter()
+                .flatten()
+                .any(|&j| {
+                    matches!(out.edges[j].callee, CalleeRef::Project(id) if id == fid)
+                        && out.edges[j].line == param_edge.line
+                });
             if already {
                 continue;
             }
             extras.push(CallEdge {
                 caller: callee_id,
-                callee: CalleeRef::Project(*fid),
+                callee: CalleeRef::Project(fid),
                 file: param_edge.file.clone(),
                 line: param_edge.line,
                 text: param_edge.text.clone(),

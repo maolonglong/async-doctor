@@ -1,12 +1,46 @@
 //! Integration tests for M1 call-graph extraction + propagation.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use async_doctor_core::{AnalyzeOptions, EntryLabel};
 
 use crate::{scan_path, scan_path_with_options};
+
+fn fixtures_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures")
+}
+
+fn report_json(path: &Path) -> String {
+    let report = scan_path(path).unwrap();
+    serde_json::to_string(&report).unwrap()
+}
+
+/// Copy a fixture tree into an isolated temp dir (so cache/XDG tests cannot
+/// race the tracked fixtures/ tree).
+fn clone_fixture(name: &str) -> PathBuf {
+    let src = fixtures_dir().join(name);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dst = std::env::temp_dir().join(format!("async-doctor-fx-{name}-{n}"));
+    let _ = fs::remove_dir_all(&dst);
+    copy_dir(&src, &dst);
+    dst
+}
+
+fn copy_dir(src: &Path, dst: &Path) {
+    fs::create_dir_all(dst).unwrap();
+    for entry in fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let to = dst.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &to);
+        } else {
+            fs::copy(entry.path(), to).unwrap();
+        }
+    }
+}
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -1100,4 +1134,167 @@ fn m2_show_unresolved_aggregates_by_pattern() {
         assert!(w[0].entries_affected >= w[1].entries_affected);
     }
     let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn m2_analysis_is_byte_identical_across_runs() {
+    let dir = clone_fixture("m2_third_party_rules");
+    let cache = std::env::temp_dir().join(format!(
+        "async-doctor-det-cache-{}",
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = fs::remove_dir_all(&cache);
+    fs::create_dir_all(&cache).unwrap();
+    unsafe { std::env::set_var("XDG_CACHE_HOME", &cache) };
+
+    const N: usize = 5;
+    let mut jsons = Vec::with_capacity(N);
+    for _ in 0..N {
+        // Drop cache between cold runs so we exercise follow selection, not hit path.
+        let _ = fs::remove_dir_all(&cache);
+        fs::create_dir_all(&cache).unwrap();
+        jsons.push(report_json(&dir));
+    }
+    for (i, j) in jsons.iter().enumerate().skip(1) {
+        assert_eq!(
+            &jsons[0], j,
+            "run 0 vs run {i} JSON differ (non-deterministic follow/budget)"
+        );
+    }
+    let report: async_doctor_core::Report = serde_json::from_str(&jsons[0]).unwrap();
+    assert!(
+        report.findings.len() >= 12,
+        "expected third-party rule findings, got {}",
+        report.findings.len()
+    );
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| f.entry.name == "use_redis_pipeline_execute"),
+        "pipeline execute must fire: {:?}",
+        report
+            .findings
+            .iter()
+            .map(|f| &f.entry.name)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !report
+            .findings
+            .iter()
+            .any(|f| f.entry.name == "use_redis_pipeline_buffering_ok"),
+        "pipeline buffering must not fire: {:?}",
+        report.findings
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&cache);
+    unsafe { std::env::remove_var("XDG_CACHE_HOME") };
+}
+
+#[test]
+fn m2_sitepkgs_cold_warm_json_identical_and_warm_faster() {
+    let dir = clone_fixture("m2_sitepkgs_cache");
+    let cache = std::env::temp_dir().join(format!(
+        "async-doctor-warm-cache-{}",
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = fs::remove_dir_all(&cache);
+    fs::create_dir_all(&cache).unwrap();
+    unsafe { std::env::set_var("XDG_CACHE_HOME", &cache) };
+
+    let t0 = Instant::now();
+    let cold = report_json(&dir);
+    let cold_ms = t0.elapsed();
+
+    let t1 = Instant::now();
+    let warm = report_json(&dir);
+    let warm_ms = t1.elapsed();
+
+    assert_eq!(
+        cold, warm,
+        "cold and warm JSON must be byte-identical\ncold={cold}\nwarm={warm}"
+    );
+    let report: async_doctor_core::Report = serde_json::from_str(&cold).unwrap();
+    assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+    assert_eq!(report.findings[0].rule, "blocking-sleep");
+    assert!(
+        report.findings[0]
+            .chain
+            .iter()
+            .any(|s| s.text.contains("time.sleep")),
+        "{:?}",
+        report.findings[0].chain
+    );
+    // Warm should hit the package cache; allow generous slack on busy CI hosts
+    // but require a clear improvement when cold was non-trivial.
+    if cold_ms.as_millis() >= 50 {
+        assert!(
+            warm_ms <= cold_ms,
+            "warm ({warm_ms:?}) should be <= cold ({cold_ms:?})"
+        );
+    }
+    // Cache file must exist under the versioned schema/tool path.
+    fn any_json(dir: &Path) -> bool {
+        let Ok(rd) = fs::read_dir(dir) else {
+            return false;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() && any_json(&p) {
+                return true;
+            }
+            if p.extension().and_then(|x| x.to_str()) == Some("json") {
+                return true;
+            }
+        }
+        false
+    }
+    assert!(any_json(&cache), "expected package cache under {cache:?}");
+
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&cache);
+    unsafe { std::env::remove_var("XDG_CACHE_HOME") };
+}
+
+#[test]
+fn m2_redis_pipeline_buffering_vs_execute_fixture() {
+    let dir = clone_fixture("m2_third_party_rules");
+    let cache = std::env::temp_dir().join(format!(
+        "async-doctor-pipe-cache-{}",
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = fs::remove_dir_all(&cache);
+    fs::create_dir_all(&cache).unwrap();
+    unsafe { std::env::set_var("XDG_CACHE_HOME", &cache) };
+
+    let report = scan_path(&dir).unwrap();
+    let names: Vec<_> = report
+        .findings
+        .iter()
+        .map(|f| f.entry.name.as_str())
+        .collect();
+    assert!(
+        names.contains(&"use_redis_pipeline_execute"),
+        "execute must be a finding: {names:?}"
+    );
+    assert!(
+        !names.contains(&"use_redis_pipeline_buffering_ok"),
+        "buffering must not be a finding: {names:?}"
+    );
+    let exec = report
+        .findings
+        .iter()
+        .find(|f| f.entry.name == "use_redis_pipeline_execute")
+        .unwrap();
+    assert!(
+        exec.chain.iter().any(|c| c.text.contains("execute")),
+        "evidence should point at execute(): {:?}",
+        exec.chain
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&cache);
+    unsafe { std::env::remove_var("XDG_CACHE_HOME") };
 }
