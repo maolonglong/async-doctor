@@ -22,4 +22,9 @@ Default `cargo test` stays fast for CI. Longer stress loops are marked `#[ignore
   cargo test -p async_doctor --test concurrent_cache -- --ignored
   ```
 
-  CI runs a short N≈15–20 variant (under ~20s). The ignored N=100 stress is for local/regression hunting; pre-fix sticky-miss failures were ~2.5–5% of trials on `m2_cache_multipkg_large`, so N=20 catches a regression with about 40–64% probability per CI run.
+  CI runs a short N≈15–20 variant. Children are spawned in parallel (not sequential
+  `.output()`). In debug builds the test passes an internal env to children that
+  widens the sticky-miss window: with the fix reverted the CI-sized large test
+  failed **10/10** debug runs (~1s each); with the fix it passed **10/10**
+  (~10.5s each). That hook is compiled inert in release. The ignored N=100
+  stress is for local hunting without relying on the debug hook alone.
