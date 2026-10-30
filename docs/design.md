@@ -136,7 +136,7 @@ FastAPI sync `def` routes already run in a thread pool — do not report them.
 | `fix` | hint + `fixGroupId` (shared across same root cause) |
 | `why` | runnable `async-doctor why file:line` |
 
-Default output is human text; `--format json` for agents; SARIF later.
+Default output is human text; `--format json` for agents; `--format sarif` for SARIF 2.1.0.
 
 ## Agent integration (M3)
 

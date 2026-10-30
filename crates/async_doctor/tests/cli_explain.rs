@@ -102,6 +102,13 @@ fn json_includes_docs_url_chain_resolution_and_runnable_why() {
         why.contains(dir.to_str().unwrap()) || why.contains(&dir.display().to_string()),
         "{why}"
     );
+    // Plain async def entries serialize as async_def, never opaque "other".
+    assert_ne!(finding["entry"]["label"], "other");
+    let label = finding["entry"]["label"].as_str().unwrap_or("");
+    assert!(
+        label == "async_def" || label == "route" || label == "lifecycle" || label == "task",
+        "unexpected label {label}"
+    );
 }
 
 #[test]

@@ -19,6 +19,9 @@ pub enum EntryLabel {
     Route,
     Lifecycle,
     Task,
+    /// Plain `async def` with no more specific kind. Serialized as `async_def`
+    /// so JSON matches the human `async def …` headline (not the opaque `other`).
+    #[serde(rename = "async_def")]
     Other,
 }
 
@@ -28,7 +31,7 @@ impl EntryLabel {
             Self::Route => "route",
             Self::Lifecycle => "lifecycle",
             Self::Task => "task",
-            Self::Other => "other",
+            Self::Other => "async_def",
         }
     }
 }
