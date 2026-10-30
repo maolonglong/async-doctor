@@ -64,6 +64,20 @@ pub fn write_report(report: &Report) -> anyhow::Result<()> {
             )?;
         }
     }
+    if !report.unused_suppressions.is_empty() {
+        writeln!(
+            out,
+            "\nUnused suppressions ({}):",
+            report.unused_suppressions.len()
+        )?;
+        for u in &report.unused_suppressions {
+            writeln!(
+                out,
+                "  {}:{}  ignore[{}] — {}",
+                u.file, u.line, u.rule, u.reason
+            )?;
+        }
+    }
     Ok(())
 }
 

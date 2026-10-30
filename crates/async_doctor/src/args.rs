@@ -17,7 +17,11 @@ pub enum Format {
     about = "Your agent blocks the event loop. This catches it.",
     long_about = "Detect sync/blocking IO reachable from Python async def code.\n\
                   Zero-config: point at a project directory and run.\n\n\
-                  Exit codes: 0 = clean, 1 = findings, 2 = tool error.",
+                  Exit codes:\n\
+                    0 = clean (no findings / no new findings vs baseline)\n\
+                    1 = findings present (or unused suppressions)\n\
+                    2 = tool error\n\
+                  Incomplete analysis sets complete=false; it does not use exit 2.",
     args_conflicts_with_subcommands = true,
     subcommand_negates_reqs = true
 )]
@@ -40,6 +44,30 @@ pub struct Cli {
     /// Include `reason=unresolved` candidates in the report (hidden by default).
     #[arg(long)]
     pub show_unresolved: bool,
+
+    /// Report only findings whose chain touches files changed vs GIT_REF.
+    ///
+    /// Use `--changed` for the merge-base with the default branch plus
+    /// uncommitted changes, or `--changed=GIT_REF` for an explicit ref.
+    /// (`=` is required so the project path is not swallowed.) Analysis still
+    /// covers the whole project; only reporting is filtered.
+    #[arg(
+        long,
+        num_args = 0..=1,
+        default_missing_value = "AUTO",
+        require_equals = true,
+        value_name = "GIT_REF"
+    )]
+    pub changed: Option<String>,
+
+    /// Suppress findings whose stable ids appear in this baseline file.
+    /// Exit 1 only for findings not in the baseline (new findings).
+    #[arg(long, value_name = "FILE")]
+    pub baseline: Option<PathBuf>,
+
+    /// Write current findings' stable ids to FILE (after suppressions / --changed).
+    #[arg(long, value_name = "FILE")]
+    pub write_baseline: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]

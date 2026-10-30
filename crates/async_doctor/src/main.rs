@@ -1,7 +1,10 @@
 //! async-doctor CLI — Your agent blocks the event loop. This catches it.
 
 mod args;
+mod baseline;
+mod changed;
 mod help_cmd;
+mod suppress;
 mod text;
 
 use std::io::Write;
@@ -42,7 +45,7 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
         include_non_production: cli.include_non_production,
         show_unresolved: cli.show_unresolved,
     };
-    let report = async_doctor_ty::scan_path_with_options(&cli.path, options)
+    let mut report = async_doctor_ty::scan_path_with_options(&cli.path, options)
         .with_context(|| format!("failed to scan `{}`", cli.path.display()))?;
 
     if !report.complete {
@@ -50,6 +53,48 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
             eprintln!("warning: skipped {skipped}");
         }
         eprintln!("warning: analysis incomplete (complete=false)");
+    }
+
+    // Inline suppressions (always on — zero-config escape hatch).
+    let scan_root = if cli.path.is_file() {
+        cli.path
+            .parent()
+            .unwrap_or(cli.path.as_path())
+            .to_path_buf()
+    } else {
+        cli.path.clone()
+    };
+    let scan_root = scan_root.canonicalize().unwrap_or(scan_root);
+    report = suppress::apply(report, &scan_root)?.report;
+
+    // --changed: full analysis, filtered reporting.
+    if let Some(ref_spec) = &cli.changed {
+        let git_ref = if ref_spec.is_empty() || ref_spec == "AUTO" {
+            None
+        } else {
+            Some(ref_spec.as_str())
+        };
+        let repo = changed::repo_root_for(&cli.path)
+            .with_context(|| format!("--changed requires a git repo at {}", cli.path.display()))?;
+        let files = changed::changed_files(&repo, git_ref)?;
+        report = changed::filter_report(report, &files);
+    }
+
+    // Write baseline from the post-suppression / post-changed set, before
+    // --baseline filtering (so refreshing a baseline is not a no-op).
+    if let Some(path) = &cli.write_baseline {
+        baseline::write_baseline(path, &report)?;
+        eprintln!(
+            "wrote baseline ({} id(s)) to {}",
+            report.findings.len(),
+            path.display()
+        );
+    }
+
+    // --baseline: suppress known stable ids; only new findings fail.
+    if let Some(path) = &cli.baseline {
+        let bl = baseline::read_baseline(path)?;
+        report = baseline::filter_report(report, &bl);
     }
 
     match cli.format {
