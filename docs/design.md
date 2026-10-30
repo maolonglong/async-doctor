@@ -234,14 +234,22 @@ langgraph, home-assistant core, plus small fixtures per rule/pattern.
   third-party — they are followed when reachable, tagged `is_third_party`, and
   **never** treated as finding entries. Attribute Externals prefer the
   *receiver type* over mixin defining classes (redis `Pipeline` vs
-  `CoreCommands`). Only the Call that is the *direct* operand of `await` /
+  `CoreCommands`). Project subclasses of `redis.Redis` /
+  `redis.asyncio.Redis` inherit sink status from the *receiver MRO*
+  (asyncio base ⇒ never a sync sink), not from whether the shared
+  commands-mixin method is `async def`. Only the Call that is the *direct*
+  operand of `await` /
   `async for` iter / `async with` context is marked `is_awaited` (nested
   argument calls like `await send(open(p).read())` stay sync sinks). Awaited
-  known-async APIs are not followed into library internals; reverse
+  *known-async* APIs are not sync sinks and are not followed into library
+  internals; awaited *sync* sinks (e.g. `await redis.Redis().get(...)`) still
+  seed because the sync body runs on the loop before `await`. Reverse
   propagation stops at third-party async. Third-party sinks under a
   parameter/branch guard (e.g. PIL `if is_path(fp):`) demote to candidates.
+  Sync `with Engine.begin()` records the context `Call` as `WithEnter`.
+  Consume-only sinks (`redis.PubSub.listen`) fire only when iterated.
 - **Per-`(package, version, content-fingerprint)` disk cache** under the user
-  cache dir (`v3/{tool}/{pkg}/{version}-{fingerprint}.json`), keyed by
+  cache dir (`v5/{tool}/{pkg}/{version}-{fingerprint}.json`), keyed by
   External qualname. Package meta lookups are memoized in a **per-scan**
   `PackageMetaMemo` (no process-global state). Callers (and tests) may inject
   the cache root explicitly — do not rely on mutating process-wide
@@ -260,7 +268,9 @@ langgraph, home-assistant core, plus small fixtures per rule/pattern.
 - **Built-in third-party rule table** (type-based + C-extension shortcut) with
   async-twin fix hints; async counterparts never fire. Redis sync `Pipeline`
   buffering (`set`/`get`/…) is not IO — only sync `Pipeline.execute()` blocks;
-  `redis.asyncio` / `await pipe.execute()` never fire.
+  `redis.asyncio` / `await pipe.execute()` never fire. Eager
+  `to_thread(f())` / `run_in_executor(None, f())` report with a pass-callable
+  hint. See `docs/precision_m3a.md` for corpus-gap status.
 - **Higher-order** callable arguments (positional + kwargs, `partial`, bound
   methods) with cheap call-context sensitivity so bindings do not leak across
   call sites; **ty-resolved** offload only, plus inferred wrappers whose bodies
