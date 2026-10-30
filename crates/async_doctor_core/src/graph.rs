@@ -130,6 +130,9 @@ pub struct CallEdge {
     /// When set, this edge only executes when positional parameter `index` is
     /// truthy (`if param:`) or falsy (`if not param:` when `inverted`).
     pub param_guard: Option<ParamGuard>,
+    /// True when this call appears under `await` (directly or nested).
+    /// Awaited calls are never sync-IO sinks.
+    pub is_awaited: bool,
 }
 
 /// Parameter-controlled branch guarding a call site.

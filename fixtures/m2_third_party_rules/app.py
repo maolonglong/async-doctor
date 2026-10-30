@@ -112,3 +112,10 @@ async def use_elasticsearch():
 async def use_grpc_channel():
     # Sync channel construction — matched via type-based grpc rules when resolved.
     grpc.insecure_channel("localhost:50051")
+
+
+async def use_redis_asyncio_pipeline_execute_ok():
+    # Negative: awaited asyncio pipeline execute is not sync-IO.
+    r = redis.asyncio.Redis()
+    pipe = r.pipeline()
+    await pipe.execute()

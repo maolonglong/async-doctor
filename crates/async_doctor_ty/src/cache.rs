@@ -45,6 +45,9 @@ pub struct CachedEdge {
     pub positional_callable_quals: Vec<Option<String>>,
     pub param_guard_index: Option<u32>,
     pub param_guard_inverted: Option<bool>,
+    /// Call was under `await` when recorded.
+    #[serde(default)]
+    pub is_awaited: bool,
 }
 
 /// Per-function summary stored in the package cache.
@@ -159,8 +162,26 @@ pub fn is_site_packages_path(path: &Path) -> bool {
 }
 
 pub fn path_str_contains_site_packages(s: &str) -> bool {
+    path_str_is_third_party_python(s)
+}
+
+/// True when `path` is under a venv/user `site-packages` or system `dist-packages`
+/// tree. Both are treated as third-party (followed, never entries).
+pub fn path_str_is_third_party_python(s: &str) -> bool {
     let s = s.replace('\\', "/");
-    s.contains("/site-packages/")
+    s.contains("/site-packages/") || s.contains("/dist-packages/")
+}
+
+/// Module-relative path after the site-packages / dist-packages root, if any.
+/// `s` should use `/` separators (callers typically normalize first).
+pub fn third_party_module_path(s: &str) -> Option<&str> {
+    if let Some(idx) = s.rfind("/site-packages/") {
+        return Some(&s[idx + "/site-packages/".len()..]);
+    }
+    if let Some(idx) = s.rfind("/dist-packages/") {
+        return Some(&s[idx + "/dist-packages/".len()..]);
+    }
+    None
 }
 
 /// True when the path is a `.py` source file (not `.pyi` stub-only).
@@ -210,6 +231,7 @@ mod tests {
                     positional_callable_quals: vec![],
                     param_guard_index: None,
                     param_guard_inverted: None,
+                    is_awaited: false,
                 }],
             },
         );

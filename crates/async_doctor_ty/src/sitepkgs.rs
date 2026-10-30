@@ -11,7 +11,7 @@ use async_doctor_core::{
 use ruff_db::system::SystemPathBuf;
 
 use crate::cache::{
-    CachedEdge, CachedFunction, PackageCache, load_package_cache, path_str_contains_site_packages,
+    CachedEdge, CachedFunction, PackageCache, load_package_cache, path_str_is_third_party_python,
     save_package_cache,
 };
 
@@ -48,18 +48,26 @@ pub fn parse_dist_info_metadata(text: &str) -> Option<(String, String)> {
     Some((name?, version?))
 }
 
-/// Locate neighboring `*.dist-info/METADATA` for a file under site-packages.
+/// Locate neighboring `*.dist-info/METADATA` for a file under site-/dist-packages.
 pub fn package_meta_for_path(py_path: &Path) -> Option<(String, String)> {
     let s = py_path.to_string_lossy().replace('\\', "/");
-    let idx = s.find("/site-packages/")?;
-    let site_packages = PathBuf::from(&s[..idx + "/site-packages".len()]);
-    let rest = &s[idx + "/site-packages/".len()..];
+    let (root, rest) = match (s.find("/site-packages/"), s.find("/dist-packages/")) {
+        (Some(idx), _) => (
+            PathBuf::from(&s[..idx + "/site-packages".len()]),
+            &s[idx + "/site-packages/".len()..],
+        ),
+        (None, Some(idx)) => (
+            PathBuf::from(&s[..idx + "/dist-packages".len()]),
+            &s[idx + "/dist-packages/".len()..],
+        ),
+        (None, None) => return None,
+    };
     let top = rest.split('/').next()?.to_string();
     if top.is_empty() {
         return None;
     }
 
-    let mut entries: Vec<_> = fs::read_dir(&site_packages).ok()?.flatten().collect();
+    let mut entries: Vec<_> = fs::read_dir(&root).ok()?.flatten().collect();
     // Deterministic order for identical meta discovery.
     entries.sort_by_key(|e| e.file_name());
     let top_norm = normalize_dist_name(&top);
@@ -95,10 +103,11 @@ fn normalize_dist_name(name: &str) -> String {
         .collect()
 }
 
-/// True when a system path string is third-party Python source under site-packages.
+/// True when a system path string is third-party Python source under
+/// site-packages or dist-packages (both are followed; never treated as entries).
 pub fn is_followable_site_packages_py(path_str: &str) -> bool {
     let s = path_str.replace('\\', "/");
-    path_str_contains_site_packages(&s) && s.ends_with(".py") && !s.ends_with(".pyi")
+    path_str_is_third_party_python(&s) && s.ends_with(".py") && !s.ends_with(".pyi")
 }
 
 /// In-memory batch of package caches to flush once at the end of a follow pass.
@@ -132,11 +141,26 @@ impl PackageCacheBatch {
         id_to_external_key: &HashMap<FunctionId, String>,
     ) {
         let cache = self.cache_mut(package, version);
-        let cached_edges: Vec<CachedEdge> = edges
+        let mut cached_edges: Vec<CachedEdge> = edges
             .iter()
             .filter(|e| e.caller == func.id)
             .map(|e| edge_to_cached(e, id_to_external_key))
             .collect();
+        // Stable order for byte-identical cache files / warm materialization.
+        cached_edges.sort_by(|a, b| {
+            (
+                a.line,
+                a.occurrence,
+                a.callee_qualname.as_str(),
+                a.text.as_str(),
+            )
+                .cmp(&(
+                    b.line,
+                    b.occurrence,
+                    b.callee_qualname.as_str(),
+                    b.text.as_str(),
+                ))
+        });
         cache.functions.insert(
             external_key.to_string(),
             CachedFunction {
@@ -228,6 +252,7 @@ fn edge_to_cached(e: &CallEdge, id_to_external_key: &HashMap<FunctionId, String>
         positional_callable_quals,
         param_guard_index: e.param_guard.map(|g| g.index),
         param_guard_inverted: e.param_guard.map(|g| g.inverted),
+        is_awaited: e.is_awaited,
     }
 }
 
@@ -417,6 +442,7 @@ pub fn materialize_cached_functions(
                 positional_literals,
                 positional_callables,
                 param_guard,
+                is_awaited: edge.is_awaited,
             });
         }
     }
