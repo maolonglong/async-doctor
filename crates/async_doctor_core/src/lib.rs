@@ -12,6 +12,6 @@ pub use graph::{
 pub use id::{FindingIdParts, finding_id, fix_group_id};
 pub use propagate::{SinkHit, SinkTable, analyze};
 pub use report::{
-    EXIT_ERROR, EXIT_FINDINGS, EXIT_OK, SCHEMA_VERSION, Candidate, ChainStep, Entry, EntryLabel,
-    Finding, Fix, Location, Report,
+    Candidate, ChainStep, EXIT_ERROR, EXIT_FINDINGS, EXIT_OK, Entry, EntryLabel, Finding, Fix,
+    Location, Report, SCHEMA_VERSION,
 };

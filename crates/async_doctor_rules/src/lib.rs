@@ -28,11 +28,7 @@ pub struct BuiltinSink {
 }
 
 impl BuiltinSink {
-    const fn finding(
-        qualname: &'static str,
-        rule: &'static str,
-        fix_hint: &'static str,
-    ) -> Self {
+    const fn finding(qualname: &'static str, rule: &'static str, fix_hint: &'static str) -> Self {
         Self {
             qualname,
             rule,
@@ -508,23 +504,27 @@ impl StdlibSinkTable {
 
     fn normalize(qualname: &str) -> String {
         let mut q = qualname.to_string();
+        // Apply in order; some need multiple passes (e.g. `_thread.lock.acquire`).
         let replacements = [
             ("_io.", "io."),
+            ("_sqlite3.", "sqlite3."),
+            ("_thread.lock.", "threading.Lock."),
+            ("_thread.RLock.", "threading.RLock."),
             ("_thread.", "threading."),
             ("pathlib._local.Path.", "pathlib.Path."),
             ("pathlib._local.", "pathlib."),
             ("sqlite3.dbapi2.", "sqlite3."),
-            ("os.path.", "os.path."),
         ];
         for (from, to) in replacements {
             if let Some(rest) = q.strip_prefix(from) {
                 q = format!("{to}{rest}");
-                break;
             }
         }
         if q == "open" {
             return "builtins.open".to_string();
         }
+        // `_thread.lock` is the runtime type behind `threading.Lock()`.
+        q = q.replace("_thread.lock.", "threading.Lock.");
         q
     }
 }
@@ -568,10 +568,10 @@ impl SinkTable for StdlibSinkTable {
             ("TextIOWrapper.write", "io.TextIOWrapper.write"),
         ];
         for (alias, canonical) in aliases {
-            if normalized == *alias || qualname == *alias {
-                if let Some(sink) = STDLIB_SINKS.iter().find(|s| s.qualname == *canonical) {
-                    return Some(sink.hit());
-                }
+            if (normalized == *alias || qualname == *alias)
+                && let Some(sink) = STDLIB_SINKS.iter().find(|s| s.qualname == *canonical)
+            {
+                return Some(sink.hit());
             }
         }
         None

@@ -57,7 +57,11 @@ impl AsyncDoctorDb {
             system,
             vendored,
             rule_selection: Arc::new(RuleSelection::from_registry(default_lint_registry())),
-            analysis_settings: Arc::new(AnalysisSettings::default()),
+            // Infer unannotated returns so typed receivers like `self.client.get()` resolve.
+            analysis_settings: Arc::new(AnalysisSettings {
+                return_type_inference: ty_python_semantic::ReturnTypeInference::Always,
+                ..AnalysisSettings::default()
+            }),
             program_settings: ProgramSettings::empty(ty_vendored::file_system()),
             project_root: project_root.to_path_buf(),
         };
