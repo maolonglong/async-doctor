@@ -131,6 +131,30 @@ fn m3a_eager_offload_reports_and_mentions_pass_callable() {
 }
 
 #[test]
+fn m3a_awaited_async_http_clients_never_fire() {
+    let dir = clone_fixture("m3a_async_clients_ok");
+    let cache = fresh_cache_dir("m3a-async-http");
+    let report = scan_path_with_cache(&dir, Some(&cache)).unwrap();
+    let names: Vec<_> = report
+        .findings
+        .iter()
+        .map(|f| f.entry.name.as_str())
+        .collect();
+    assert!(
+        names.is_empty(),
+        "awaited AsyncClient / AsyncElasticsearch must stay clean: {names:?} findings={:?}",
+        report.findings
+    );
+    assert!(
+        report.candidates.iter().all(|c| c.rule != "blocking-http"),
+        "no blocking-http candidates either: {:?}",
+        report.candidates
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&cache);
+}
+
+#[test]
 fn m3a_asyncio_pipeline_execute_still_clean() {
     // Regression: awaited asyncio pipe.execute must not become a sync sink
     // after removing the blanket is_awaited skip.

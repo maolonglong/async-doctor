@@ -32,6 +32,20 @@ fn m3a_higher_order_kwargs_partial_bound() {
         !names.contains(&"safe_no_call"),
         "non-blocking lambda must stay clean: {names:?}"
     );
+    // Async receiver of a kwargs callback: finding attaches to `async_apply`,
+    // and the chain must still show the binding call site.
+    let async_recv = report
+        .findings
+        .iter()
+        .find(|f| f.entry.name == "async_apply")
+        .expect("async_apply receiver must be a finding");
+    let texts: Vec<_> = async_recv.chain.iter().map(|s| s.text.as_str()).collect();
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("async_apply") && t.contains("fn=")),
+        "async receiver finding must include binding hop: {texts:?}"
+    );
     let _ = fs::remove_dir_all(dir);
 }
 

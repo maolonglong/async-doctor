@@ -70,3 +70,18 @@ fn stdlib_still_resolves() {
     let t = BuiltinSinkTable::new();
     assert!(t.lookup("time.sleep").is_some());
 }
+
+#[test]
+fn module_path_async_client_is_counterpart() {
+    assert!(crate::is_async_counterpart("httpx.AsyncClient.get"));
+    assert!(crate::is_async_counterpart("httpx._client.AsyncClient.get"));
+    assert!(crate::is_async_counterpart(
+        "elasticsearch.AsyncElasticsearch.search"
+    ));
+    assert!(crate::is_async_counterpart(
+        "elasticsearch._async.client.AsyncElasticsearch.search"
+    ));
+    // Sync must stay false.
+    assert!(!crate::is_async_counterpart("httpx.Client.get"));
+    assert!(!crate::is_async_counterpart("httpx._client.Client.get"));
+}

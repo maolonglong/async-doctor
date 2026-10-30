@@ -98,6 +98,18 @@ fn edge(
 }
 
 #[test]
+fn hop_text_truncates_to_first_line() {
+    assert_eq!(
+        super::grade::truncate_hop_text(
+            "self.request(\n            \"GET\",\n            url,\n        )"
+        ),
+        "self.request("
+    );
+    assert_eq!(super::grade::truncate_hop_text("  \n  fn()  \n"), "fn()");
+    assert_eq!(super::grade::truncate_hop_text("single"), "single");
+}
+
+#[test]
 fn reconcile_strips_unconditional_when_branched() {
     let tags = [
         ConditionTag::Unconditional,

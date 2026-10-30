@@ -20,11 +20,23 @@ pub(super) fn chain_step_for(
     line: u32,
     text: String,
 ) -> ChainStep {
+    let text = truncate_hop_text(&text);
     if caller.is_third_party {
         ChainStep::third_party(file, line, text, caller.package_name.clone())
     } else {
         ChainStep::project(file, line, text)
     }
+}
+
+/// Chain hops must be a single line — multi-line call text (httpx/es wrappers)
+/// collapses to the first non-empty line so agents see one actionable site.
+pub(super) fn truncate_hop_text(text: &str) -> String {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or(text.trim());
+    line.to_string()
 }
 
 /// Aggregate key for unresolved sites: prefer a stable callee-ish snippet.

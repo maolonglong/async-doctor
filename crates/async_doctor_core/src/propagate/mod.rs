@@ -171,6 +171,43 @@ pub fn analyze_with_options(
             let mut condition_tags: Vec<ConditionTag> = Vec::new();
             let mut param_guards: Vec<(FunctionId, ParamGuard)> = Vec::new();
 
+            // When the async entry *receives* a kwargs/partial callback, the
+            // reverse path stops at that receiver and would omit the call site
+            // that passed the callable. Prepend that binding hop so agents know
+            // which line to change.
+            for &edge_idx in &path.edges {
+                let e = &facts.edges[edge_idx];
+                let Some(binder) = e.context_from_caller else {
+                    continue;
+                };
+                if binder == entry_id {
+                    continue;
+                }
+                let already = path.edges.iter().any(|&i| {
+                    let be = &facts.edges[i];
+                    be.caller == binder
+                        && matches!(be.callee, CalleeRef::Project(id) if id == e.caller)
+                });
+                if already {
+                    continue;
+                }
+                let Some(bind_e) = facts.edges.iter().find(|be| {
+                    be.caller == binder
+                        && matches!(be.callee, CalleeRef::Project(id) if id == e.caller)
+                        && (!be.positional_callables.is_empty() || !be.keyword_callables.is_empty())
+                }) else {
+                    continue;
+                };
+                let binder_fn = facts.function(binder);
+                chain_steps.push(chain_step_for(
+                    binder_fn,
+                    bind_e.file.clone(),
+                    bind_e.line,
+                    bind_e.text.clone(),
+                ));
+                condition_tags.extend(bind_e.conditions.iter().copied());
+            }
+
             for &edge_idx in &path.edges {
                 let e = &facts.edges[edge_idx];
                 let caller_fn = facts.function(e.caller);

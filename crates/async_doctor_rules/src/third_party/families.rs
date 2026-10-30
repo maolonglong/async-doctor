@@ -242,17 +242,18 @@ pub(super) fn match_family(q: &str) -> Option<SinkHit> {
             "Use `aiokafka` instead of sync `kafka-python`.",
         )));
     }
-    // elasticsearch sync
-    if q.starts_with("elasticsearch.Elasticsearch.")
-        || (q.starts_with("elasticsearch.")
-            && !q.contains("Async")
-            && (q.contains(".search")
-                || q.contains(".index")
-                || q.contains(".get")
-                || q.contains(".update")
-                || q.contains(".delete")
-                || q.contains(".bulk")
-                || q.contains(".perform_request")))
+    // elasticsearch sync (never `_async` package / `Async*` types)
+    if q.starts_with("elasticsearch.")
+        && !q.contains("Async")
+        && !q.contains("._async.")
+        && (q.starts_with("elasticsearch.Elasticsearch.")
+            || q.contains(".search")
+            || q.contains(".index")
+            || q.contains(".get")
+            || q.contains(".update")
+            || q.contains(".delete")
+            || q.contains(".bulk")
+            || q.contains(".perform_request"))
     {
         return Some(hit(&BuiltinSink::finding(
             "elasticsearch.Elasticsearch.search",

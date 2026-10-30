@@ -519,9 +519,9 @@ fn m2_pil_param_branch_sink_is_candidate() {
         !finding_names
             .iter()
             .any(|n| n.contains("image_open") || n.contains("image_save")),
-        "PIL BytesIO open/save must not be findings: {finding_names:?}"
+        "PIL open/save must not be findings (BytesIO clean; path → candidate): {finding_names:?}"
     );
-    // M3a: proven in-memory buffers must not surface as blocking-file at all.
+    // Proven in-memory buffers must not surface as blocking-file at all.
     for c in &report.candidates {
         if matches!(c.entry.name.as_str(), "use_image_open" | "use_image_save") {
             assert_ne!(
@@ -531,6 +531,22 @@ fn m2_pil_param_branch_sink_is_candidate() {
             );
         }
     }
+    // Path string behind PIL's branch guard → candidate, not finding.
+    let path_cands: Vec<_> = report
+        .candidates
+        .iter()
+        .filter(|c| {
+            matches!(
+                c.entry.name.as_str(),
+                "use_image_open_path" | "use_image_save_path"
+            ) && c.rule == "blocking-file"
+        })
+        .collect();
+    assert!(
+        !path_cands.is_empty(),
+        "path-param PIL open/save behind branch guard must be candidates: {:?}",
+        report.candidates
+    );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&cache);
 }
