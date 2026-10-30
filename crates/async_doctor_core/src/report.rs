@@ -165,6 +165,31 @@ pub struct UnusedSuppression {
     pub reason: String,
 }
 
+/// One concrete sink line and how many findings/entries reach it.
+///
+/// Additive in schema v1 — agents use this to pick the few lines that clear
+/// the most findings. Optional choke-point fields name a shared intermediate
+/// hop that dominates paths to this sink (`chokePointFindingCount == 0` means none).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SinkSiteSummary {
+    pub rule: String,
+    pub fix_group_id: String,
+    pub file: String,
+    pub line: u32,
+    pub text: String,
+    pub finding_count: u32,
+    pub entry_count: u32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub choke_point_file: String,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub choke_point_line: u32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub choke_point_text: String,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub choke_point_finding_count: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Report {
@@ -186,6 +211,9 @@ pub struct Report {
     /// Inline ignore comments that did not suppress anything. Additive in schema v1.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unused_suppressions: Vec<UnusedSuppression>,
+    /// Sink sites ranked by entry count. Additive in schema v1.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sink_sites: Vec<SinkSiteSummary>,
 }
 
 fn is_zero(v: &u32) -> bool {
@@ -204,7 +232,13 @@ impl Report {
             hidden_unresolved_candidates: 0,
             unresolved_summary: Vec::new(),
             unused_suppressions: Vec::new(),
+            sink_sites: Vec::new(),
         }
+    }
+
+    /// Refresh the additive `sinkSites` summary from current findings.
+    pub fn refresh_sink_sites(&mut self) {
+        self.sink_sites = crate::sink_sites::summarize(&self.findings);
     }
 
     /// Exit 1 when findings or unused suppressions remain; candidates ignored.
