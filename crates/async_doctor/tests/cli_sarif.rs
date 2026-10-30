@@ -140,8 +140,8 @@ fn sarif_uris_are_repo_root_relative_when_scanning_subdir() {
         String::from_utf8_lossy(&out.stderr)
     );
     let doc: Value = serde_json::from_slice(&out.stdout).expect("sarif json");
-    let uri = doc["runs"][0]["results"][0]["locations"][0]["physicalLocation"]
-        ["artifactLocation"]["uri"]
+    let uri = doc["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]
+        ["uri"]
         .as_str()
         .unwrap();
     assert!(
@@ -151,10 +151,7 @@ fn sarif_uris_are_repo_root_relative_when_scanning_subdir() {
     let src = doc["runs"][0]["originalUriBaseIds"]["%SRCROOT%"]["uri"]
         .as_str()
         .unwrap();
-    let repo_uri = format!(
-        "file://{}/",
-        repo.to_string_lossy().replace('\\', "/")
-    );
+    let repo_uri = format!("file://{}/", repo.to_string_lossy().replace('\\', "/"));
     assert_eq!(src, repo_uri, "%SRCROOT% should point at git toplevel");
 }
 

@@ -152,7 +152,9 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
             writeln!(out)?;
         }
         Format::Sarif => {
-            let src_root = repo_root_for_sarif.as_deref().unwrap_or(scan_root.as_path());
+            let src_root = repo_root_for_sarif
+                .as_deref()
+                .unwrap_or(scan_root.as_path());
             let doc = sarif::report_to_sarif(&report, &scan_root, src_root);
             let stdout = std::io::stdout();
             let mut out = stdout.lock();

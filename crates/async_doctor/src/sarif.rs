@@ -12,16 +12,19 @@ use serde_json::{Value, json};
 
 use crate::paths::normalize_path;
 
-const SARIF_SCHEMA: &str =
-    "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/sarif-2.1/schema/sarif-schema-2.1.0.json";
+const SARIF_SCHEMA: &str = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/sarif-2.1/schema/sarif-schema-2.1.0.json";
 
 /// Build a SARIF 2.1.0 document from a report.
 ///
 /// `scan_root` is the directory finding paths are relative to.
 /// `src_root` is the repository root used for `%SRCROOT%` and URI rewriting.
 pub fn report_to_sarif(report: &Report, scan_root: &Path, src_root: &Path) -> Value {
-    let scan_root = scan_root.canonicalize().unwrap_or_else(|_| scan_root.to_path_buf());
-    let src_root = src_root.canonicalize().unwrap_or_else(|_| src_root.to_path_buf());
+    let scan_root = scan_root
+        .canonicalize()
+        .unwrap_or_else(|_| scan_root.to_path_buf());
+    let src_root = src_root
+        .canonicalize()
+        .unwrap_or_else(|_| src_root.to_path_buf());
 
     let mut rules = Vec::new();
     let mut seen_rules = std::collections::BTreeSet::new();
