@@ -88,24 +88,28 @@ REASON="async-doctor found blocking IO on changed files. Fix the findings, then 
 
 $OUT"
 
+json_string() {
+  # Emit a JSON string literal for $1 (no surrounding object).
+  local esc
+  esc=$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk '{printf "%s\\n", $0}' | sed '$ s/\\n$//')
+  printf '"%s"' "$esc"
+}
+
 if [[ "$AGENT" == "cursor" ]]; then
-  # Native Cursor stop output.
-  python3 - "$REASON" <<'PY' 2>/dev/null || {
-    # Minimal JSON escape fallback without python.
-    esc=$(printf '%s' "$REASON" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk '{printf "%s\\n", $0}' | sed '$ s/\\n$//')
-    printf '{"followup_message":"%s"}\n' "$esc"
-  }
-import json, sys
-print(json.dumps({"followup_message": sys.argv[1]}))
-PY
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import json,sys; print(json.dumps({"followup_message": sys.argv[1]}))' "$REASON"
+  else
+    printf '{"followup_message":%s}\n' "$(json_string "$REASON")"
+  fi
   exit 0
 fi
 
 # Claude Code: exit 2 blocks Stop; stderr is the continuation instruction.
 # Also emit JSON decision for clients that prefer it.
-python3 - "$REASON" <<'PY' 2>/dev/null || true
-import json, sys
-print(json.dumps({"decision": "block", "reason": sys.argv[1]}))
-PY
+if command -v python3 >/dev/null 2>&1; then
+  python3 -c 'import json,sys; print(json.dumps({"decision": "block", "reason": sys.argv[1]}))' "$REASON"
+else
+  printf '{"decision":"block","reason":%s}\n' "$(json_string "$REASON")"
+fi
 echo "$REASON" >&2
 exit 2

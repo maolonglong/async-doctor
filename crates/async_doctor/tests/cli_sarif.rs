@@ -54,7 +54,7 @@ fn sarif_output_validates_against_2_1_0_schema() {
     let driver = &doc["runs"][0]["tool"]["driver"];
     assert_eq!(driver["name"], "async-doctor");
     assert!(
-        driver["version"].as_str().unwrap_or("").len() >= 1,
+        !driver["version"].as_str().unwrap_or("").is_empty(),
         "driver.version must be set"
     );
     let rules = driver["rules"].as_array().expect("rules");
