@@ -2,7 +2,7 @@
 //!
 //! All ty/ruff usage stays in this crate. Core sees only plain [`ProjectFacts`].
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
@@ -28,8 +28,8 @@ use ty_python_semantic::{
 
 use crate::db::AsyncDoctorDb;
 use crate::sitepkgs::{
-    FollowTarget, is_followable_site_packages_py, materialize_cached_functions,
-    package_meta_for_path, upsert_cache_function,
+    FollowTarget, PackageCacheBatch, is_followable_site_packages_py, materialize_cached_functions,
+    package_meta_for_path,
 };
 use async_doctor_rules::BuiltinSinkTable;
 
@@ -2094,7 +2094,37 @@ fn route_handler_arg(call: &ast::ExprCall) -> Option<&Expr> {
     }
 }
 
+/// Build an adjacency index: caller → edge indices. O(E) once, O(degree) lookup after.
+fn edges_by_caller(facts: &ProjectFacts) -> Vec<Vec<usize>> {
+    let mut idx = vec![Vec::new(); facts.functions.len()];
+    for (i, edge) in facts.edges.iter().enumerate() {
+        let c = edge.caller.index();
+        if c < idx.len() {
+            idx[c].push(i);
+        }
+    }
+    idx
+}
+
+/// Append newly added edges (and newly allocated function slots) into the index.
+/// O(ΔE + ΔF) — never rescans the full edge list.
+fn extend_edges_by_caller(facts: &ProjectFacts, idx: &mut Vec<Vec<usize>>, from_edge: usize) {
+    if idx.len() < facts.functions.len() {
+        idx.resize(facts.functions.len(), Vec::new());
+    }
+    for i in from_edge..facts.edges.len() {
+        let c = facts.edges[i].caller.index();
+        if c < idx.len() {
+            idx[c].push(i);
+        }
+    }
+}
+
 /// After first-party extraction, follow External callees into site-packages `.py` sources.
+///
+/// Determinism: BTreeSet/BTreeMap everywhere; sorted queues; sink-table Externals are
+/// **never** rewritten to Project (so rule-table findings cannot be dropped by follow).
+/// Budget applies only to non-sink follow candidates, sorted by (caller_count desc, qualname).
 fn follow_third_party(
     db: &AsyncDoctorDb,
     facts: &mut ProjectFacts,
@@ -2103,54 +2133,53 @@ fn follow_third_party(
     follow_targets: &mut HashMap<String, FollowTarget>,
 ) {
     let sinks = BuiltinSinkTable::new();
-    let mut qual_to_id: HashMap<String, FunctionId> = HashMap::new();
-    for f in &facts.functions {
-        qual_to_id.insert(f.full_qualname(), f.id);
-        if !f.module.is_empty() {
-            qual_to_id.insert(format!("{}.{}", f.module, f.qualname), f.id);
-        }
-        qual_to_id.insert(f.qualname.clone(), f.id);
-    }
+    let mut qual_to_id: BTreeMap<String, FunctionId> = BTreeMap::new();
+    let mut id_to_external_key: HashMap<FunctionId, String> = HashMap::new();
+    let mut cache_batch = PackageCacheBatch::new();
+    let mut by_caller = edges_by_caller(facts);
 
-    // Forward BFS from async entries over Project edges; collect reachable External quals.
-    let mut reachable_fns: HashSet<FunctionId> = HashSet::new();
-    let mut queue: Vec<FunctionId> = facts
+    // Forward BFS from async entries over Project edges (BTreeSet worklist = sorted).
+    let mut reachable_fns: BTreeSet<FunctionId> = BTreeSet::new();
+    let mut work: BTreeSet<FunctionId> = facts
         .functions
         .iter()
         .filter(|f| f.is_async && !f.is_sync_route)
         .map(|f| f.id)
         .collect();
-    reachable_fns.extend(queue.iter().copied());
+    reachable_fns.extend(work.iter().copied());
 
-    let mut pending_externals: Vec<String> = Vec::new();
-    let mut seen_external: HashSet<String> = HashSet::new();
+    let mut pending_externals: BTreeSet<String> = BTreeSet::new();
 
-    while let Some(fid) = queue.pop() {
-        for edge in facts.edges.iter().filter(|e| e.caller == fid) {
+    while let Some(&fid) = work.iter().next() {
+        work.remove(&fid);
+        let Some(edge_ids) = by_caller.get(fid.index()) else {
+            continue;
+        };
+        for &ei in edge_ids {
+            let edge = &facts.edges[ei];
             if edge.is_offload_wrapper {
                 continue;
             }
             match &edge.callee {
                 CalleeRef::Project(id) => {
                     if reachable_fns.insert(*id) {
-                        queue.push(*id);
+                        work.insert(*id);
                     }
                 }
                 CalleeRef::External { qualname } => {
+                    // Known sinks stay External forever — never follow/rewrite them.
                     if sinks.lookup(qualname).is_some() {
                         continue;
                     }
-                    if seen_external.insert(qualname.clone()) {
-                        pending_externals.push(qualname.clone());
-                    }
+                    pending_externals.insert(qualname.clone());
                 }
                 _ => {}
             }
         }
     }
 
-    // Group by package for cache reuse.
-    let mut by_package: HashMap<(String, String), Vec<String>> = HashMap::new();
+    // Group by package (BTreeMap = sorted).
+    let mut by_package: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
     let mut no_meta: Vec<String> = Vec::new();
     for q in &pending_externals {
         let Some(target) = follow_targets.get(q) else {
@@ -2166,15 +2195,29 @@ fn follow_third_party(
             _ => no_meta.push(q.clone()),
         }
     }
+    for wanted in by_package.values_mut() {
+        wanted.sort();
+        wanted.dedup();
+    }
+    no_meta.sort();
+    no_meta.dedup();
 
     for ((pkg, ver), wanted) in &by_package {
-        let loaded = materialize_cached_functions(facts, pkg, ver, wanted, &mut qual_to_id);
+        let edge_before = facts.edges.len();
+        let loaded = materialize_cached_functions(
+            facts,
+            pkg,
+            ver,
+            wanted,
+            &mut qual_to_id,
+            &mut id_to_external_key,
+        );
+        extend_edges_by_caller(facts, &mut by_caller, edge_before);
         for q in &loaded {
             if let Some(id) = qual_to_id.get(q) {
                 reachable_fns.insert(*id);
             }
         }
-        // Extract any not satisfied by cache.
         for q in wanted {
             if qual_to_id.contains_key(q) {
                 continue;
@@ -2182,16 +2225,26 @@ fn follow_third_party(
             let Some(target) = follow_targets.get(q).cloned() else {
                 continue;
             };
+            let edge_before = facts.edges.len();
             if let Some(id) =
                 extract_third_party_function(db, facts, def_map, qual_map, follow_targets, &target)
             {
                 qual_to_id.insert(q.clone(), id);
+                id_to_external_key.insert(id, q.clone());
                 reachable_fns.insert(id);
+                extend_edges_by_caller(facts, &mut by_caller, edge_before);
                 if let (Some(pn), Some(pv)) = (
                     facts.functions[id.index()].package_name.clone(),
                     facts.functions[id.index()].package_version.clone(),
                 ) {
-                    upsert_cache_function(&pn, &pv, &facts.functions[id.index()], &facts.edges);
+                    cache_batch.upsert_function(
+                        &pn,
+                        &pv,
+                        q,
+                        &facts.functions[id.index()],
+                        &facts.edges,
+                        &id_to_external_key,
+                    );
                 }
             }
         }
@@ -2204,51 +2257,33 @@ fn follow_third_party(
         let Some(target) = follow_targets.get(q).cloned() else {
             continue;
         };
+        let edge_before = facts.edges.len();
         if let Some(id) =
             extract_third_party_function(db, facts, def_map, qual_map, follow_targets, &target)
         {
             qual_to_id.insert(q.clone(), id);
+            id_to_external_key.insert(id, q.clone());
             reachable_fns.insert(id);
+            extend_edges_by_caller(facts, &mut by_caller, edge_before);
         }
     }
 
-    // Second pass: rewrite External edges to Project when we extracted the callee,
-    // and continue BFS one more wave for newly reachable third-party functions.
-    let mut rewrites: Vec<(usize, FunctionId)> = Vec::new();
-    for (i, edge) in facts.edges.iter().enumerate() {
-        if let CalleeRef::External { qualname } = &edge.callee
-            && let Some(id) = qual_to_id.get(qualname)
-        {
-            rewrites.push((i, *id));
-        }
-    }
-    for (i, id) in rewrites {
-        facts.edges[i].callee = CalleeRef::Project(id);
-    }
+    // Single rewrite pass: External → Project only when we extracted the callee
+    // AND the External is not a known sink (preserve rule-table findings).
+    rewrite_external_to_project(facts, &qual_to_id, &sinks);
 
-    // Follow newly reachable third-party Project edges' External callees (bounded).
-    let mut wave: Vec<FunctionId> = reachable_fns.iter().copied().collect();
-    let mut budget = 64usize;
-    while let Some(fid) = wave.pop() {
-        if budget == 0 {
-            break;
-        }
-        let edge_snapshot: Vec<_> = facts
-            .edges
-            .iter()
-            .filter(|e| e.caller == fid)
-            .cloned()
-            .collect();
-        for edge in edge_snapshot {
+    // Collect second-wave follow candidates deterministically, then apply budget.
+    let mut wave_candidates: BTreeMap<String, u32> = BTreeMap::new();
+    for &fid in &reachable_fns {
+        let Some(edge_ids) = by_caller.get(fid.index()) else {
+            continue;
+        };
+        for &ei in edge_ids {
+            let edge = &facts.edges[ei];
             if edge.is_offload_wrapper {
                 continue;
             }
             let CalleeRef::External { qualname } = &edge.callee else {
-                if let CalleeRef::Project(id) = edge.callee
-                    && reachable_fns.insert(id)
-                {
-                    wave.push(id);
-                }
                 continue;
             };
             if sinks.lookup(qualname).is_some() {
@@ -2257,30 +2292,72 @@ fn follow_third_party(
             if qual_to_id.contains_key(qualname) {
                 continue;
             }
-            let Some(target) = follow_targets.get(qualname).cloned() else {
+            if !follow_targets.contains_key(qualname) {
                 continue;
-            };
-            budget -= 1;
-            if let Some(id) =
-                extract_third_party_function(db, facts, def_map, qual_map, follow_targets, &target)
-            {
-                qual_to_id.insert(qualname.clone(), id);
-                // Rewrite matching edges.
-                for e in &mut facts.edges {
-                    if matches!(&e.callee, CalleeRef::External { qualname: q } if q == qualname) {
-                        e.callee = CalleeRef::Project(id);
-                    }
-                }
-                if reachable_fns.insert(id) {
-                    wave.push(id);
-                }
-                if let (Some(pn), Some(pv)) = (
-                    facts.functions[id.index()].package_name.clone(),
-                    facts.functions[id.index()].package_version.clone(),
-                ) {
-                    upsert_cache_function(&pn, &pv, &facts.functions[id.index()], &facts.edges);
-                }
             }
+            *wave_candidates.entry(qualname.clone()).or_insert(0) += 1;
+        }
+    }
+
+    // Relevance: more callers first, then qualname ascending. Never drop sinks (already excluded).
+    const FOLLOW_BUDGET: usize = 256;
+    let mut ranked: Vec<(u32, String)> = wave_candidates.into_iter().map(|(q, n)| (n, q)).collect();
+    ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    ranked.truncate(FOLLOW_BUDGET);
+
+    for (_count, qualname) in ranked {
+        if qual_to_id.contains_key(&qualname) {
+            continue;
+        }
+        let Some(target) = follow_targets.get(&qualname).cloned() else {
+            continue;
+        };
+        let edge_before = facts.edges.len();
+        if let Some(id) =
+            extract_third_party_function(db, facts, def_map, qual_map, follow_targets, &target)
+        {
+            qual_to_id.insert(qualname.clone(), id);
+            id_to_external_key.insert(id, qualname.clone());
+            reachable_fns.insert(id);
+            extend_edges_by_caller(facts, &mut by_caller, edge_before);
+            if let (Some(pn), Some(pv)) = (
+                facts.functions[id.index()].package_name.clone(),
+                facts.functions[id.index()].package_version.clone(),
+            ) {
+                cache_batch.upsert_function(
+                    &pn,
+                    &pv,
+                    &qualname,
+                    &facts.functions[id.index()],
+                    &facts.edges,
+                    &id_to_external_key,
+                );
+            }
+        }
+    }
+
+    // Final rewrite after the budgeted wave.
+    rewrite_external_to_project(facts, &qual_to_id, &sinks);
+
+    // One atomic write per dirty package.
+    cache_batch.flush();
+}
+
+/// Rewrite External→Project for extracted callees, skipping known sinks.
+fn rewrite_external_to_project(
+    facts: &mut ProjectFacts,
+    qual_to_id: &BTreeMap<String, FunctionId>,
+    sinks: &BuiltinSinkTable,
+) {
+    for edge in &mut facts.edges {
+        let CalleeRef::External { qualname } = &edge.callee else {
+            continue;
+        };
+        if sinks.lookup(qualname).is_some() {
+            continue;
+        }
+        if let Some(id) = qual_to_id.get(qualname) {
+            edge.callee = CalleeRef::Project(*id);
         }
     }
 }
@@ -2303,14 +2380,22 @@ fn extract_third_party_function(
     }
     let source = source_text(db, file);
     let index = line_index(db, file);
-    let rel = target.path.as_str().replace('\\', "/");
+    let abs = target.path.as_str().replace('\\', "/");
     let module = {
-        let s = rel.as_str();
-        if let Some(idx) = s.rfind("/site-packages/") {
-            module_name_from_relative(&s[idx + "/site-packages/".len()..])
+        if let Some(idx) = abs.rfind("/site-packages/") {
+            module_name_from_relative(&abs[idx + "/site-packages/".len()..])
         } else {
             String::new()
         }
+    };
+    // Stable path so cold extract and cache materialization emit identical JSON.
+    // Module already includes the top-level package (`libx.core` → `site-packages/libx/core.py`).
+    let rel = if !module.is_empty() {
+        format!("site-packages/{}.py", module.replace('.', "/"))
+    } else if let Some(idx) = abs.rfind("/site-packages/") {
+        format!("site-packages/{}", &abs[idx + "/site-packages/".len()..])
+    } else {
+        abs.clone()
     };
 
     // Find the function node by name_start.
