@@ -4,6 +4,7 @@ mod args;
 mod baseline;
 mod changed;
 mod help_cmd;
+mod sarif;
 mod suppress;
 mod text;
 
@@ -103,6 +104,13 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
             let stdout = std::io::stdout();
             let mut out = stdout.lock();
             serde_json::to_writer_pretty(&mut out, &report)?;
+            writeln!(out)?;
+        }
+        Format::Sarif => {
+            let doc = sarif::report_to_sarif(&report);
+            let stdout = std::io::stdout();
+            let mut out = stdout.lock();
+            serde_json::to_writer_pretty(&mut out, &doc)?;
             writeln!(out)?;
         }
     }

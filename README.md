@@ -5,8 +5,8 @@
 Zero-config static analysis for Python: finds sync/blocking IO reachable from
 `async def` code, and reports evidence an agent can act on.
 
-> Status: **M3** (in progress) — agent-facing explain/why, then `--changed` /
-> baseline / SARIF / integrations. Analysis core remains M2. See
+> Status: **M3** — agent-facing explain/why, `--changed` / `--baseline`, inline
+> suppressions, SARIF 2.1.0, and integrations. Analysis core remains M2. See
 > [docs/design.md](docs/design.md).
 
 ## Quick start
@@ -18,28 +18,32 @@ uvx async-doctor .
 # Or during development:
 cargo run -p async_doctor -- .
 cargo run -p async_doctor -- --format json .
-cargo run -p async_doctor -- --include-non-production --show-unresolved .
+cargo run -p async_doctor -- --format sarif . > async-doctor.sarif
 
-# Long-form rule help / site evidence (agent-facing):
+# Long-form rule help / site evidence:
 cargo run -p async_doctor -- explain blocking-sleep
 cargo run -p async_doctor -- why helpers.py:5 --path fixtures/m1_multihop
 
-# CI / agent loops (analysis is always whole-project; reporting is filtered):
+# CI / agent loops (full analysis; filtered reporting):
 cargo run -p async_doctor -- --changed .
 cargo run -p async_doctor -- --changed=origin/main .
 cargo run -p async_doctor -- --write-baseline baseline.json .
 cargo run -p async_doctor -- --baseline baseline.json .
 ```
 
-Every finding includes the full call chain (file:line per hop), a concrete fix
+Every finding includes the full call chain (`file:line` per hop), a concrete fix
 hint, a stable rule id, a `docsAnchor` into [docs/rules.md](docs/rules.md), and
-a runnable `why` command.
+a runnable `why` command. No config file — flags and inline comments only.
 
 Inline suppressions (reason required):
-`# async-doctor: ignore[blocking-sleep]: <why this is safe>`. Unused ignores fail
-the run.
 
-Exit codes:
+```python
+time.sleep(1)  # async-doctor: ignore[blocking-sleep]: brief sync boundary in CLI wrapper
+```
+
+Unused ignores fail the run.
+
+### Exit codes
 
 | Code | Meaning |
 |------|---------|
@@ -52,29 +56,27 @@ does **not** use exit code 2. Candidates never affect the exit code. Baseline
 fingerprints use stable finding ids (rule + symbol path + sink), not line numbers.
 
 By default, entries under `tests/` / `docs/` / `examples/` / `scripts/` /
-hidden dirs are skipped (count shown in the summary;
-`--include-non-production` to include). `reason=unresolved` candidates are
-hidden unless `--show-unresolved` (which also prints an aggregated pattern
-summary ranked by entries affected).
+hidden dirs are skipped (`--include-non-production` to include).
+`reason=unresolved` candidates are hidden unless `--show-unresolved`.
 
-## What M2 detects (includes M1)
+## Agent integrations
 
-- **Site-packages follow:** continues into reachable third-party `.py` down to
-  stdlib sinks; only functions reachable from project `async def` entries.
-  Per-`(package, version)` cache under `$XDG_CACHE_HOME/async-doctor`.
-  Third-party chain hops are marked in JSON (`thirdParty` / `package`).
-- **Third-party rules** (type-based; also C extensions without source):
-  `requests`, sync `httpx.Client`, `urllib3`, sync `redis`, sync SQLAlchemy
-  `Session`/`Engine` (`Engine.begin` only in `with`), `psycopg`/`psycopg2`,
-  `pymysql`, `pymongo`, `boto3`/`botocore`, sync `openai`/`anthropic`,
-  `kafka-python`, sync Elasticsearch, sync gRPC. Async counterparts never fire;
-  fix hints name the async twin.
-- **Higher-order args** and **ty-resolved offload** (not bare name), plus
-  inferred wrappers whose bodies call a real offload primitive.
-- Nested defs keyed by full scope; lambda assign+call; blocking `@property`;
-  genexprs consumed by `next`/`list`; imperative FastAPI/Starlette routes.
-- Stdlib sinks, prove-only conditions, entry labels, generator consume rules,
-  and stable finding ids from M1 are unchanged.
+Ship-ready snippets under [`integrations/`](integrations/):
+
+- [`integrations/skill/SKILL.md`](integrations/skill/SKILL.md) — teach coding
+  agents when/how to run async-doctor and fix findings
+- [`integrations/stop-hook/`](integrations/stop-hook/) — Claude Code / Cursor
+  stop-hook examples that run `async-doctor --changed` and block completion on
+  new findings
+
+## What it detects (M2 analysis)
+
+- **Site-packages follow** down to stdlib sinks; third-party hops marked in JSON
+- **Third-party rules:** `requests`, sync `httpx`, redis, SQLAlchemy, psycopg,
+  boto3, sync OpenAI/Anthropic, and more — async twins never fire
+- **Higher-order / offload:** `asyncio.to_thread`, executors, inferred wrappers
+- Stdlib sinks (sleep, socket, file, subprocess, locks), prove-only conditions,
+  entry labels, stable finding ids
 
 ## Packaging
 
