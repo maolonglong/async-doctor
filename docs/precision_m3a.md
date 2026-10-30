@@ -20,3 +20,15 @@ finding actionable. **False positives are worse than misses.**
 - Sync `Pipeline` buffering (`set`/`get`) without `execute()`
 - Bare `engine.begin()` and bare `pubsub.listen()` (not entered / not consumed)
 - `asyncio.to_thread(work)` / `run_in_executor(None, work)` with a callable ref
+
+## Measurement notes (M3a agent)
+
+The private 49-positive / 29-negative internal eval corpus is not checked into
+this repo. Baseline cited in the milestone brief: **43/49** recall, **0/29** FP
+(with venv). This change set cannot re-score that private set; reconstructed
+fixtures under `fixtures/m3a_*` plus unit tests are the in-repo proxy.
+
+On `fixtures/m3a_corpus_gaps` vs main `873a7be`: main reported 8 findings
+(including a bare-`listen()` FP); M3a reports 11 findings (adds
+`begin_entered` + `redis_sync_await`, drops bare `listen()`).
+`unsafe_async_mutation` stays quiet by design.
