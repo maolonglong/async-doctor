@@ -227,11 +227,13 @@ langgraph, home-assistant core, plus small fixtures per rule/pattern.
   parameter/branch guard (e.g. PIL `if is_path(fp):`) demote to candidates.
 - **Per-`(package, version, content-fingerprint)` disk cache** under the user
   cache dir (`v3/{tool}/{pkg}/{version}-{fingerprint}.json`), keyed by
-  External qualname; fingerprint mixes dist-info `RECORD` with `.py`
-  size+mtime so editable/patched installs invalidate. Callers (and tests)
-  may inject the cache root explicitly — do not rely on mutating
-  process-wide `XDG_CACHE_HOME` under parallel tests. Full edge summaries;
-  atomic batched writes. Cold and warm runs must agree byte-for-byte.
+  External qualname; fingerprint prefers `RECORD` (+ dist-info mtime), else
+  shallow `.py` stats — never a recursive walk per call site. Package meta
+  lookups are memoized once per scan. Callers (and tests) may inject the
+  cache root explicitly — do not rely on mutating process-wide
+  `XDG_CACHE_HOME` under parallel tests. Cached `follow_targets` only retain
+  callees that were actually analyzed (cold == warm == warm). Full edge
+  summaries; atomic batched writes.
 - **Built-in third-party rule table** (type-based + C-extension shortcut) with
   async-twin fix hints; async counterparts never fire. Redis sync `Pipeline`
   buffering (`set`/`get`/…) is not IO — only sync `Pipeline.execute()` blocks;
