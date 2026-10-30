@@ -166,7 +166,7 @@ fn write_top_sink_clusters(
             let findings_n: u32 = cluster.iter().map(|s| s.finding_count).sum();
             writeln!(
                 out,
-                "    • {} sites — same {entries} entr{}; all must be fixed \
+                "    {clusters_shown}. {} sites — same {entries} entr{}; all must be fixed \
                  (fixing one line does not clear the others):",
                 cluster.len(),
                 if entries == 1 { "y" } else { "ies" }
@@ -190,8 +190,7 @@ fn write_top_sink_clusters(
             let short = truncate_call(&site.text, 64);
             writeln!(
                 out,
-                "    {}. {}:{}  {short}  — {} finding(s), {} entr{}",
-                clusters_shown,
+                "    {clusters_shown}. {}:{}  {short}  — {} finding(s), {} entr{}",
                 site.file,
                 site.line,
                 site.finding_count,
