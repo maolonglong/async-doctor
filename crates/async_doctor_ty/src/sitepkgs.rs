@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use async_doctor_core::{
     CallEdge, CallKind, CalleeRef, ConditionTag, EntryLabel, FunctionFact, FunctionId, LiteralArg,
@@ -25,6 +26,25 @@ pub struct FollowTarget {
     pub package_version: Option<String>,
     /// Content fingerprint for cache invalidation (RECORD / py mtimes).
     pub package_fingerprint: Option<String>,
+}
+
+/// `(site-/dist-packages root, top-level import name)`.
+type PackageMetaKey = (String, String);
+/// Cached `(name, version, fingerprint)` (or absence).
+type PackageMetaValue = Option<(String, String, String)>;
+
+/// Process-local memo for package meta lookups.
+///
+/// `package_meta_for_path` used to re-`read_dir` + fingerprint on every call site;
+/// one large venv made that dominate wall/sys time. Memoize once per scan.
+static PACKAGE_META_MEMO: Mutex<Option<HashMap<PackageMetaKey, PackageMetaValue>>> =
+    Mutex::new(None);
+
+/// Clear the package-meta memo at the start of each scan (and in tests).
+pub fn clear_package_meta_memo() {
+    if let Ok(mut g) = PACKAGE_META_MEMO.lock() {
+        *g = None;
+    }
 }
 
 /// Parse `Name:` / `Version:` from a dist-info `METADATA` file.
@@ -70,9 +90,27 @@ pub fn package_meta_for_path(py_path: &Path) -> Option<(String, String, String)>
         return None;
     }
 
-    let mut entries: Vec<_> = fs::read_dir(&root).ok()?.flatten().collect();
+    let key = (root.to_string_lossy().to_string(), top.clone());
+    {
+        let mut guard = PACKAGE_META_MEMO.lock().ok()?;
+        let memo = guard.get_or_insert_with(HashMap::new);
+        if let Some(cached) = memo.get(&key) {
+            return cached.clone();
+        }
+    }
+
+    let computed = package_meta_uncached(&root, &top);
+    if let Ok(mut guard) = PACKAGE_META_MEMO.lock() {
+        let memo = guard.get_or_insert_with(HashMap::new);
+        memo.insert(key, computed.clone());
+    }
+    computed
+}
+
+fn package_meta_uncached(root: &Path, top: &str) -> Option<(String, String, String)> {
+    let mut entries: Vec<_> = fs::read_dir(root).ok()?.flatten().collect();
     entries.sort_by_key(|e| e.file_name());
-    let top_norm = normalize_dist_name(&top);
+    let top_norm = normalize_dist_name(top);
     for entry in entries {
         let fname = entry.file_name();
         let fname = fname.to_string_lossy();
@@ -92,9 +130,9 @@ pub fn package_meta_for_path(py_path: &Path) -> Option<(String, String, String)>
             return Some((name, ver, fp));
         }
     }
-    let pkg_dir = root.join(&top);
+    let pkg_dir = root.join(top);
     let fp = package_content_fingerprint(&pkg_dir);
-    Some((top, "unknown".to_string(), fp))
+    Some((top.to_string(), "unknown".to_string(), fp))
 }
 
 fn normalize_dist_name(name: &str) -> String {
@@ -216,9 +254,21 @@ impl PackageCacheBatch {
     }
 
     /// Atomically write every dirty package cache once.
+    ///
+    /// Only persist follow_targets for callees that were actually analyzed this
+    /// run (present in some package's `functions`). Otherwise warm reinjection
+    /// would follow budget-skipped targets that cold never extracted → extra
+    /// site-packages candidates and cold≠warm.
     pub fn flush(&self) {
+        let analyzed: std::collections::BTreeSet<String> = self
+            .caches
+            .values()
+            .flat_map(|c| c.functions.keys().cloned())
+            .collect();
         for ((_, _, fp), cache) in &self.caches {
-            let _ = save_package_cache(&self.root, cache, fp);
+            let mut to_save = cache.clone();
+            to_save.follow_targets.retain(|q, _| analyzed.contains(q));
+            let _ = save_package_cache(&self.root, &to_save, fp);
         }
     }
 }
@@ -234,7 +284,6 @@ fn edge_to_cached(e: &CallEdge, id_to_external_key: &HashMap<FunctionId, String>
         ),
         CalleeRef::Unresolved { reason } => ("unresolved".to_string(), reason.clone(), None, None),
         CalleeRef::Project(id) => {
-            // Prefer stable External key for third-party Project callees.
             let key = id_to_external_key
                 .get(id)
                 .cloned()
@@ -355,8 +404,20 @@ pub fn materialize_cached_functions(
     let Some(cache) = load_package_cache(cache_root, package, version, fingerprint) else {
         return Vec::new();
     };
-    // Re-inject follow targets so later waves can extract cross-package callees.
+    // Re-inject only follow targets that were analyzed (present in this cache's
+    // functions, or loadable from the target's own package cache). Prevents warm
+    // from following budget-skipped callees cold never extracted.
     for (q, t) in &cache.follow_targets {
+        if !cache.functions.contains_key(q) {
+            let loadable = match (&t.package_name, &t.package_version, &t.package_fingerprint) {
+                (Some(pn), Some(pv), Some(pfp)) => load_package_cache(cache_root, pn, pv, pfp)
+                    .is_some_and(|c| c.functions.contains_key(q)),
+                _ => false,
+            };
+            if !loadable {
+                continue;
+            }
+        }
         follow_targets
             .entry(q.clone())
             .or_insert_with(|| FollowTarget {
@@ -455,7 +516,35 @@ pub fn materialize_cached_functions(
     }
 
     // Second pass: emit edges with full summaries, resolving third_party → Project.
+    // Sort pending by external key for stable FunctionId-independent edge order…
+    // (FunctionIds already assigned; sort edges when pushing for determinism.)
+    pending_edges.sort_by(|a, b| {
+        let ka = id_to_external_key
+            .get(&a.0)
+            .map(String::as_str)
+            .unwrap_or("");
+        let kb = id_to_external_key
+            .get(&b.0)
+            .map(String::as_str)
+            .unwrap_or("");
+        ka.cmp(kb)
+    });
     for (caller, edges) in pending_edges {
+        let mut edges = edges;
+        edges.sort_by(|a, b| {
+            (
+                a.line,
+                a.occurrence,
+                a.callee_qualname.as_str(),
+                a.text.as_str(),
+            )
+                .cmp(&(
+                    b.line,
+                    b.occurrence,
+                    b.callee_qualname.as_str(),
+                    b.text.as_str(),
+                ))
+        });
         for edge in edges {
             let callee = cached_callee_to_ref(&edge, qual_to_id);
             let positional_literals = edge
