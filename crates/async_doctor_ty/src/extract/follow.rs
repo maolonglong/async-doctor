@@ -14,7 +14,9 @@ use ty_python_semantic::SemanticModel;
 
 use crate::cache::{effective_cache_root, third_party_module_path};
 use crate::db::AsyncDoctorDb;
-use crate::sitepkgs::{FollowTarget, PackageCacheBatch, materialize_cached_functions};
+use crate::sitepkgs::{
+    FollowTarget, PackageCacheBatch, PackageMetaMemo, materialize_cached_functions,
+};
 
 use super::collector::CallCollector;
 use super::constants::body_has_yield;
@@ -69,6 +71,7 @@ pub(crate) fn follow_third_party(
     def_map: &mut HashMap<DefKey, FunctionId>,
     qual_map: &mut HashMap<(String, String), FunctionId>,
     follow_targets: &mut HashMap<String, FollowTarget>,
+    package_meta: &mut PackageMetaMemo,
     cache_dir: Option<&Path>,
     follow_budget: usize,
 ) {
@@ -180,7 +183,9 @@ pub(crate) fn follow_third_party(
             };
             let edge_before = facts.edges.len();
             if let Some(id) =
-                extract_third_party_function(db, facts, def_map, qual_map, follow_targets, &target)
+                extract_third_party_function(
+                    db, facts, def_map, qual_map, follow_targets, package_meta, &target,
+                )
             {
                 qual_to_id.insert(q.clone(), id);
                 id_to_external_key.insert(id, q.clone());
@@ -215,7 +220,9 @@ pub(crate) fn follow_third_party(
         };
         let edge_before = facts.edges.len();
         if let Some(id) =
-            extract_third_party_function(db, facts, def_map, qual_map, follow_targets, &target)
+            extract_third_party_function(
+                    db, facts, def_map, qual_map, follow_targets, package_meta, &target,
+                )
         {
             qual_to_id.insert(q.clone(), id);
             id_to_external_key.insert(id, q.clone());
@@ -333,7 +340,9 @@ pub(crate) fn follow_third_party(
             };
             let edge_before = facts.edges.len();
             if let Some(id) =
-                extract_third_party_function(db, facts, def_map, qual_map, follow_targets, &target)
+                extract_third_party_function(
+                    db, facts, def_map, qual_map, follow_targets, package_meta, &target,
+                )
             {
                 qual_to_id.insert(qualname.clone(), id);
                 id_to_external_key.insert(id, qualname.clone());
@@ -368,7 +377,9 @@ pub(crate) fn follow_third_party(
             };
             let edge_before = facts.edges.len();
             if let Some(id) =
-                extract_third_party_function(db, facts, def_map, qual_map, follow_targets, &target)
+                extract_third_party_function(
+                    db, facts, def_map, qual_map, follow_targets, package_meta, &target,
+                )
             {
                 qual_to_id.insert(q.clone(), id);
                 id_to_external_key.insert(id, q.clone());
@@ -415,6 +426,7 @@ pub(crate) fn extract_third_party_function(
     def_map: &mut HashMap<DefKey, FunctionId>,
     qual_map: &mut HashMap<(String, String), FunctionId>,
     follow_targets: &mut HashMap<String, FollowTarget>,
+    package_meta: &mut PackageMetaMemo,
     target: &FollowTarget,
 ) -> Option<FunctionId> {
     let file = system_path_to_file(db, &target.path).ok()?;
@@ -571,6 +583,7 @@ pub(crate) fn extract_third_party_function(
         property_defs: &property_defs,
         task_targets: &mut task_targets,
         follow_targets,
+        package_meta,
         module_constants: &module_constants,
         current_fn: Some(id),
         current_param_names: param_names_for_visit,

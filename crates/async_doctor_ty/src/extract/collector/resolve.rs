@@ -13,7 +13,7 @@ use ty_python_semantic::{
     HasType, ImportAliasResolution, definitions_for_attribute, definitions_for_name,
 };
 
-use crate::sitepkgs::{FollowTarget, is_followable_site_packages_py, package_meta_for_path};
+use crate::sitepkgs::{FollowTarget, is_followable_site_packages_py};
 
 use super::CallCollector;
 use crate::extract::ctx::DefKey;
@@ -301,7 +301,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 .load(self.model.db());
             let node = fdef.node(&parsed);
             let std_path = PathBuf::from(sys.as_str());
-            let (pkg, ver, fp) = package_meta_for_path(&std_path)
+            let (pkg, ver, fp) = self
+                .package_meta
+                .meta_for_path(&std_path)
                 .map(|(n, v, f)| (Some(n), Some(v), Some(f)))
                 .unwrap_or((None, None, None));
             self.follow_targets.insert(
