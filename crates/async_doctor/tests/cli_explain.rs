@@ -117,9 +117,13 @@ fn text_default_is_grouped_expand_lists_all() {
     let grouped = bin().arg(&dir).output().expect("run");
     assert_eq!(grouped.status.code(), Some(1));
     let stdout = String::from_utf8_lossy(&grouped.stdout);
-    assert!(stdout.contains("fix group"), "{stdout}");
+    assert!(
+        stdout.contains("fix group") || stdout.contains("sink site"),
+        "{stdout}"
+    );
     assert!(stdout.contains("async def handler"));
     assert!(stdout.contains("fix:"));
+    assert!(stdout.contains("top sinks"), "{stdout}");
     assert!(stdout.contains("https://github.com/maolonglong/async-doctor"));
     assert!(
         !stdout.contains("other  handler"),

@@ -136,6 +136,8 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
         suppressed_by_baseline = n;
     }
 
+    report.refresh_sink_sites();
+
     match cli.format {
         Format::Text => text::write_report(
             &report,
