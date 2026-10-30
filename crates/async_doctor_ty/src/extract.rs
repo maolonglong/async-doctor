@@ -2,7 +2,7 @@
 //!
 //! All ty/ruff usage stays in this crate. Core sees only plain [`ProjectFacts`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
@@ -568,9 +568,60 @@ fn const_value(expr: &Expr) -> Option<ModuleConst> {
     }
 }
 
+/// Names that appear in any `global NAME` in this module — config toggles; never prune.
+fn collect_names_declared_global(suite: &[Stmt]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    fn walk(stmts: &[Stmt], out: &mut HashSet<String>) {
+        for stmt in stmts {
+            match stmt {
+                Stmt::Global(g) => {
+                    for n in &g.names {
+                        out.insert(n.as_str().to_string());
+                    }
+                }
+                Stmt::FunctionDef(f) => walk(&f.body, out),
+                Stmt::ClassDef(c) => walk(&c.body, out),
+                Stmt::If(i) => {
+                    walk(&i.body, out);
+                    for c in &i.elif_else_clauses {
+                        walk(&c.body, out);
+                    }
+                }
+                Stmt::For(f) => {
+                    walk(&f.body, out);
+                    walk(&f.orelse, out);
+                }
+                Stmt::While(w) => {
+                    walk(&w.body, out);
+                    walk(&w.orelse, out);
+                }
+                Stmt::With(w) => walk(&w.body, out),
+                Stmt::Try(t) => {
+                    walk(&t.body, out);
+                    for h in &t.handlers {
+                        let ast::ExceptHandler::ExceptHandler(eh) = h;
+                        walk(&eh.body, out);
+                    }
+                    walk(&t.orelse, out);
+                    walk(&t.finalbody, out);
+                }
+                Stmt::Match(m) => {
+                    for c in &m.cases {
+                        walk(&c.body, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    walk(suite, &mut out);
+    out
+}
+
 fn collect_module_constants(suite: &[Stmt]) -> HashMap<String, ModuleConst> {
     let mut assign_count: HashMap<String, u32> = HashMap::new();
     let mut values: HashMap<String, ModuleConst> = HashMap::new();
+    let globals = collect_names_declared_global(suite);
 
     let bump = |counts: &mut HashMap<String, u32>, name: &str| {
         *counts.entry(name.to_string()).or_insert(0) += 1;
@@ -619,7 +670,7 @@ fn collect_module_constants(suite: &[Stmt]) -> HashMap<String, ModuleConst> {
         }
     }
 
-    values.retain(|k, _| assign_count.get(k).copied().unwrap_or(0) == 1);
+    values.retain(|k, _| assign_count.get(k).copied().unwrap_or(0) == 1 && !globals.contains(k));
     values
 }
 
@@ -690,15 +741,34 @@ fn is_cache_miss_test(test: &Expr) -> bool {
     }
 }
 
-fn is_always_truthy(test: &Expr, constants: &HashMap<String, ModuleConst>) -> bool {
+/// Cache-*hit* early-exit tests: `x is not None`, `k in cache`.
+fn is_cache_hit_test(test: &Expr) -> bool {
     match test {
-        Expr::BooleanLiteral(b) => b.value,
-        Expr::Name(n) => matches!(constants.get(n.id.as_str()), Some(ModuleConst::True)),
-        Expr::UnaryOp(u) if matches!(u.op, ast::UnaryOp::Not) => {
-            is_dead_branch_test(u.operand.as_ref(), constants)
-        }
+        Expr::Compare(cmp) if cmp.ops.len() == 1 => match cmp.ops[0] {
+            ast::CmpOp::IsNot => {
+                matches!(cmp.operands.get(1), Some(Expr::NoneLiteral(_)))
+                    && matches!(cmp.operands.first(), Some(Expr::Name(_)))
+            }
+            ast::CmpOp::In => matches!(cmp.operands.get(1), Some(Expr::Name(_))),
+            _ => false,
+        },
         _ => false,
     }
+}
+
+fn body_always_exits(body: &[Stmt]) -> bool {
+    !body.is_empty()
+        && body
+            .iter()
+            .all(|s| matches!(s, Stmt::Return(_) | Stmt::Raise(_)))
+}
+
+#[derive(Debug, Clone, Copy)]
+enum EarlyExitKind {
+    /// Guard is provably always true and body exits — rest of suite is dead.
+    UnreachableRest,
+    /// Guard may fail — rest of suite is conditional (optionally cache-miss).
+    Conditional { cache_miss: bool },
 }
 
 struct CallCollector<'a, 'db> {
@@ -749,17 +819,13 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 self.current_param_names = fid
                     .map(|id| self.facts.function(id).param_names.clone())
                     .unwrap_or_default();
-                for s in &func.body {
-                    self.visit_stmt(s);
-                }
+                self.visit_body_seq(&func.body);
                 self.current_fn = prev;
                 self.current_param_names = prev_params;
             }
             Stmt::ClassDef(class) => {
                 self.class_stack.push(class.name.as_str().to_string());
-                for s in &class.body {
-                    self.visit_stmt(s);
-                }
+                self.visit_body_seq(&class.body);
                 self.class_stack.pop();
             }
             Stmt::If(if_stmt) => self.visit_if(if_stmt),
@@ -769,13 +835,9 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
             Stmt::While(while_stmt) => {
                 self.loop_depth += 1;
                 self.visit_expr(&while_stmt.test);
-                for s in &while_stmt.body {
-                    self.visit_stmt(s);
-                }
+                self.visit_body_seq(&while_stmt.body);
                 self.loop_depth -= 1;
-                for s in &while_stmt.orelse {
-                    self.visit_stmt(s);
-                }
+                self.visit_body_seq(&while_stmt.orelse);
             }
             Stmt::With(with_stmt) => self.visit_with(with_stmt),
             Stmt::Try(try_stmt) => self.visit_try(try_stmt),
@@ -840,6 +902,12 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 self.visit_expr(&yf.value);
                 self.consuming_generator = false;
             }
+            Expr::ListComp(lc) => self.visit_comprehension_like(&lc.elt, None, &lc.generators),
+            Expr::SetComp(sc) => self.visit_comprehension_like(&sc.elt, None, &sc.generators),
+            Expr::Generator(g) => self.visit_comprehension_like(&g.elt, None, &g.generators),
+            Expr::DictComp(dc) => {
+                self.visit_comprehension_like(&dc.value, dc.key.as_deref(), &dc.generators)
+            }
             _ => walk_expr(self, expr),
         }
     }
@@ -863,9 +931,171 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         tags
     }
 
+    /// Walk a statement suite, applying early-exit effects to subsequent stmts.
+    fn visit_body_seq(&mut self, body: &'a [Stmt]) {
+        let mut after_branch = 0u32;
+        let mut after_cache = 0u32;
+        let mut after_dead = 0u32;
+        for stmt in body {
+            if let Stmt::If(if_stmt) = stmt {
+                self.visit_if(if_stmt);
+                if after_dead == 0
+                    && let Some(kind) = self.classify_early_exit(if_stmt)
+                {
+                    match kind {
+                        EarlyExitKind::UnreachableRest => {
+                            after_dead += 1;
+                            self.dead_depth += 1;
+                        }
+                        EarlyExitKind::Conditional { cache_miss } => {
+                            after_branch += 1;
+                            self.branch_depth += 1;
+                            if cache_miss {
+                                after_cache += 1;
+                                self.cache_miss_depth += 1;
+                            }
+                        }
+                    }
+                }
+            } else {
+                self.visit_stmt(stmt);
+            }
+        }
+        self.branch_depth -= after_branch;
+        self.cache_miss_depth -= after_cache;
+        self.dead_depth -= after_dead;
+    }
+
+    fn classify_early_exit(&self, if_stmt: &ast::StmtIf) -> Option<EarlyExitKind> {
+        if !body_always_exits(&if_stmt.body) {
+            return None;
+        }
+        // Skip complex elif chains for cheap classification — still mark conditional.
+        let has_elif = if_stmt.elif_else_clauses.iter().any(|c| c.test.is_some());
+        if self.is_dead_branch_test(&if_stmt.test) {
+            // `if False: return` — does not constrain subsequent code.
+            return None;
+        }
+        if self.is_always_truthy(&if_stmt.test) {
+            // No live else that continues: rest is unreachable.
+            let else_continues = if_stmt
+                .elif_else_clauses
+                .iter()
+                .any(|c| c.test.is_none() && !body_always_exits(&c.body) && !c.body.is_empty());
+            if else_continues {
+                return Some(EarlyExitKind::Conditional { cache_miss: false });
+            }
+            return Some(EarlyExitKind::UnreachableRest);
+        }
+        if has_elif {
+            return Some(EarlyExitKind::Conditional { cache_miss: false });
+        }
+        let cache_miss = is_cache_hit_test(&if_stmt.test);
+        Some(EarlyExitKind::Conditional { cache_miss })
+    }
+
+    /// Confirm `name` binds to a once-assigned module-level constant via ty.
+    /// Returns `None` when unsure (local/param/global/import/other file).
+    fn binds_to_module_const(&self, name_expr: &ast::ExprName) -> Option<ModuleConst> {
+        let name = name_expr.id.as_str();
+        let expected = *self.module_constants.get(name)?;
+        if self.current_param_names.iter().any(|p| p == name) {
+            return None;
+        }
+        let resolved = definitions_for_name(
+            self.model,
+            name,
+            name_expr.into(),
+            ImportAliasResolution::ResolveAliases,
+        );
+        if resolved.is_empty() {
+            return None;
+        }
+        for r in &resolved {
+            let def = r.definition()?;
+            if !def.file_scope(self.model.db()).is_global() {
+                return None;
+            }
+            match def.kind(self.model.db()) {
+                DefinitionKind::Assignment(_) | DefinitionKind::AnnotatedAssignment(_) => {}
+                _ => return None,
+            }
+            let path = def.file(self.model.db()).path(self.model.db());
+            let FilePath::System(sys) = path else {
+                return None;
+            };
+            let rel = relative_display(self.ctx.db.project_root(), sys);
+            if rel != self.ctx.rel {
+                // Imported binding — do not prune on name alone.
+                return None;
+            }
+        }
+        Some(expected)
+    }
+
+    fn is_dead_branch_test(&self, test: &Expr) -> bool {
+        match test {
+            Expr::BooleanLiteral(b) => !b.value,
+            Expr::NoneLiteral(_) => true,
+            Expr::Name(name) if name.id.as_str() == "TYPE_CHECKING" => true,
+            Expr::Attribute(attr) if attr.attr.as_str() == "TYPE_CHECKING" => true,
+            Expr::Name(name) => matches!(
+                self.binds_to_module_const(name),
+                Some(ModuleConst::False | ModuleConst::None | ModuleConst::Empty)
+            ),
+            Expr::UnaryOp(u) if matches!(u.op, ast::UnaryOp::Not) => match u.operand.as_ref() {
+                Expr::BooleanLiteral(b) => b.value,
+                Expr::Name(n) => {
+                    matches!(self.binds_to_module_const(n), Some(ModuleConst::True))
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    fn is_always_truthy(&self, test: &Expr) -> bool {
+        match test {
+            Expr::BooleanLiteral(b) => b.value,
+            Expr::Name(n) => matches!(self.binds_to_module_const(n), Some(ModuleConst::True)),
+            Expr::UnaryOp(u) if matches!(u.op, ast::UnaryOp::Not) => {
+                self.is_dead_branch_test(u.operand.as_ref())
+            }
+            _ => false,
+        }
+    }
+
+    fn visit_comprehension_like(
+        &mut self,
+        elt: &'a Expr,
+        key: Option<&'a Expr>,
+        generators: &'a [ast::Comprehension],
+    ) {
+        let has_filter = generators.iter().any(|g| !g.ifs.is_empty());
+        if has_filter {
+            self.branch_depth += 1;
+        }
+        for comp in generators {
+            self.consuming_generator = true;
+            self.visit_expr(&comp.iter);
+            self.consuming_generator = false;
+            self.visit_expr(&comp.target);
+            for test in &comp.ifs {
+                self.visit_expr(test);
+            }
+        }
+        if let Some(k) = key {
+            self.visit_expr(k);
+        }
+        self.visit_expr(elt);
+        if has_filter {
+            self.branch_depth -= 1;
+        }
+    }
+
     fn visit_if(&mut self, if_stmt: &'a ast::StmtIf) {
-        let dead = is_dead_branch_test(&if_stmt.test, self.module_constants);
-        let always = is_always_truthy(&if_stmt.test, self.module_constants);
+        let dead = self.is_dead_branch_test(&if_stmt.test);
+        let always = self.is_always_truthy(&if_stmt.test);
         let cache_miss = !dead && is_cache_miss_test(&if_stmt.test);
         let param_guard = if dead {
             None
@@ -888,9 +1118,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         if let Some(g) = param_guard {
             self.active_param_guard = Some(g);
         }
-        for s in &if_stmt.body {
-            self.visit_stmt(s);
-        }
+        self.visit_body_seq(&if_stmt.body);
         self.active_param_guard = prev_guard;
         if !dead {
             if cache_miss {
@@ -911,7 +1139,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 clause
                     .test
                     .as_ref()
-                    .is_some_and(|t| is_dead_branch_test(t, self.module_constants))
+                    .is_some_and(|t| self.is_dead_branch_test(t))
             };
             let elif_cache = clause
                 .test
@@ -940,9 +1168,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             if let Some(g) = elif_guard {
                 self.active_param_guard = Some(g);
             }
-            for s in &clause.body {
-                self.visit_stmt(s);
-            }
+            self.visit_body_seq(&clause.body);
             self.active_param_guard = prev_guard;
             if !elif_dead {
                 if elif_cache {
@@ -959,9 +1185,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
     fn visit_try(&mut self, try_stmt: &'a ast::StmtTry) {
         // Any try/except/else/finally path is guarded — not unconditional.
         self.branch_depth += 1;
-        for s in &try_stmt.body {
-            self.visit_stmt(s);
-        }
+        self.visit_body_seq(&try_stmt.body);
         self.branch_depth -= 1;
         for handler in &try_stmt.handlers {
             let ast::ExceptHandler::ExceptHandler(h) = handler;
@@ -969,21 +1193,15 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 self.visit_expr(type_);
             }
             self.branch_depth += 1;
-            for s in &h.body {
-                self.visit_stmt(s);
-            }
+            self.visit_body_seq(&h.body);
             self.branch_depth -= 1;
         }
         self.branch_depth += 1;
-        for s in &try_stmt.orelse {
-            self.visit_stmt(s);
-        }
+        self.visit_body_seq(&try_stmt.orelse);
         self.branch_depth -= 1;
         // finally always runs, but keep conservative (still a try-related path).
         self.branch_depth += 1;
-        for s in &try_stmt.finalbody {
-            self.visit_stmt(s);
-        }
+        self.visit_body_seq(&try_stmt.finalbody);
         self.branch_depth -= 1;
     }
 
@@ -991,9 +1209,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         self.visit_expr(&match_stmt.subject);
         for case in &match_stmt.cases {
             self.branch_depth += 1;
-            for s in &case.body {
-                self.visit_stmt(s);
-            }
+            self.visit_body_seq(&case.body);
             self.branch_depth -= 1;
         }
     }
@@ -1020,13 +1236,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         self.visit_expr(&for_stmt.iter);
         self.consuming_generator = false;
         self.loop_depth += 1;
-        for s in &for_stmt.body {
-            self.visit_stmt(s);
-        }
+        self.visit_body_seq(&for_stmt.body);
         self.loop_depth -= 1;
-        for s in &for_stmt.orelse {
-            self.visit_stmt(s);
-        }
+        self.visit_body_seq(&for_stmt.orelse);
     }
 
     fn visit_with(&mut self, with_stmt: &'a ast::StmtWith) {
@@ -1061,9 +1273,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 self.visit_expr(opt);
             }
         }
-        for s in &with_stmt.body {
-            self.visit_stmt(s);
-        }
+        self.visit_body_seq(&with_stmt.body);
     }
 
     fn handle_call(&mut self, call: &'a ast::ExprCall) {
@@ -1488,28 +1698,6 @@ fn module_of_definition<'db>(
             Some(module_name_from_relative(rest))
         }
         FilePath::SystemVirtual(_) => None,
-    }
-}
-
-fn is_dead_branch_test(test: &Expr, constants: &HashMap<String, ModuleConst>) -> bool {
-    match test {
-        Expr::BooleanLiteral(b) => !b.value,
-        Expr::NoneLiteral(_) => true,
-        Expr::Name(name) if name.id.as_str() == "TYPE_CHECKING" => true,
-        Expr::Attribute(attr) if attr.attr.as_str() == "TYPE_CHECKING" => true,
-        Expr::Name(name) => matches!(
-            constants.get(name.id.as_str()),
-            Some(ModuleConst::False | ModuleConst::None | ModuleConst::Empty)
-        ),
-        Expr::UnaryOp(u) if matches!(u.op, ast::UnaryOp::Not) => {
-            // `if not X` is dead only when X is provably truthy.
-            match u.operand.as_ref() {
-                Expr::BooleanLiteral(b) => b.value,
-                Expr::Name(n) => matches!(constants.get(n.id.as_str()), Some(ModuleConst::True)),
-                _ => false,
-            }
-        }
-        _ => false,
     }
 }
 

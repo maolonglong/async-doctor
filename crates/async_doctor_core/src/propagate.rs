@@ -347,7 +347,12 @@ fn evaluate_param_guards(
     }
     let mut any_unknown = false;
     for &(fn_id, guard) in guards {
-        // Find the edge on the path (or direct) that calls into fn_id.
+        // Guards in the async entry's own body depend on external input — keep
+        // as findings (tagged async-branch). Only demote for callee guards.
+        if fn_id == path.entry {
+            continue;
+        }
+        // Find the edge on the path that calls into the guarded callee.
         let call_edge = path.edges.iter().find_map(|&eidx| {
             let e = &facts.edges[eidx];
             match e.callee {
@@ -355,8 +360,8 @@ fn evaluate_param_guards(
                 _ => None,
             }
         });
-        // If the sink is inside the entry itself, there is no caller arg — unknown.
         let Some(edge) = call_edge else {
+            // No caller on this path — cannot prove; demote.
             any_unknown = true;
             continue;
         };
@@ -681,6 +686,43 @@ mod tests {
         assert!(report.findings.is_empty(), "{:?}", report.findings);
         assert_eq!(report.candidates.len(), 1);
         assert_eq!(report.candidates[0].reason, "conditional");
+    }
+
+    #[test]
+    fn entry_local_param_guard_stays_finding() {
+        // async def handler(flag): if flag: sleep() — entry params are external input.
+        let mut entry = fn_fact(0, "handler", true, "a.py", 1);
+        entry.param_names = vec!["flag".into()];
+        let facts = ProjectFacts {
+            functions: vec![entry],
+            edges: vec![{
+                let mut e = edge(
+                    0,
+                    CalleeRef::External {
+                        qualname: "time.sleep".into(),
+                    },
+                    3,
+                    "time.sleep(1)",
+                    vec![ConditionTag::AsyncBranch],
+                );
+                e.param_guard = Some(ParamGuard {
+                    index: 0,
+                    inverted: false,
+                });
+                e
+            }],
+            complete: true,
+            skipped: vec![],
+        };
+        let report = analyze(&facts, &TestSinks);
+        assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+        assert!(report.candidates.is_empty(), "{:?}", report.candidates);
+        assert!(
+            report.findings[0]
+                .conditions
+                .iter()
+                .any(|c| c == "async-branch")
+        );
     }
 
     #[test]
