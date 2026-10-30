@@ -19,7 +19,8 @@ use super::CallCollector;
 use crate::extract::ctx::DefKey;
 use crate::extract::helpers::{
     is_asyncio_redis_type, is_getattr_call, is_redis_commands_mixin, is_sync_redis_type,
-    module_of_definition, normalize_asyncio_redis_type, qualname_from_definition,
+    map_redis_mixin_to_canonical_sink, module_of_definition, normalize_asyncio_redis_type,
+    qualname_from_definition,
 };
 use crate::extract::path::relative_display;
 
@@ -476,12 +477,25 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 } else {
                     recv
                 };
+                // Known redis receivers (Redis / Pipeline / asyncio): prefer
+                // receiver over mixin defining class.
+                if is_asyncio_redis_type(&recv) || is_sync_redis_type(&recv) {
+                    return Some(format!("{recv}.{}", attr.attr.as_str()));
+                }
+                // Project subclass / `super()` inside an override: map through
+                // the MRO defining class so sync-sink status is inherited;
+                // async defs stay on the asyncio key.
+                if let Some(mapped) = self.attribute_redis_mixin_sink(attr) {
+                    return Some(mapped);
+                }
                 return Some(format!("{recv}.{}", attr.attr.as_str()));
             }
             // dist-packages / weak typing: still recognize asyncio redis receivers.
             if self.expr_looks_like_asyncio_redis(&attr.value) {
                 return Some(format!("redis.asyncio.client.Redis.{}", attr.attr.as_str()));
             }
+            // Do not map bare CoreCommands without a typed non-redis receiver:
+            // untyped Pipeline shares that mixin and must stay non-sink.
         }
 
         // Prefer definitions_for_* → file_to_module + name + enclosing class.
@@ -500,7 +514,8 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             if let Some(def) = r.definition()
                 && let Some(q) = qualname_from_definition(self.model, def)
             {
-                // Bare redis mixin defs are not sync-IO without a receiver type.
+                // Bare redis mixin defs (no Attribute receiver context) are not
+                // sync-IO evidence — Pipeline buffering shares those mixins.
                 if is_redis_commands_mixin(&q) {
                     continue;
                 }
@@ -526,6 +541,40 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 let module = module_of_definition(self.model, def)?;
                 Some(format!("{module}.{name}"))
             }
+            _ => None,
+        }
+    }
+
+    /// When the receiver is a project subclass of redis, map the MRO defining
+    /// class (commands mixin) to the canonical `redis.Redis.*` /
+    /// `redis.asyncio.Redis.*` sink key.
+    fn attribute_redis_mixin_sink(&self, attr: &ruff_python_ast::ExprAttribute) -> Option<String> {
+        let try_def = |def: ty_python_core::definition::Definition<'db>| -> Option<String> {
+            let q = qualname_from_definition(self.model, def)?;
+            let kind = def.kind(self.model.db());
+            let is_async = if let DefinitionKind::Function(fdef) = kind {
+                let parsed = parsed_module(self.model.db(), def.python_file(self.model.db()))
+                    .load(self.model.db());
+                fdef.node(&parsed).is_async
+            } else {
+                false
+            };
+            map_redis_mixin_to_canonical_sink(&q, is_async)
+        };
+
+        let resolved = definitions_for_attribute(self.model, attr);
+        for r in &resolved {
+            if let Some(def) = r.definition()
+                && let Some(mapped) = try_def(def)
+            {
+                return Some(mapped);
+            }
+        }
+        // BoundMethod / FunctionLiteral on the attribute expression itself.
+        let ty = attr.inferred_type(self.model)?;
+        let env = self.model.program_environment();
+        match ty.definition(self.model.db(), &env)? {
+            TypeDefinition::Function(def) => try_def(def),
             _ => None,
         }
     }

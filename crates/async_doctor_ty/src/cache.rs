@@ -19,7 +19,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// Bump when the on-disk JSON shape / key layout changes incompatibly.
-pub const CACHE_SCHEMA_VERSION: u32 = 3;
+///
+/// v4: edges carry `callee_is_coroutine` (structural async-def gate). A v3
+/// cache would deserialize that field as `None` and fall back to name rules.
+pub const CACHE_SCHEMA_VERSION: u32 = 4;
 
 /// Tool version embedded in the cache path (from this crate's Cargo.toml).
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -397,6 +400,60 @@ mod tests {
         assert!(!loaded.functions.contains_key("demo.mod:fn"));
         // Different fingerprint must miss.
         assert!(load_package_cache(&root, "demo", "1.0.0", "otherfp").is_none());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn schema_v3_cache_is_not_reused() {
+        // v4 added `callee_is_coroutine`. A v3 document would deserialize that
+        // field as None and revive name-rule FPs — refuse to load it.
+        let dir =
+            std::env::temp_dir().join(format!("async-doctor-cache-v3-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let root = dir.join("async-doctor");
+
+        let mut cache = PackageCache::new("demo", "1.0.0");
+        assert_eq!(cache.schema_version, CACHE_SCHEMA_VERSION);
+        assert!(cache.is_compatible());
+        cache.schema_version = 3;
+        assert!(
+            !cache.is_compatible(),
+            "schema 3 must be incompatible with v{CACHE_SCHEMA_VERSION}"
+        );
+
+        // Persist a v3-shaped JSON into the *current* package path: load must
+        // reject it even though the file sits at the v4 location.
+        cache.schema_version = CACHE_SCHEMA_VERSION;
+        save_package_cache(&root, &cache, "fpv3probe").unwrap();
+        let path = package_cache_path(&root, "demo", "1.0.0", "fpv3probe");
+        let mut spoofed: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        spoofed["schema_version"] = serde_json::json!(3);
+        fs::write(&path, serde_json::to_string(&spoofed).unwrap()).unwrap();
+        assert!(
+            load_package_cache(&root, "demo", "1.0.0", "fpv3probe").is_none(),
+            "v3 schema_version in the v{CACHE_SCHEMA_VERSION} path must not load"
+        );
+
+        // A real v3 directory layout must also miss (loader only looks under vN).
+        let v3_dir = root
+            .join("v3")
+            .join(sanitize(TOOL_VERSION))
+            .join(sanitize("demo"));
+        fs::create_dir_all(&v3_dir).unwrap();
+        let v3_path = v3_dir.join(format!(
+            "{}-{}.json",
+            sanitize("1.0.0"),
+            sanitize("fpv3probe")
+        ));
+        let mut v3_doc = PackageCache::new("demo", "1.0.0");
+        v3_doc.schema_version = 3;
+        fs::write(&v3_path, serde_json::to_string(&v3_doc).unwrap()).unwrap();
+        assert!(
+            load_package_cache(&root, "demo", "1.0.0", "fpv3probe").is_none(),
+            "files under v3/ must not be reused by schema v{CACHE_SCHEMA_VERSION}"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -22,6 +22,35 @@ pub(crate) fn is_redis_commands_mixin(q: &str) -> bool {
         || q.contains("redis.commands.cluster.")
 }
 
+/// True when `q` is a redis commands-core method, including the class-stripped
+/// form ty sometimes yields (`redis.commands.core.get`).
+pub(crate) fn is_redis_commands_core_method(q: &str) -> bool {
+    if q.contains("redis.commands.cluster.") {
+        return false;
+    }
+    is_redis_commands_mixin(q)
+        || q.strip_prefix("redis.commands.core.")
+            .is_some_and(|rest| !rest.is_empty() && !rest.contains('.'))
+}
+
+/// Map a redis commands-mixin defining-class qualname to the canonical
+/// receiver sink key so project subclasses inherit sync/async status.
+///
+/// `CoreCommands.get` / class-stripped `redis.commands.core.get` →
+/// `redis.Redis.get` (sync) or `redis.asyncio.Redis.get` when `is_async`.
+/// Cluster mixins are left unmapped.
+pub(crate) fn map_redis_mixin_to_canonical_sink(q: &str, is_async: bool) -> Option<String> {
+    if !is_redis_commands_core_method(q) {
+        return None;
+    }
+    let method = q.rsplit('.').next().filter(|m| !m.is_empty())?;
+    if is_async || q.contains("AsyncCoreCommands") {
+        Some(format!("redis.asyncio.Redis.{method}"))
+    } else {
+        Some(format!("redis.Redis.{method}"))
+    }
+}
+
 pub(crate) fn qualname_from_definition<'db>(
     model: &SemanticModel<'db>,
     def: ty_python_core::definition::Definition<'db>,
@@ -295,4 +324,39 @@ fn format_attr_path(attr: &ast::ExprAttribute) -> String {
     }
     parts.reverse();
     parts.join(".")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redis_mixin_maps_to_canonical_sinks() {
+        assert_eq!(
+            map_redis_mixin_to_canonical_sink("redis.commands.core.CoreCommands.get", false)
+                .as_deref(),
+            Some("redis.Redis.get")
+        );
+        assert_eq!(
+            map_redis_mixin_to_canonical_sink("redis.commands.core.AsyncCoreCommands.get", true)
+                .as_deref(),
+            Some("redis.asyncio.Redis.get")
+        );
+        assert_eq!(
+            map_redis_mixin_to_canonical_sink("redis.commands.core.get", false).as_deref(),
+            Some("redis.Redis.get")
+        );
+        assert_eq!(
+            map_redis_mixin_to_canonical_sink("redis.commands.core.get", true).as_deref(),
+            Some("redis.asyncio.Redis.get")
+        );
+        assert!(
+            map_redis_mixin_to_canonical_sink(
+                "redis.commands.cluster.RedisClusterCommands.get",
+                false
+            )
+            .is_none()
+        );
+        assert!(map_redis_mixin_to_canonical_sink("redis.Redis.get", false).is_none());
+    }
 }

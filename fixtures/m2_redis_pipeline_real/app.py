@@ -36,3 +36,28 @@ async def asyncio_pipeline_set_ok():
     r = aioredis.Redis()
     pipe = r.pipeline()
     await pipe.set("k", "v")
+
+
+class MyRedis(redis.Redis):
+    pass
+
+
+class MyRedisOverride(redis.Redis):
+    def get(self, name, **kwargs):
+        return super().get(name, **kwargs)
+
+
+class MyAsyncRedis(aioredis.Redis):
+    pass
+
+
+async def sync_redis_subclass_get_blocks():
+    MyRedis().get("k")
+
+
+async def sync_redis_subclass_override_get_blocks():
+    MyRedisOverride().get("k")
+
+
+async def asyncio_redis_subclass_get_ok():
+    await MyAsyncRedis().get("k")

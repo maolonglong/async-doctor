@@ -195,6 +195,7 @@ fn m3a_asyncio_pipeline_execute_still_clean() {
         "sync_pipeline_set_ok",
         "asyncio_pipeline_execute_ok",
         "asyncio_pipeline_set_ok",
+        "asyncio_redis_subclass_get_ok",
     ] {
         assert!(
             !names.contains(&banned),
@@ -204,6 +205,35 @@ fn m3a_asyncio_pipeline_execute_still_clean() {
     assert!(
         names.contains(&"sync_pipeline_execute_blocks"),
         "sync pipe.execute must still fire: {names:?}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&cache);
+}
+
+#[test]
+fn m3a_sync_redis_subclass_inherits_sink() {
+    // Subclasses of sync redis.Redis must fire; asyncio subclasses must not.
+    let dir = clone_fixture("m2_redis_pipeline_real");
+    let cache = fresh_cache_dir("m3a-redis-sub");
+    let report = scan_path_with_cache(&dir, Some(&cache)).unwrap();
+    let names: Vec<_> = report
+        .findings
+        .iter()
+        .map(|f| f.entry.name.as_str())
+        .collect();
+    for expected in [
+        "sync_redis_subclass_get_blocks",
+        "sync_redis_subclass_override_get_blocks",
+        "sync_redis_get_blocks",
+    ] {
+        assert!(
+            names.contains(&expected),
+            "missing {expected}: findings={names:?}"
+        );
+    }
+    assert!(
+        !names.contains(&"asyncio_redis_subclass_get_ok"),
+        "asyncio Redis subclass must stay clean: {names:?}"
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&cache);

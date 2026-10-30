@@ -209,6 +209,7 @@ pub fn analyze_with_options(
                     bind_e.file.clone(),
                     bind_e.line,
                     bind_e.text.clone(),
+                    resolution_for_edge(facts, bind_e),
                 ));
                 condition_tags.extend(bind_e.conditions.iter().copied());
             }
