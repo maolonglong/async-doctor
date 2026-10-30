@@ -127,8 +127,46 @@ fn resolve_environment(
                 .with_context(|| format!("invalid Python environment `{selected}`"))?;
             Ok(Some(env))
         }
-        None => PythonEnvironment::discover(Some(project_root), system)
-            .context("Python environment discovery failed"),
+        None => {
+            // Prefer VIRTUAL_ENV / conda / `.venv` via ty's discover.
+            // uv and poetry in-project virtualenvs typically use `.venv`.
+            let discovered = PythonEnvironment::discover(Some(project_root), system)
+                .context("Python environment discovery failed")?;
+
+            // discover only auto-probes `.venv`. Also try `venv/` (common alias),
+            // and retry `.venv` when discover returned None.
+            if discovered.is_some() {
+                // When VIRTUAL_ENV is set, keep discover's result.
+                if system.env_var("VIRTUAL_ENV").is_ok() {
+                    return Ok(discovered);
+                }
+                // Prefer an in-project `venv/` when present and discover fell
+                // through to a non-local environment (`.venv` missing/broken).
+                let venv = project_root.join("venv");
+                if system.is_directory(&venv)
+                    && let Ok(env) =
+                        PythonEnvironment::new(&venv, SysPrefixPathOrigin::LocalVenv, system)
+                {
+                    // Only override when discover did not already pick `.venv`.
+                    let dot_venv = project_root.join(".venv");
+                    if !system.is_directory(&dot_venv) {
+                        return Ok(Some(env));
+                    }
+                }
+                return Ok(discovered);
+            }
+
+            for name in ["venv", ".venv"] {
+                let path = project_root.join(name);
+                if system.is_directory(&path)
+                    && let Ok(env) =
+                        PythonEnvironment::new(&path, SysPrefixPathOrigin::LocalVenv, system)
+                {
+                    return Ok(Some(env));
+                }
+            }
+            Ok(None)
+        }
     }
 }
 

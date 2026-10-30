@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use async_doctor_core::{
     CallEdge, CallKind, CalleeRef, ConditionTag, EntryLabel, FunctionFact, FunctionId, LiteralArg,
-    OffloadKind, ParamGuard, ProjectFacts,
+    OffloadKind, ParamGuard, ProjectFacts, SinkTable,
 };
 use ignore::WalkBuilder;
 use ruff_db::files::{File, FilePath, system_path_to_file};
@@ -27,6 +27,11 @@ use ty_python_semantic::{
 };
 
 use crate::db::AsyncDoctorDb;
+use crate::sitepkgs::{
+    FollowTarget, is_followable_site_packages_py, materialize_cached_functions,
+    package_meta_for_path, upsert_cache_function,
+};
+use async_doctor_rules::BuiltinSinkTable;
 
 /// Scan a project directory or a single `.py` file into graded facts.
 pub fn extract_path(path: &Path) -> anyhow::Result<ProjectFacts> {
@@ -194,6 +199,8 @@ fn extract_files(db: &AsyncDoctorDb, files: Vec<PathBuf>) -> anyhow::Result<Proj
     let mut qual_map: HashMap<(String, String), FunctionId> = HashMap::new();
     // Track class method names per class key for async-twin hints.
     let mut class_methods: HashMap<(String, String), Vec<String>> = HashMap::new();
+    // `@property` getters keyed by definition site.
+    let mut property_defs: HashSet<DefKey> = HashSet::new();
 
     for (_sys, file, program_file, rel, module) in &opened {
         let source = source_text(db, *file);
@@ -215,6 +222,7 @@ fn extract_files(db: &AsyncDoctorDb, files: Vec<PathBuf>) -> anyhow::Result<Proj
             &mut def_map,
             &mut qual_map,
             &mut class_methods,
+            &mut property_defs,
         );
     }
 
@@ -234,6 +242,7 @@ fn extract_files(db: &AsyncDoctorDb, files: Vec<PathBuf>) -> anyhow::Result<Proj
     // Pass 2: collect call edges with type resolution.
     // Labels for task entries: functions referenced from create_task etc.
     let mut task_targets = TaskTargets::default();
+    let mut follow_targets: HashMap<String, FollowTarget> = HashMap::new();
 
     for (_sys, file, program_file, rel, module) in &opened {
         let source = source_text(db, *file);
@@ -254,13 +263,16 @@ fn extract_files(db: &AsyncDoctorDb, files: Vec<PathBuf>) -> anyhow::Result<Proj
             ctx: &ctx,
             model: &model,
             facts: &mut facts,
-            def_map: &def_map,
-            qual_map: &qual_map,
+            def_map: &mut def_map,
+            qual_map: &mut qual_map,
+            property_defs: &property_defs,
             task_targets: &mut task_targets,
+            follow_targets: &mut follow_targets,
             module_constants: &module_constants,
             current_fn: None,
             current_param_names: Vec::new(),
             class_stack: Vec::new(),
+            fn_stack: Vec::new(),
             dead_depth: 0,
             loop_depth: 0,
             branch_depth: 0,
@@ -269,8 +281,12 @@ fn extract_files(db: &AsyncDoctorDb, files: Vec<PathBuf>) -> anyhow::Result<Proj
             consuming_generator: false,
             in_lambda: false,
             skip_lambda_body: false,
+            in_callee_position: false,
             occurrence_counter: HashMap::new(),
             pending_literals: Vec::new(),
+            pending_callables: Vec::new(),
+            local_lambdas: HashMap::new(),
+            local_genexprs: HashMap::new(),
         };
         for stmt in parsed.suite() {
             visitor.visit_stmt(stmt);
@@ -284,6 +300,9 @@ fn extract_files(db: &AsyncDoctorDb, files: Vec<PathBuf>) -> anyhow::Result<Proj
             f.label = EntryLabel::Task;
         }
     }
+
+    // M2: follow reachable third-party `.py` callees under site-packages.
+    follow_third_party(db, &mut facts, &mut def_map, &mut qual_map, &mut follow_targets);
 
     Ok(facts)
 }
@@ -302,6 +321,27 @@ fn twin_name(method: &str, methods: &[String]) -> Option<String> {
 #[derive(Default)]
 struct TaskTargets(std::collections::HashSet<FunctionId>);
 
+fn scope_qualname(class_stack: &[String], fn_stack: &[String], name: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for c in class_stack {
+        parts.push(c.as_str());
+    }
+    for f in fn_stack {
+        parts.push(f.as_str());
+    }
+    parts.push(name);
+    parts.join(".")
+}
+
+fn decorator_is_property(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call(call) => decorator_is_property(&call.func),
+        Expr::Name(n) => n.id.as_str() == "property",
+        Expr::Attribute(a) => a.attr.as_str() == "property",
+        _ => false,
+    }
+}
+
 fn collect_functions(
     ctx: &FileCtx<'_>,
     suite: &[Stmt],
@@ -309,6 +349,7 @@ fn collect_functions(
     def_map: &mut HashMap<DefKey, FunctionId>,
     qual_map: &mut HashMap<(String, String), FunctionId>,
     class_methods: &mut HashMap<(String, String), Vec<String>>,
+    property_defs: &mut HashSet<DefKey>,
 ) {
     struct Collector<'a, 'db> {
         ctx: &'a FileCtx<'db>,
@@ -316,7 +357,9 @@ fn collect_functions(
         def_map: &'a mut HashMap<DefKey, FunctionId>,
         qual_map: &'a mut HashMap<(String, String), FunctionId>,
         class_methods: &'a mut HashMap<(String, String), Vec<String>>,
+        property_defs: &'a mut HashSet<DefKey>,
         class_stack: Vec<String>,
+        fn_stack: Vec<String>,
     }
 
     impl Collector<'_, '_> {
@@ -334,12 +377,9 @@ fn collect_functions(
                     self.class_stack.pop();
                 }
                 Stmt::FunctionDef(func) => {
-                    let qualname = if self.class_stack.is_empty() {
-                        func.name.as_str().to_string()
-                    } else {
-                        format!("{}.{}", self.class_stack.join("."), func.name.as_str())
-                    };
-                    if !self.class_stack.is_empty() {
+                    let qualname =
+                        scope_qualname(&self.class_stack, &self.fn_stack, func.name.as_str());
+                    if !self.class_stack.is_empty() && self.fn_stack.is_empty() {
                         let class = self.class_stack.join(".");
                         self.class_methods
                             .entry((self.ctx.module.clone(), class))
@@ -354,6 +394,10 @@ fn collect_functions(
                         file: self.ctx.rel.clone(),
                         name_start: u32::from(func.name.range.start()),
                     };
+                    if func.decorator_list.iter().any(|d| decorator_is_property(&d.expression))
+                    {
+                        self.property_defs.insert(key.clone());
+                    }
                     self.def_map.insert(key, id);
                     self.qual_map
                         .insert((self.ctx.module.clone(), qualname.clone()), id);
@@ -375,10 +419,17 @@ fn collect_functions(
                         is_sync_route,
                         async_twins: Vec::new(),
                         param_names,
+                        is_third_party: false,
+                        package_name: None,
+                        package_version: None,
+                        invokes_params: Vec::new(),
+                        is_offload_wrapper: false,
                     });
 
-                    // Nested functions.
+                    // Nested functions — push enclosing name onto fn_stack.
+                    self.fn_stack.push(func.name.as_str().to_string());
                     self.visit_body(&func.body);
+                    self.fn_stack.pop();
                 }
                 Stmt::If(if_stmt) => {
                     self.visit_body(&if_stmt.body);
@@ -422,7 +473,9 @@ fn collect_functions(
         def_map,
         qual_map,
         class_methods,
+        property_defs,
         class_stack: Vec::new(),
+        fn_stack: Vec::new(),
     };
     c.visit_body(suite);
 }
@@ -775,13 +828,16 @@ struct CallCollector<'a, 'db> {
     ctx: &'a FileCtx<'db>,
     model: &'a SemanticModel<'db>,
     facts: &'a mut ProjectFacts,
-    def_map: &'a HashMap<DefKey, FunctionId>,
-    qual_map: &'a HashMap<(String, String), FunctionId>,
+    def_map: &'a mut HashMap<DefKey, FunctionId>,
+    qual_map: &'a mut HashMap<(String, String), FunctionId>,
+    property_defs: &'a HashSet<DefKey>,
     task_targets: &'a mut TaskTargets,
+    follow_targets: &'a mut HashMap<String, FollowTarget>,
     module_constants: &'a HashMap<String, ModuleConst>,
     current_fn: Option<FunctionId>,
     current_param_names: Vec<String>,
     class_stack: Vec<String>,
+    fn_stack: Vec<String>,
     dead_depth: u32,
     loop_depth: u32,
     branch_depth: u32,
@@ -792,9 +848,17 @@ struct CallCollector<'a, 'db> {
     in_lambda: bool,
     /// When true, the enclosing lambda was passed to an offload boundary.
     skip_lambda_body: bool,
+    /// True while visiting `call.func` — suppress PropertyGet on that Attribute.
+    in_callee_position: bool,
     occurrence_counter: HashMap<(FunctionId, String), u32>,
     /// Literals for the call currently being recorded (set by handle_call).
     pending_literals: Vec<Option<LiteralArg>>,
+    /// Positional callables for the call currently being recorded.
+    pending_callables: Vec<Option<FunctionId>>,
+    /// Local name → lambda assigned in the current function.
+    local_lambdas: HashMap<String, &'a ast::ExprLambda>,
+    /// Local name → generator expression assigned in the current function.
+    local_genexprs: HashMap<String, &'a ast::ExprGenerator>,
 }
 
 impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
@@ -804,29 +868,42 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
         }
         match stmt {
             Stmt::FunctionDef(func) => {
-                let qualname = if self.class_stack.is_empty() {
-                    func.name.as_str().to_string()
-                } else {
-                    format!("{}.{}", self.class_stack.join("."), func.name.as_str())
-                };
+                let qualname =
+                    scope_qualname(&self.class_stack, &self.fn_stack, func.name.as_str());
                 let fid = self
                     .qual_map
                     .get(&(self.ctx.module.clone(), qualname))
                     .copied();
                 let prev = self.current_fn;
                 let prev_params = std::mem::take(&mut self.current_param_names);
+                let prev_lambdas = std::mem::take(&mut self.local_lambdas);
+                let prev_genexprs = std::mem::take(&mut self.local_genexprs);
                 self.current_fn = fid;
                 self.current_param_names = fid
                     .map(|id| self.facts.function(id).param_names.clone())
                     .unwrap_or_default();
+                self.fn_stack.push(func.name.as_str().to_string());
                 self.visit_body_seq(&func.body);
+                self.fn_stack.pop();
                 self.current_fn = prev;
                 self.current_param_names = prev_params;
+                self.local_lambdas = prev_lambdas;
+                self.local_genexprs = prev_genexprs;
             }
             Stmt::ClassDef(class) => {
                 self.class_stack.push(class.name.as_str().to_string());
                 self.visit_body_seq(&class.body);
                 self.class_stack.pop();
+            }
+            Stmt::Assign(assign) => {
+                self.note_local_assign(assign);
+                walk_stmt(self, stmt);
+            }
+            Stmt::AnnAssign(ann) => {
+                if let (Expr::Name(n), Some(value)) = (ann.target.as_ref(), ann.value.as_ref()) {
+                    self.note_local_binding(n.id.as_str(), value);
+                }
+                walk_stmt(self, stmt);
             }
             Stmt::If(if_stmt) => self.visit_if(if_stmt),
             Stmt::For(for_stmt) => {
@@ -884,7 +961,9 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                     }
                 } else if consumer {
                     // list(gen()) / next(gen()) — nested generator calls are consumed.
+                    self.in_callee_position = true;
                     self.visit_expr(&call.func);
+                    self.in_callee_position = false;
                     self.consuming_generator = true;
                     for arg in &call.arguments.args {
                         self.visit_expr(arg);
@@ -894,8 +973,31 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                     }
                     self.consuming_generator = false;
                 } else {
-                    walk_expr(self, expr);
+                    self.in_callee_position = true;
+                    self.visit_expr(&call.func);
+                    self.in_callee_position = false;
+                    for arg in &call.arguments.args {
+                        self.visit_expr(arg);
+                    }
+                    for kw in &call.arguments.keywords {
+                        self.visit_expr(&kw.value);
+                    }
                 }
+            }
+            Expr::Attribute(attr) => {
+                if !self.in_callee_position {
+                    self.maybe_property_get(attr);
+                }
+                walk_expr(self, expr);
+            }
+            Expr::Name(name) => {
+                // Consuming a locally-assigned genexpr by name.
+                if self.consuming_generator
+                    && let Some(gexpr) = self.local_genexprs.get(name.id.as_str()).copied()
+                {
+                    self.visit_comprehension_like(&gexpr.elt, None, &gexpr.generators);
+                }
+                walk_expr(self, expr);
             }
             Expr::YieldFrom(yf) => {
                 self.consuming_generator = true;
@@ -904,7 +1006,12 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
             }
             Expr::ListComp(lc) => self.visit_comprehension_like(&lc.elt, None, &lc.generators),
             Expr::SetComp(sc) => self.visit_comprehension_like(&sc.elt, None, &sc.generators),
-            Expr::Generator(g) => self.visit_comprehension_like(&g.elt, None, &g.generators),
+            // Bare genexpr is deferred — only walk when consumed.
+            Expr::Generator(g) => {
+                if self.consuming_generator {
+                    self.visit_comprehension_like(&g.elt, None, &g.generators);
+                }
+            }
             Expr::DictComp(dc) => {
                 self.visit_comprehension_like(&dc.value, dc.key.as_deref(), &dc.generators)
             }
@@ -1277,20 +1384,39 @@ impl<'a, 'db> CallCollector<'a, 'db> {
     }
 
     fn handle_call(&mut self, call: &'a ast::ExprCall) {
+        // Module-level and function-level: task spawns + imperative routes.
+        self.note_task_spawn(call);
+        self.note_imperative_route(call);
+
         let Some(caller) = self.current_fn else {
-            // Module-level: still detect task spawning of async defs.
-            self.note_task_spawn(call);
             return;
         };
         if self.dead_depth > 0 || self.in_lambda {
             return;
         }
 
-        self.note_task_spawn(call);
+        // Lambda assigned to a local then called: `f = lambda: ...; f()`.
+        if let Expr::Name(name) = call.func.as_ref()
+            && let Some(lambda) = self.local_lambdas.get(name.id.as_str()).copied()
+        {
+            self.analyze_lambda_body(lambda);
+        }
 
         self.pending_literals = call.arguments.args.iter().map(literal_arg).collect();
+        self.pending_callables =
+            self.resolve_positional_callables(call.arguments.args.as_ref());
 
         if let Some(kind) = self.is_offload_callee(&call.func) {
+            // Passing a callable param into a real offload → this function is a wrapper.
+            if let Some(arg) = call.arguments.args.first()
+                && let Expr::Name(n) = arg
+                && self
+                    .current_param_names
+                    .iter()
+                    .any(|p| p == n.id.as_str())
+            {
+                self.facts.functions[caller.index()].is_offload_wrapper = true;
+            }
             self.push_edge(
                 caller,
                 CalleeRef::Offload(kind),
@@ -1299,6 +1425,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 true,
             );
             self.pending_literals.clear();
+            self.pending_callables.clear();
             return;
         }
 
@@ -1314,6 +1441,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 false,
             );
             self.pending_literals.clear();
+            self.pending_callables.clear();
             return;
         }
 
@@ -1328,6 +1456,93 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             self.push_edge(caller, callee, call.range(), kind, false);
         }
         self.pending_literals.clear();
+        self.pending_callables.clear();
+    }
+
+    fn note_local_assign(&mut self, assign: &'a ast::StmtAssign) {
+        if assign.targets.len() != 1 {
+            return;
+        }
+        let Expr::Name(n) = &assign.targets[0] else {
+            return;
+        };
+        self.note_local_binding(n.id.as_str(), &assign.value);
+    }
+
+    fn note_local_binding(&mut self, name: &str, value: &'a Expr) {
+        match value {
+            Expr::Lambda(lam) => {
+                self.local_lambdas.insert(name.to_string(), lam);
+            }
+            Expr::Generator(gexpr) => {
+                self.local_genexprs.insert(name.to_string(), gexpr);
+            }
+            _ => {
+                self.local_lambdas.remove(name);
+                self.local_genexprs.remove(name);
+            }
+        }
+    }
+
+    fn analyze_lambda_body(&mut self, lambda: &'a ast::ExprLambda) {
+        let prev_in = self.in_lambda;
+        self.in_lambda = false;
+        self.visit_expr(&lambda.body);
+        self.in_lambda = prev_in;
+    }
+
+    fn maybe_property_get(&mut self, attr: &ast::ExprAttribute) {
+        let Some(caller) = self.current_fn else {
+            return;
+        };
+        if self.dead_depth > 0 {
+            return;
+        }
+        let resolved = definitions_for_attribute(self.model, attr);
+        let mut fid = None;
+        for r in &resolved {
+            if let Some(def) = r.definition()
+                && let Some(id) = self.def_from_definition(def)
+            {
+                fid = Some(id);
+                break;
+            }
+        }
+        let Some(fid) = fid else {
+            return;
+        };
+        let is_prop = self
+            .def_map
+            .iter()
+            .any(|(k, id)| *id == fid && self.property_defs.contains(k));
+        if !is_prop {
+            return;
+        }
+        self.pending_literals.clear();
+        self.pending_callables.clear();
+        self.push_edge(
+            caller,
+            CalleeRef::Project(fid),
+            attr.range(),
+            CallKind::PropertyGet,
+            false,
+        );
+    }
+
+    fn note_imperative_route(&mut self, call: &ast::ExprCall) {
+        let Some(handler) = route_handler_arg(call) else {
+            return;
+        };
+        let Some(fid) = self.resolve_project_function(handler) else {
+            return;
+        };
+        let f = &mut self.facts.functions[fid.index()];
+        if f.label == EntryLabel::Other {
+            f.label = EntryLabel::Route;
+        }
+        if !f.is_async {
+            f.is_sync_route = true;
+        }
     }
 
     fn note_task_spawn(&mut self, call: &ast::ExprCall) {
@@ -1346,6 +1561,78 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
     }
 
+    fn resolve_positional_callables(&mut self, args: &'a [Expr]) -> Vec<Option<FunctionId>> {
+        let mut out = Vec::with_capacity(args.len());
+        for arg in args {
+            let fid = match arg {
+                Expr::Name(_) | Expr::Attribute(_) => self.resolve_project_function(arg),
+                Expr::Call(c) if is_partial_call(c) => c
+                    .arguments
+                    .args
+                    .first()
+                    .and_then(|a| self.resolve_project_function(a)),
+                Expr::Lambda(lam) => Some(self.ensure_lambda_fact(lam)),
+                _ => None,
+            };
+            out.push(fid);
+        }
+        out
+    }
+
+    fn ensure_lambda_fact(&mut self, lam: &'a ast::ExprLambda) -> FunctionId {
+        let key = DefKey {
+            file: self.ctx.rel.clone(),
+            name_start: u32::from(lam.range.start()),
+        };
+        if let Some(id) = self.def_map.get(&key).copied() {
+            return id;
+        }
+        let id = FunctionId(self.facts.functions.len() as u32);
+        let qualname = format!("<lambda@{}>", self.ctx.line_of(lam.range.start()));
+        let param_names: Vec<String> = lam
+            .parameters
+            .as_ref()
+            .map(|p| {
+                p.iter_non_variadic_params()
+                    .map(|a| a.parameter.name.as_str().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.def_map.insert(key, id);
+        self.qual_map
+            .insert((self.ctx.module.clone(), qualname.clone()), id);
+        self.facts.functions.push(FunctionFact {
+            id,
+            file: self.ctx.rel.clone(),
+            line: self.ctx.line_of(lam.range.start()),
+            module: self.ctx.module.clone(),
+            qualname,
+            is_async: false,
+            is_generator: false,
+            label: EntryLabel::Other,
+            is_sync_route: false,
+            async_twins: Vec::new(),
+            param_names,
+            is_third_party: false,
+            package_name: None,
+            package_version: None,
+            invokes_params: Vec::new(),
+            is_offload_wrapper: false,
+        });
+        // Analyze lambda body as edges from the synthetic function.
+        let prev = self.current_fn;
+        let prev_params = std::mem::take(&mut self.current_param_names);
+        let prev_in = self.in_lambda;
+        self.current_fn = Some(id);
+        self.current_param_names = self.facts.function(id).param_names.clone();
+        self.in_lambda = false;
+        self.visit_expr(&lam.body);
+        self.in_lambda = prev_in;
+        self.current_fn = prev;
+        self.current_param_names = prev_params;
+        id
+    }
+
     fn push_edge(
         &mut self,
         caller: FunctionId,
@@ -1358,6 +1645,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         if let CalleeRef::Project(id) = &callee
             && self.facts.function(*id).is_generator
             && !self.consuming_generator
+            && kind != CallKind::GeneratorConsume
         {
             return;
         }
@@ -1367,6 +1655,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             CalleeRef::External { qualname } => format!("E{qualname}"),
             CalleeRef::Unresolved { reason } => format!("U{reason}"),
             CalleeRef::Offload(k) => format!("O{}", k.as_str()),
+            CalleeRef::ParamInvoke { index } => format!("I{index}"),
         };
         let occ = self.occurrence_counter.entry((caller, key)).or_insert(0);
         let occurrence = *occ;
@@ -1383,57 +1672,28 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             occurrence,
             is_offload_wrapper,
             positional_literals: std::mem::take(&mut self.pending_literals),
+            positional_callables: std::mem::take(&mut self.pending_callables),
             param_guard: self.active_param_guard,
         });
     }
 
     fn is_offload_callee(&self, func: &Expr) -> Option<OffloadKind> {
-        // Prefer type-resolved external name when available.
-        if let Some(q) = self.external_qualname(func) {
-            return match q.as_str() {
-                "asyncio.to_thread" | "asyncio.threads.to_thread" => {
-                    Some(OffloadKind::AsyncioToThread)
-                }
-                "anyio.to_thread.run_sync" => Some(OffloadKind::AnyioToThread),
-                "starlette.concurrency.run_in_threadpool" => Some(OffloadKind::StarletteThreadpool),
-                "concurrent.futures.Executor.submit"
-                | "concurrent.futures.Executor.map"
-                | "concurrent.futures.ThreadPoolExecutor.submit"
-                | "concurrent.futures.ThreadPoolExecutor.map" => {
-                    Some(OffloadKind::ThreadPoolExecutor)
-                }
-                other if other.ends_with(".run_in_executor") => Some(OffloadKind::RunInExecutor),
-                other if other.ends_with(".submit") || other.ends_with(".map") => {
-                    // Heuristic only when type says Executor — already handled above.
-                    let _ = other;
-                    None
-                }
-                _ => None,
-            };
-        }
-        // AST fallback for common patterns when types don't resolve.
-        match func {
-            Expr::Attribute(attr) => {
-                let name = attr.attr.as_str();
-                match name {
-                    "to_thread" => Some(OffloadKind::AsyncioToThread),
-                    "run_in_executor" => Some(OffloadKind::RunInExecutor),
-                    "run_sync"
-                        if matches!(
-                            attr.value.as_ref(),
-                            Expr::Attribute(a) if a.attr.as_str() == "to_thread"
-                        ) =>
-                    {
-                        Some(OffloadKind::AnyioToThread)
-                    }
-                    "run_in_threadpool" => Some(OffloadKind::StarletteThreadpool),
-                    // Do not guess bare `.submit`/`.map` without a typed Executor.
-                    _ => None,
-                }
+        // Ty-resolved only — do not treat bare `to_thread` / `run_in_threadpool`
+        // attribute names as offload (a project function may share those names).
+        let q = self.external_qualname(func)?;
+        match q.as_str() {
+            "asyncio.to_thread" | "asyncio.threads.to_thread" => {
+                Some(OffloadKind::AsyncioToThread)
             }
-            Expr::Name(name) if name.id.as_str() == "run_in_threadpool" => {
-                Some(OffloadKind::StarletteThreadpool)
-            }
+            "anyio.to_thread.run_sync" => Some(OffloadKind::AnyioToThread),
+            "starlette.concurrency.run_in_threadpool" => Some(OffloadKind::StarletteThreadpool),
+            "concurrent.futures.Executor.submit"
+            | "concurrent.futures.Executor.map"
+            | "concurrent.futures.ThreadPoolExecutor.submit"
+            | "concurrent.futures.ThreadPoolExecutor.map"
+            | "concurrent.futures.ProcessPoolExecutor.submit"
+            | "concurrent.futures.ProcessPoolExecutor.map" => Some(OffloadKind::ThreadPoolExecutor),
+            other if other.ends_with(".run_in_executor") => Some(OffloadKind::RunInExecutor),
             _ => None,
         }
     }
@@ -1478,7 +1738,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
     }
 
-    fn resolve_callee(&self, func: &Expr) -> Option<CalleeRef> {
+    fn resolve_callee(&mut self, func: &Expr) -> Option<CalleeRef> {
         // Dynamic: getattr(...)  — never guess by name; emit unresolved candidate.
         if matches!(func, Expr::Call(c) if is_getattr_call(&c.func)) {
             return Some(CalleeRef::Unresolved {
@@ -1490,7 +1750,25 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             return Some(CalleeRef::Project(fid));
         }
 
+        // Higher-order: calling a positional parameter by name.
+        if let Expr::Name(name) = func
+            && let Some(idx) = self
+                .current_param_names
+                .iter()
+                .position(|p| p == name.id.as_str())
+        {
+            let index = idx as u32;
+            if let Some(fid) = self.current_fn {
+                let invokes = &mut self.facts.functions[fid.index()].invokes_params;
+                if !invokes.contains(&index) {
+                    invokes.push(index);
+                }
+            }
+            return Some(CalleeRef::ParamInvoke { index });
+        }
+
         if let Some(q) = self.external_qualname(func) {
+            self.note_follow_target(func, &q);
             return Some(CalleeRef::External { qualname: q });
         }
 
@@ -1503,6 +1781,56 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 })
             }
             _ => None,
+        }
+    }
+
+    fn note_follow_target(&mut self, func: &Expr, qualname: &str) {
+        if self.follow_targets.contains_key(qualname) {
+            return;
+        }
+        let resolved = match func {
+            Expr::Name(name) => definitions_for_name(
+                self.model,
+                name.id.as_str(),
+                name.into(),
+                ImportAliasResolution::ResolveAliases,
+            ),
+            Expr::Attribute(attr) => definitions_for_attribute(self.model, attr),
+            _ => Vec::new(),
+        };
+        for r in &resolved {
+            let Some(def) = r.definition() else {
+                continue;
+            };
+            let file = def.file(self.model.db());
+            let FilePath::System(sys) = file.path(self.model.db()) else {
+                continue;
+            };
+            if !is_followable_site_packages_py(sys.as_str()) {
+                continue;
+            }
+            let kind = def.kind(self.model.db());
+            let DefinitionKind::Function(fdef) = kind else {
+                continue;
+            };
+            let parsed =
+                parsed_module(self.model.db(), def.python_file(self.model.db())).load(self.model.db());
+            let node = fdef.node(&parsed);
+            let std_path = PathBuf::from(sys.as_str());
+            let (pkg, ver) = package_meta_for_path(&std_path)
+                .map(|(n, v)| (Some(n), Some(v)))
+                .unwrap_or((None, None));
+            self.follow_targets.insert(
+                qualname.to_string(),
+                FollowTarget {
+                    qualname: qualname.to_string(),
+                    path: sys.to_path_buf(),
+                    name_start: u32::from(node.name.range.start()),
+                    package_name: pkg,
+                    package_version: ver,
+                },
+            );
+            return;
         }
     }
 
@@ -1704,16 +2032,438 @@ fn module_of_definition<'db>(
 fn is_callable_ref(expr: &Expr) -> bool {
     match expr {
         Expr::Name(_) | Expr::Attribute(_) | Expr::Lambda(_) => true,
-        Expr::Call(call) => {
-            // functools.partial(...)
-            match call.func.as_ref() {
-                Expr::Name(n) if n.id.as_str() == "partial" => true,
-                Expr::Attribute(a) if a.attr.as_str() == "partial" => true,
-                _ => false,
-            }
-        }
+        Expr::Call(call) => is_partial_call(call),
         _ => false,
     }
+}
+
+fn is_partial_call(call: &ast::ExprCall) -> bool {
+    match call.func.as_ref() {
+        Expr::Name(n) if n.id.as_str() == "partial" => true,
+        Expr::Attribute(a) if a.attr.as_str() == "partial" => true,
+        _ => false,
+    }
+}
+
+/// Extract the route handler expression from imperative FastAPI/Starlette registration.
+fn route_handler_arg(call: &ast::ExprCall) -> Option<&Expr> {
+    let attr_name = match call.func.as_ref() {
+        Expr::Attribute(a) => Some(a.attr.as_str()),
+        Expr::Name(n) => Some(n.id.as_str()),
+        _ => None,
+    };
+    let Some(name) = attr_name else {
+        return None;
+    };
+
+    match name {
+        "add_api_route" | "add_route" => {
+            // add_api_route(path, endpoint, ...) — handler at index 1, or endpoint=
+            if let Some(arg) = call.arguments.args.get(1) {
+                return Some(arg);
+            }
+            call.arguments
+                .keywords
+                .iter()
+                .find(|k| k.arg.as_ref().is_some_and(|a| a.as_str() == "endpoint"))
+                .map(|k| &k.value)
+        }
+        "Route" | "WebSocketRoute" => {
+            // Route(path, endpoint) or Route(path, endpoint=...)
+            if let Some(arg) = call.arguments.args.get(1) {
+                return Some(arg);
+            }
+            if let Some(arg) = call.arguments.args.first() {
+                // Rare: Route(endpoint) — only if single positional and not a string.
+                if !matches!(arg, Expr::StringLiteral(_)) {
+                    return Some(arg);
+                }
+            }
+            call.arguments
+                .keywords
+                .iter()
+                .find(|k| {
+                    k.arg
+                        .as_ref()
+                        .is_some_and(|a| matches!(a.as_str(), "endpoint" | "app"))
+                })
+                .map(|k| &k.value)
+        }
+        _ => None,
+    }
+}
+
+/// After first-party extraction, follow External callees into site-packages `.py` sources.
+fn follow_third_party(
+    db: &AsyncDoctorDb,
+    facts: &mut ProjectFacts,
+    def_map: &mut HashMap<DefKey, FunctionId>,
+    qual_map: &mut HashMap<(String, String), FunctionId>,
+    follow_targets: &mut HashMap<String, FollowTarget>,
+) {
+    let sinks = BuiltinSinkTable::new();
+    let mut qual_to_id: HashMap<String, FunctionId> = HashMap::new();
+    for f in &facts.functions {
+        qual_to_id.insert(f.full_qualname(), f.id);
+        if !f.module.is_empty() {
+            qual_to_id.insert(format!("{}.{}", f.module, f.qualname), f.id);
+        }
+        qual_to_id.insert(f.qualname.clone(), f.id);
+    }
+
+    // Forward BFS from async entries over Project edges; collect reachable External quals.
+    let mut reachable_fns: HashSet<FunctionId> = HashSet::new();
+    let mut queue: Vec<FunctionId> = facts
+        .functions
+        .iter()
+        .filter(|f| f.is_async && !f.is_sync_route)
+        .map(|f| f.id)
+        .collect();
+    reachable_fns.extend(queue.iter().copied());
+
+    let mut pending_externals: Vec<String> = Vec::new();
+    let mut seen_external: HashSet<String> = HashSet::new();
+
+    while let Some(fid) = queue.pop() {
+        for edge in facts.edges.iter().filter(|e| e.caller == fid) {
+            if edge.is_offload_wrapper {
+                continue;
+            }
+            match &edge.callee {
+                CalleeRef::Project(id) => {
+                    if reachable_fns.insert(*id) {
+                        queue.push(*id);
+                    }
+                }
+                CalleeRef::External { qualname } => {
+                    if sinks.lookup(qualname).is_some() {
+                        continue;
+                    }
+                    if seen_external.insert(qualname.clone()) {
+                        pending_externals.push(qualname.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Group by package for cache reuse.
+    let mut by_package: HashMap<(String, String), Vec<String>> = HashMap::new();
+    let mut no_meta: Vec<String> = Vec::new();
+    for q in &pending_externals {
+        let Some(target) = follow_targets.get(q) else {
+            continue;
+        };
+        match (&target.package_name, &target.package_version) {
+            (Some(n), Some(v)) => {
+                by_package
+                    .entry((n.clone(), v.clone()))
+                    .or_default()
+                    .push(q.clone());
+            }
+            _ => no_meta.push(q.clone()),
+        }
+    }
+
+    for ((pkg, ver), wanted) in &by_package {
+        let loaded =
+            materialize_cached_functions(facts, pkg, ver, wanted, &mut qual_to_id);
+        for q in &loaded {
+            if let Some(id) = qual_to_id.get(q) {
+                reachable_fns.insert(*id);
+            }
+        }
+        // Extract any not satisfied by cache.
+        for q in wanted {
+            if qual_to_id.contains_key(q) {
+                continue;
+            }
+            let Some(target) = follow_targets.get(q).cloned() else {
+                continue;
+            };
+            if let Some(id) =
+                extract_third_party_function(db, facts, def_map, qual_map, follow_targets, &target)
+            {
+                qual_to_id.insert(q.clone(), id);
+                reachable_fns.insert(id);
+                if let (Some(pn), Some(pv)) = (
+                    facts.functions[id.index()].package_name.clone(),
+                    facts.functions[id.index()].package_version.clone(),
+                ) {
+                    upsert_cache_function(&pn, &pv, &facts.functions[id.index()], &facts.edges);
+                }
+            }
+        }
+    }
+
+    for q in &no_meta {
+        if qual_to_id.contains_key(q) {
+            continue;
+        }
+        let Some(target) = follow_targets.get(q).cloned() else {
+            continue;
+        };
+        if let Some(id) =
+            extract_third_party_function(db, facts, def_map, qual_map, follow_targets, &target)
+        {
+            qual_to_id.insert(q.clone(), id);
+            reachable_fns.insert(id);
+        }
+    }
+
+    // Second pass: rewrite External edges to Project when we extracted the callee,
+    // and continue BFS one more wave for newly reachable third-party functions.
+    let mut rewrites: Vec<(usize, FunctionId)> = Vec::new();
+    for (i, edge) in facts.edges.iter().enumerate() {
+        if let CalleeRef::External { qualname } = &edge.callee
+            && let Some(id) = qual_to_id.get(qualname)
+        {
+            rewrites.push((i, *id));
+        }
+    }
+    for (i, id) in rewrites {
+        facts.edges[i].callee = CalleeRef::Project(id);
+    }
+
+    // Follow newly reachable third-party Project edges' External callees (bounded).
+    let mut wave: Vec<FunctionId> = reachable_fns.iter().copied().collect();
+    let mut budget = 64usize;
+    while let Some(fid) = wave.pop() {
+        if budget == 0 {
+            break;
+        }
+        let edge_snapshot: Vec<_> = facts
+            .edges
+            .iter()
+            .filter(|e| e.caller == fid)
+            .cloned()
+            .collect();
+        for edge in edge_snapshot {
+            if edge.is_offload_wrapper {
+                continue;
+            }
+            let CalleeRef::External { qualname } = &edge.callee else {
+                if let CalleeRef::Project(id) = edge.callee
+                    && reachable_fns.insert(id)
+                {
+                    wave.push(id);
+                }
+                continue;
+            };
+            if sinks.lookup(qualname).is_some() {
+                continue;
+            }
+            if qual_to_id.contains_key(qualname) {
+                continue;
+            }
+            let Some(target) = follow_targets.get(qualname).cloned() else {
+                continue;
+            };
+            budget -= 1;
+            if let Some(id) =
+                extract_third_party_function(db, facts, def_map, qual_map, follow_targets, &target)
+            {
+                qual_to_id.insert(qualname.clone(), id);
+                // Rewrite matching edges.
+                for e in &mut facts.edges {
+                    if matches!(&e.callee, CalleeRef::External { qualname: q } if q == qualname) {
+                        e.callee = CalleeRef::Project(id);
+                    }
+                }
+                if reachable_fns.insert(id) {
+                    wave.push(id);
+                }
+                if let (Some(pn), Some(pv)) = (
+                    facts.functions[id.index()].package_name.clone(),
+                    facts.functions[id.index()].package_version.clone(),
+                ) {
+                    upsert_cache_function(&pn, &pv, &facts.functions[id.index()], &facts.edges);
+                }
+            }
+        }
+    }
+}
+
+/// Parse one site-packages function and collect its call edges into `facts`.
+fn extract_third_party_function(
+    db: &AsyncDoctorDb,
+    facts: &mut ProjectFacts,
+    def_map: &mut HashMap<DefKey, FunctionId>,
+    qual_map: &mut HashMap<(String, String), FunctionId>,
+    follow_targets: &mut HashMap<String, FollowTarget>,
+    target: &FollowTarget,
+) -> Option<FunctionId> {
+    let file = system_path_to_file(db, &target.path).ok()?;
+    let program = db.program();
+    let program_file = program.program_file(db, file);
+    let parsed = parsed_module(db, program_file.python_file(db)).load(db);
+    if parsed.has_invalid_syntax() {
+        return None;
+    }
+    let source = source_text(db, file);
+    let index = line_index(db, file);
+    let rel = target.path.as_str().replace('\\', "/");
+    let module = {
+        let s = rel.as_str();
+        if let Some(idx) = s.rfind("/site-packages/") {
+            module_name_from_relative(&s[idx + "/site-packages/".len()..])
+        } else {
+            String::new()
+        }
+    };
+
+    // Find the function node by name_start.
+    let mut found: Option<&ast::StmtFunctionDef> = None;
+    fn find_fn<'a>(
+        body: &'a [Stmt],
+        name_start: u32,
+        out: &mut Option<&'a ast::StmtFunctionDef>,
+    ) {
+        for stmt in body {
+            match stmt {
+                Stmt::FunctionDef(f) => {
+                    if u32::from(f.name.range.start()) == name_start {
+                        *out = Some(f);
+                        return;
+                    }
+                    find_fn(&f.body, name_start, out);
+                    if out.is_some() {
+                        return;
+                    }
+                }
+                Stmt::ClassDef(c) => {
+                    find_fn(&c.body, name_start, out);
+                    if out.is_some() {
+                        return;
+                    }
+                }
+                Stmt::If(i) => {
+                    find_fn(&i.body, name_start, out);
+                    for c in &i.elif_else_clauses {
+                        find_fn(&c.body, name_start, out);
+                    }
+                }
+                Stmt::For(f) => {
+                    find_fn(&f.body, name_start, out);
+                    find_fn(&f.orelse, name_start, out);
+                }
+                Stmt::While(w) => {
+                    find_fn(&w.body, name_start, out);
+                    find_fn(&w.orelse, name_start, out);
+                }
+                Stmt::With(w) => find_fn(&w.body, name_start, out),
+                Stmt::Try(t) => {
+                    find_fn(&t.body, name_start, out);
+                    for h in &t.handlers {
+                        let ast::ExceptHandler::ExceptHandler(eh) = h;
+                        find_fn(&eh.body, name_start, out);
+                    }
+                    find_fn(&t.orelse, name_start, out);
+                    find_fn(&t.finalbody, name_start, out);
+                }
+                Stmt::Match(m) => {
+                    for c in &m.cases {
+                        find_fn(&c.body, name_start, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    find_fn(parsed.suite(), target.name_start, &mut found);
+    let func = found?;
+
+    let key = DefKey {
+        file: rel.clone(),
+        name_start: target.name_start,
+    };
+    if let Some(id) = def_map.get(&key).copied() {
+        return Some(id);
+    }
+
+    // Qualname: last segment of target.qualname after module, or function name.
+    let qualname = target
+        .qualname
+        .strip_prefix(&format!("{module}."))
+        .unwrap_or(func.name.as_str())
+        .to_string();
+
+    let id = FunctionId(facts.functions.len() as u32);
+    let param_names: Vec<String> = func
+        .parameters
+        .iter_non_variadic_params()
+        .map(|a| a.parameter.name.as_str().to_string())
+        .collect();
+    facts.functions.push(FunctionFact {
+        id,
+        file: rel.clone(),
+        line: {
+            let line: OneIndexed = index.line_index(func.name.range.start());
+            line.get() as u32
+        },
+        module: module.clone(),
+        qualname: qualname.clone(),
+        is_async: func.is_async,
+        is_generator: body_has_yield(&func.body),
+        label: EntryLabel::Other,
+        is_sync_route: false,
+        async_twins: Vec::new(),
+        param_names,
+        is_third_party: true,
+        package_name: target.package_name.clone(),
+        package_version: target.package_version.clone(),
+        invokes_params: Vec::new(),
+        is_offload_wrapper: false,
+    });
+    def_map.insert(key, id);
+    qual_map.insert((module.clone(), qualname), id);
+    let param_names_for_visit = facts.functions[id.index()].param_names.clone();
+
+    let ctx = FileCtx {
+        db,
+        program_file,
+        file,
+        rel,
+        module,
+        source: source.as_str().to_string(),
+        index,
+    };
+    let model = SemanticModel::new(db, program_file);
+    let module_constants = HashMap::new();
+    let property_defs: HashSet<DefKey> = HashSet::new();
+    let mut task_targets = TaskTargets::default();
+    let mut visitor = CallCollector {
+        ctx: &ctx,
+        model: &model,
+        facts,
+        def_map,
+        qual_map,
+        property_defs: &property_defs,
+        task_targets: &mut task_targets,
+        follow_targets,
+        module_constants: &module_constants,
+        current_fn: Some(id),
+        current_param_names: param_names_for_visit,
+        class_stack: Vec::new(),
+        fn_stack: Vec::new(),
+        dead_depth: 0,
+        loop_depth: 0,
+        branch_depth: 0,
+        cache_miss_depth: 0,
+        active_param_guard: None,
+        consuming_generator: false,
+        in_lambda: false,
+        skip_lambda_body: false,
+        in_callee_position: false,
+        occurrence_counter: HashMap::new(),
+        pending_literals: Vec::new(),
+        pending_callables: Vec::new(),
+        local_lambdas: HashMap::new(),
+        local_genexprs: HashMap::new(),
+    };
+    visitor.visit_body_seq(&func.body);
+    Some(id)
 }
 
 fn is_getattr_call(func: &Expr) -> bool {

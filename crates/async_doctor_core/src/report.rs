@@ -40,10 +40,51 @@ pub struct Location {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ChainStep {
     pub file: String,
     pub line: u32,
     pub text: String,
+    /// True when this hop is inside a followed third-party (site-packages) function.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub third_party: bool,
+    /// Distribution name when `third_party` (e.g. `urllib3`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
+}
+
+impl ChainStep {
+    pub fn project(file: String, line: u32, text: String) -> Self {
+        Self {
+            file,
+            line,
+            text,
+            third_party: false,
+            package: None,
+        }
+    }
+
+    pub fn third_party(file: String, line: u32, text: String, package: Option<String>) -> Self {
+        Self {
+            file,
+            line,
+            text,
+            third_party: true,
+            package,
+        }
+    }
+}
+
+/// Aggregated unresolved-callee pattern (shown with `--show-unresolved`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnresolvedPattern {
+    /// Callee pattern key (e.g. reason string or snipped call text).
+    pub pattern: String,
+    /// Number of distinct async entries affected.
+    pub entries_affected: u32,
+    /// Number of unresolved call sites matching this pattern.
+    pub sites: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,6 +141,9 @@ pub struct Report {
     /// `unresolved` candidates omitted unless `--show-unresolved`.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub hidden_unresolved_candidates: u32,
+    /// Aggregated unresolved patterns (populated when `--show-unresolved`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_summary: Vec<UnresolvedPattern>,
 }
 
 fn is_zero(v: &u32) -> bool {
@@ -116,6 +160,7 @@ impl Report {
             skipped: Vec::new(),
             omitted_non_production_entries: 0,
             hidden_unresolved_candidates: 0,
+            unresolved_summary: Vec::new(),
         }
     }
 
