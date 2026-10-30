@@ -104,6 +104,7 @@ pub struct Fix {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Finding {
     pub id: String,
     pub rule: String,
@@ -111,10 +112,15 @@ pub struct Finding {
     pub chain: Vec<ChainStep>,
     pub conditions: Vec<String>,
     pub fix: Fix,
+    /// Runnable locator help: `async-doctor why file:line`.
     pub why: String,
+    /// Fragment into `docs/rules.md` (e.g. `#blocking-sleep`). Additive in schema v1.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub docs_anchor: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Candidate {
     pub id: String,
     pub rule: String,
@@ -124,6 +130,9 @@ pub struct Candidate {
     pub reason: String,
     pub fix: Fix,
     pub why: String,
+    /// Fragment into `docs/rules.md` (e.g. `#blocking-sleep`). Additive in schema v1.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub docs_anchor: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -197,6 +206,7 @@ mod tests {
                 fix_group_id: "g".into(),
             },
             why: "async-doctor why a.py:1".into(),
+            docs_anchor: "#blocking-sleep".into(),
         });
         assert_eq!(report.exit_code(), EXIT_FINDINGS);
     }

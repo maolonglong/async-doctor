@@ -5,10 +5,9 @@
 Zero-config static analysis for Python: finds sync/blocking IO reachable from
 `async def` code, and reports evidence an agent can act on.
 
-> Status: **M2** — follows reachable third-party code in site-packages (with a
-> per-`(package, version)` cache), built-in third-party rule table + async-twin
-> fix hints, higher-order callables, and imperative FastAPI/Starlette routes.
-> See [docs/design.md](docs/design.md).
+> Status: **M3** (in progress) — agent-facing explain/why, then `--changed` /
+> baseline / SARIF / integrations. Analysis core remains M2. See
+> [docs/design.md](docs/design.md).
 
 ## Quick start
 
@@ -20,7 +19,15 @@ uvx async-doctor .
 cargo run -p async_doctor -- .
 cargo run -p async_doctor -- --format json .
 cargo run -p async_doctor -- --include-non-production --show-unresolved .
+
+# Long-form rule help / site evidence (agent-facing):
+cargo run -p async_doctor -- explain blocking-sleep
+cargo run -p async_doctor -- why helpers.py:5 --path fixtures/m1_multihop
 ```
+
+Every finding includes the full call chain (file:line per hop), a concrete fix
+hint, a stable rule id, a `docsAnchor` into [docs/rules.md](docs/rules.md), and
+a runnable `why` command.
 
 Exit codes:
 

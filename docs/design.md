@@ -138,12 +138,15 @@ FastAPI sync `def` routes already run in a thread pool — do not report them.
 
 Default output is human text; `--format json` for agents; SARIF later.
 
-## Agent integration (later milestones)
+## Agent integration (M3)
 
 - `uvx async-doctor .` — zero-config
-- `async-doctor why file:line` — explain a site
+- `async-doctor why file:line` — explain findings touching a site (re-scan)
+- `async-doctor explain <rule-id>` — long-form rule help + `docs/rules.md` anchor
+- Findings carry full `chain[]` (file:line each hop), `fix.hint`, stable `rule`,
+  additive `docsAnchor`, and runnable `why`
 - `--changed [base]` and `--baseline` — CI / agent loops
-- Inline ignore: `# async-doctor: ignore[rule]` and `# noqa: ASYNCxxx`
+- Inline ignore: `# async-doctor: ignore[rule]: <reason>` (reason required)
 - Stop-hook snippets (Claude Code / Cursor), thin `SKILL.md`
 - MCP only after M4 if needed
 
