@@ -7,7 +7,7 @@ use async_doctor_core::{Finding, SinkSiteSummary, group_choke_point, summarize_s
 
 use super::{sink_label, write_finding_indented};
 
-const TOP_SITES_SHOWN: usize = 8;
+const TOP_CLUSTERS_SHOWN: usize = 8;
 
 pub(super) fn write_grouped(out: &mut impl Write, findings: &[Finding]) -> anyhow::Result<()> {
     let sites = summarize_sink_sites(findings);
@@ -36,7 +36,7 @@ pub(super) fn write_grouped(out: &mut impl Write, findings: &[Finding]) -> anyho
     )?;
     writeln!(
         out,
-        "(sink sites ranked by entries cleared; pass --expand for every chain)\n"
+        "(sink sites ranked by entries; shared entry sets are clustered; pass --expand for every chain)\n"
     )?;
 
     let mut sites_by_group: BTreeMap<&str, Vec<&SinkSiteSummary>> = BTreeMap::new();
@@ -104,30 +104,7 @@ pub(super) fn write_grouped(out: &mut impl Write, findings: &[Finding]) -> anyho
             )?;
         }
 
-        writeln!(
-            out,
-            "  top sinks (fix one line → clear N findings / M entries):"
-        )?;
-        for (i, site) in group_sites.iter().take(TOP_SITES_SHOWN).enumerate() {
-            let short = truncate_call(&site.text, 64);
-            writeln!(
-                out,
-                "    {}. {}:{}  {short}  — {} finding(s), {} entr{}",
-                i + 1,
-                site.file,
-                site.line,
-                site.finding_count,
-                site.entry_count,
-                if site.entry_count == 1 { "y" } else { "ies" }
-            )?;
-        }
-        if group_sites.len() > TOP_SITES_SHOWN {
-            writeln!(
-                out,
-                "    … {} more sink site(s)",
-                group_sites.len() - TOP_SITES_SHOWN
-            )?;
-        }
+        write_top_sink_clusters(out, &group_sites)?;
 
         // Representative chain: prefer a finding that hits the top sink site.
         let example = group_sites
@@ -152,6 +129,84 @@ pub(super) fn write_grouped(out: &mut impl Write, findings: &[Finding]) -> anyho
         } else {
             writeln!(out)?;
         }
+    }
+    Ok(())
+}
+
+/// Emit sink sites, clustering those that share an identical entry set.
+fn write_top_sink_clusters(
+    out: &mut impl Write,
+    group_sites: &[&SinkSiteSummary],
+) -> anyhow::Result<()> {
+    writeln!(
+        out,
+        "  top sinks (ranked by entries; shared entry sets are clustered):"
+    )?;
+
+    let mut emitted_set_ids = BTreeSet::new();
+    let mut clusters_shown = 0usize;
+    let mut sites_covered = 0usize;
+
+    for site in group_sites {
+        if clusters_shown >= TOP_CLUSTERS_SHOWN {
+            break;
+        }
+        if site.shared_entry_site_count > 1 && !site.entry_set_id.is_empty() {
+            if !emitted_set_ids.insert(site.entry_set_id.as_str()) {
+                continue; // already printed this cluster
+            }
+            let cluster: Vec<&SinkSiteSummary> = group_sites
+                .iter()
+                .copied()
+                .filter(|s| s.entry_set_id == site.entry_set_id)
+                .collect();
+            sites_covered += cluster.len();
+            clusters_shown += 1;
+            let entries = site.entry_count;
+            let findings_n: u32 = cluster.iter().map(|s| s.finding_count).sum();
+            writeln!(
+                out,
+                "    • {} sites — same {entries} entr{}; all must be fixed \
+                 (fixing one line does not clear the others):",
+                cluster.len(),
+                if entries == 1 { "y" } else { "ies" }
+            )?;
+            for s in &cluster {
+                let short = truncate_call(&s.text, 64);
+                writeln!(
+                    out,
+                    "        {}:{}  {short}  — {} finding(s)",
+                    s.file, s.line, s.finding_count
+                )?;
+            }
+            writeln!(
+                out,
+                "      → together: {findings_n} finding(s), {entries} entr{}",
+                if entries == 1 { "y" } else { "ies" }
+            )?;
+        } else {
+            sites_covered += 1;
+            clusters_shown += 1;
+            let short = truncate_call(&site.text, 64);
+            writeln!(
+                out,
+                "    {}. {}:{}  {short}  — {} finding(s), {} entr{}",
+                clusters_shown,
+                site.file,
+                site.line,
+                site.finding_count,
+                site.entry_count,
+                if site.entry_count == 1 { "y" } else { "ies" }
+            )?;
+        }
+    }
+
+    if sites_covered < group_sites.len() {
+        writeln!(
+            out,
+            "    … {} more sink site(s)",
+            group_sites.len() - sites_covered
+        )?;
     }
     Ok(())
 }

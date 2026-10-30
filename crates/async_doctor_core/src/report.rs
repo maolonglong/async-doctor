@@ -180,6 +180,14 @@ pub struct SinkSiteSummary {
     pub text: String,
     pub finding_count: u32,
     pub entry_count: u32,
+    /// Stable id of the entry set that reaches this sink (within the fix group).
+    /// Sites that share the same id reach the exact same entries — fixing one
+    /// line does not clear the others.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub entry_set_id: String,
+    /// How many sink sites in this fix group share `entry_set_id`. `1` = unique.
+    #[serde(default, skip_serializing_if = "is_lte_one")]
+    pub shared_entry_site_count: u32,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub choke_point_file: String,
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -218,6 +226,10 @@ pub struct Report {
 
 fn is_zero(v: &u32) -> bool {
     *v == 0
+}
+
+fn is_lte_one(v: &u32) -> bool {
+    *v <= 1
 }
 
 impl Report {
