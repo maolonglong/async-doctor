@@ -239,13 +239,21 @@ langgraph, home-assistant core, plus small fixtures per rule/pattern.
   parameter/branch guard (e.g. PIL `if is_path(fp):`) demote to candidates.
 - **Per-`(package, version, content-fingerprint)` disk cache** under the user
   cache dir (`v3/{tool}/{pkg}/{version}-{fingerprint}.json`), keyed by
-  External qualname; fingerprint prefers `RECORD` (+ dist-info mtime), else
-  shallow `.py` stats — never a recursive walk per call site. Package meta
-  lookups are memoized once per scan. Callers (and tests) may inject the
-  cache root explicitly — do not rely on mutating process-wide
+  External qualname. Package meta lookups are memoized in a **per-scan**
+  `PackageMetaMemo` (no process-global state). Callers (and tests) may inject
+  the cache root explicitly — do not rely on mutating process-wide
   `XDG_CACHE_HOME` under parallel tests. Cached `follow_targets` only retain
   callees that were actually analyzed (cold == warm == warm). Full edge
   summaries; atomic batched writes.
+
+  **Content fingerprint (coarse):** prefer hashing wheel `RECORD` bytes mixed
+  with the dist-info directory mtime; else `METADATA` len+mtime; else a
+  one-level `(name,len,mtime)` of `.py` files in the package dir — never a
+  recursive walk. **Limits:** does not see edits to nested non-`.py` assets,
+  C-extension binaries, or files outside the package/dist-info tree; identical
+  `RECORD` bytes with an unchanged dist-info mtime will reuse a cache entry
+  even if an unpacked `.py` was patched in place (editable installs that
+  refresh dist-info mtime invalidate correctly).
 - **Built-in third-party rule table** (type-based + C-extension shortcut) with
   async-twin fix hints; async counterparts never fire. Redis sync `Pipeline`
   buffering (`set`/`get`/…) is not IO — only sync `Pipeline.execute()` blocks;
