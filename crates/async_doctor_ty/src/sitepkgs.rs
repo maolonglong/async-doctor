@@ -156,14 +156,19 @@ pub fn is_followable_site_packages_py(path_str: &str) -> bool {
 
 type PackageCacheKey = (String, String, String);
 
-/// Per-scan package-cache index: load each on-disk entry at most once, materialize
-/// from the in-memory map, and flush only packages dirtied by upserts.
+/// Per-scan package-cache index: each on-disk hit is parsed once and reused.
+/// Negative probes are sticky for speed, but [`Self::reprobe`] clears a miss
+/// when snapshot consistency would otherwise force an extract fallback (a peer
+/// may have written the file mid-scan). Flush only packages dirtied by upserts.
 pub struct PackageCacheBatch {
     root: PathBuf,
     /// (package, version, fingerprint) → cache loaded or created this scan.
     caches: BTreeMap<PackageCacheKey, PackageCache>,
-    /// Keys already probed on disk (hit or miss) so we never re-read/re-parse.
-    probed: BTreeSet<PackageCacheKey>,
+    /// Keys whose current entry was populated from on-disk JSON (peer or prior
+    /// run). In-progress upserts are not listed here.
+    from_disk: BTreeSet<PackageCacheKey>,
+    /// Negative disk probes remembered this scan (cleared by [`Self::reprobe`]).
+    probed_miss: BTreeSet<PackageCacheKey>,
     /// Packages mutated via [`Self::upsert_function`] — only these are written.
     dirty: BTreeSet<PackageCacheKey>,
 }
@@ -173,7 +178,8 @@ impl PackageCacheBatch {
         Self {
             root: cache_root,
             caches: BTreeMap::new(),
-            probed: BTreeSet::new(),
+            from_disk: BTreeSet::new(),
+            probed_miss: BTreeSet::new(),
             dirty: BTreeSet::new(),
         }
     }
@@ -186,23 +192,43 @@ impl PackageCacheBatch {
         )
     }
 
-    /// Ensure this package's on-disk cache has been probed once this scan.
-    /// Disk hits are stored in [`Self::caches`]; misses are remembered in
-    /// [`Self::probed`] without inserting an empty entry.
+    /// Load this package's on-disk cache into the per-scan index on first probe.
+    ///
+    /// Hits stay in [`Self::caches`]. Misses are sticky in [`Self::probed_miss`]
+    /// so warm scans do not re-stat the same absent path every wave — call
+    /// [`Self::reprobe`] before treating a miss as a snapshot inconsistency.
     pub fn ensure_loaded(&mut self, package: &str, version: &str, fingerprint: &str) {
         let key = Self::key(package, version, fingerprint);
-        if !self.probed.insert(key.clone()) {
+        if self.caches.contains_key(&key) || self.probed_miss.contains(&key) {
             return;
         }
         if let Some(cache) = load_package_cache(&self.root, package, version, fingerprint) {
-            self.caches.insert(key, cache);
+            self.caches.insert(key.clone(), cache);
+            self.from_disk.insert(key);
+        } else {
+            self.probed_miss.insert(key);
         }
+    }
+
+    /// Clear a sticky miss and read disk again (peer may have created the file).
+    pub fn reprobe(&mut self, package: &str, version: &str, fingerprint: &str) {
+        let key = Self::key(package, version, fingerprint);
+        if self.caches.contains_key(&key) {
+            return;
+        }
+        self.probed_miss.remove(&key);
+        self.ensure_loaded(package, version, fingerprint);
     }
 
     /// True when a compatible on-disk (or already-loaded) cache exists for this key.
     pub fn has(&self, package: &str, version: &str, fingerprint: &str) -> bool {
         self.caches
             .contains_key(&Self::key(package, version, fingerprint))
+    }
+
+    pub fn is_from_disk(&self, package: &str, version: &str, fingerprint: &str) -> bool {
+        self.from_disk
+            .contains(&Self::key(package, version, fingerprint))
     }
 
     pub fn get(&self, package: &str, version: &str, fingerprint: &str) -> Option<&PackageCache> {
@@ -212,11 +238,18 @@ impl PackageCacheBatch {
     fn cache_mut(&mut self, package: &str, version: &str, fingerprint: &str) -> &mut PackageCache {
         let key = Self::key(package, version, fingerprint);
         self.dirty.insert(key.clone());
+        self.probed_miss.remove(&key);
         if !self.caches.contains_key(&key) {
-            self.probed.insert(key.clone());
-            let cache = load_package_cache(&self.root, package, version, fingerprint)
-                .unwrap_or_else(|| PackageCache::new(package, version));
-            self.caches.insert(key.clone(), cache);
+            match load_package_cache(&self.root, package, version, fingerprint) {
+                Some(cache) => {
+                    self.caches.insert(key.clone(), cache);
+                    self.from_disk.insert(key.clone());
+                }
+                None => {
+                    self.caches
+                        .insert(key.clone(), PackageCache::new(package, version));
+                }
+            }
         }
         self.caches.get_mut(&key).expect("cache just inserted")
     }
@@ -302,6 +335,9 @@ impl PackageCacheBatch {
     /// `analyzed` spans every loaded package (read or write) so cross-package
     /// follow_targets stay valid when the callee was only materialized.
     pub fn flush(&self) {
+        if self.dirty.is_empty() {
+            return;
+        }
         let analyzed: BTreeSet<String> = self
             .caches
             .values()
@@ -458,8 +494,8 @@ pub(crate) fn materialize_cached_functions(
         return Vec::new();
     }
 
-    // Probe cross-package follow_target caches once (shared index) before we
-    // borrow this package's entry for reinjection / materialization.
+    // Probe cross-package follow_target caches (misses are retried — a peer may
+    // have written them since an earlier probe in this scan).
     let cross_probes: Vec<(String, String, String, String)> = {
         let cache = cache_batch
             .get(package, version, fingerprint)
@@ -483,23 +519,61 @@ pub(crate) fn materialize_cached_functions(
     for (pn, pv, pfp, _) in &cross_probes {
         cache_batch.ensure_loaded(pn, pv, pfp);
     }
-    let loadable_cross: BTreeSet<String> = cross_probes
-        .into_iter()
+    let mut loadable_cross: BTreeSet<String> = cross_probes
+        .iter()
         .filter(|(pn, pv, pfp, q)| {
             cache_batch
                 .get(pn, pv, pfp)
                 .is_some_and(|c| c.functions.contains_key(q))
         })
-        .map(|(_, _, _, q)| q)
+        .map(|(_, _, _, q)| q.clone())
         .collect();
+
+    // Snapshot consistency: if any cross-package follow_target from this cache
+    // entry is not loadable, a peer may have written a partial set of package
+    // files (or we sticky-missed before the peer finished). Re-probe misses
+    // once; if still incomplete, fall back to ty extract — cache hit/miss may
+    // change speed, never results.
+    // Only enforce for on-disk hits. In-progress upserts naturally list
+    // follow_targets for not-yet-analyzed callees and must not force extract.
+    if cache_batch.is_from_disk(package, version, fingerprint)
+        && cross_probes
+            .iter()
+            .any(|(_, _, _, q)| !loadable_cross.contains(q))
+    {
+        let mut seen_reprobe: BTreeSet<(String, String, String)> = BTreeSet::new();
+        for (pn, pv, pfp, q) in &cross_probes {
+            if loadable_cross.contains(q) {
+                continue;
+            }
+            if seen_reprobe.insert((pn.clone(), pv.clone(), pfp.clone())) {
+                cache_batch.reprobe(pn, pv, pfp);
+            }
+        }
+        loadable_cross = cross_probes
+            .iter()
+            .filter(|(pn, pv, pfp, q)| {
+                cache_batch
+                    .get(pn, pv, pfp)
+                    .is_some_and(|c| c.functions.contains_key(q))
+            })
+            .map(|(_, _, _, q)| q.clone())
+            .collect();
+        if cross_probes
+            .iter()
+            .any(|(_, _, _, q)| !loadable_cross.contains(q))
+        {
+            return Vec::new();
+        }
+    }
 
     let cache = cache_batch
         .get(package, version, fingerprint)
         .expect("has() true");
 
-    // Re-inject only follow targets that were analyzed (present in this cache's
-    // functions, or loadable from the target's own package cache). Prevents warm
-    // from following budget-skipped callees cold never extracted.
+    // Re-inject follow targets that were analyzed (in this cache's functions, or
+    // loadable from the target's own package cache). On-disk entries are
+    // flush-filtered to analyzed-only.
     for (q, t) in &cache.follow_targets {
         if !cache.functions.contains_key(q) && !loadable_cross.contains(q) {
             continue;
