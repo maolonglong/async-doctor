@@ -47,6 +47,9 @@ pub struct CachedEdge {
     pub positional_literals: Vec<Option<String>>,
     /// Positional callable External/full quals when known.
     pub positional_callable_quals: Vec<Option<String>>,
+    /// Keyword callable External/full quals when known (`name`, qual).
+    #[serde(default)]
+    pub keyword_callable_quals: Vec<(String, String)>,
     pub param_guard_index: Option<u32>,
     pub param_guard_inverted: Option<bool>,
     /// Call was under `await` when recorded.
@@ -373,6 +376,7 @@ mod tests {
                     occurrence: 0,
                     positional_literals: vec![],
                     positional_callable_quals: vec![],
+                    keyword_callable_quals: vec![],
                     param_guard_index: None,
                     param_guard_inverted: None,
                     is_awaited: false,

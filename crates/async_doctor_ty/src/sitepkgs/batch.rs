@@ -309,6 +309,16 @@ fn edge_to_cached(e: &CallEdge, id_to_external_key: &HashMap<FunctionId, String>
         .iter()
         .map(|opt| opt.and_then(|fid| id_to_external_key.get(&fid).cloned()))
         .collect();
+    let keyword_callable_quals = e
+        .keyword_callables
+        .iter()
+        .filter_map(|(k, fid)| {
+            id_to_external_key
+                .get(fid)
+                .cloned()
+                .map(|q| (k.clone(), q))
+        })
+        .collect();
     CachedEdge {
         callee_qualname,
         callee_kind,
@@ -327,6 +337,7 @@ fn edge_to_cached(e: &CallEdge, id_to_external_key: &HashMap<FunctionId, String>
         occurrence: e.occurrence,
         positional_literals,
         positional_callable_quals,
+        keyword_callable_quals,
         param_guard_index: e.param_guard.map(|g| g.index),
         param_guard_inverted: e.param_guard.map(|g| g.inverted),
         is_awaited: e.is_awaited,
@@ -591,6 +602,13 @@ pub(crate) fn materialize_cached_functions(
             } else {
                 edge.file.clone()
             };
+            // Keyword callables in the cache are External quals; higher-order
+            // kwargs across packages are rare — drop unresolved ones.
+            let keyword_callables = edge
+                .keyword_callable_quals
+                .iter()
+                .filter_map(|(k, q)| qual_to_id.get(q).map(|id| (k.clone(), *id)))
+                .collect();
             facts.edges.push(CallEdge {
                 caller,
                 callee,
@@ -603,8 +621,10 @@ pub(crate) fn materialize_cached_functions(
                 is_offload_wrapper: edge.is_offload_wrapper,
                 positional_literals,
                 positional_callables,
+                keyword_callables,
                 param_guard,
                 is_awaited: edge.is_awaited,
+                context_from_caller: None,
             });
         }
     }

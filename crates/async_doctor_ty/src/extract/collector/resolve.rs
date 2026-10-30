@@ -64,8 +64,10 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             is_offload_wrapper,
             positional_literals: std::mem::take(&mut self.pending_literals),
             positional_callables: std::mem::take(&mut self.pending_callables),
+            keyword_callables: std::mem::take(&mut self.pending_keyword_callables),
             param_guard: self.active_param_guard,
             is_awaited: self.pending_is_awaited,
+            context_from_caller: None,
         });
         self.pending_is_awaited = false;
     }
@@ -112,9 +114,44 @@ impl<'a, 'db> CallCollector<'a, 'db> {
     }
 
     pub(crate) fn type_instance_qualname(&self, expr: &Expr) -> Option<String> {
+        // Cheap branch narrowing: isinstance / is not None on a local name.
+        if let Expr::Name(n) = expr
+            && let Some(fact) = self.narrowed_locals.get(n.id.as_str())
+        {
+            match fact {
+                crate::extract::helpers::NarrowFact::IsInstance(ty) => {
+                    return Some(ty.clone());
+                }
+                crate::extract::helpers::NarrowFact::NotNone => {
+                    // Fall through to ty, then drop None-ish union members below.
+                }
+            }
+        }
         let ty = expr.inferred_type(self.model)?;
         let env = self.model.program_environment();
-        self.type_to_instance_qualname(ty, &env)
+        let mut name = self.type_to_instance_qualname(ty, &env)?;
+        if let Expr::Name(n) = expr
+            && matches!(
+                self.narrowed_locals.get(n.id.as_str()),
+                Some(crate::extract::helpers::NarrowFact::NotNone)
+            )
+            && (name.ends_with("None") || name.contains("None |") || name.contains("| None"))
+        {
+            // Defensive: if display still mentions None, prefer ty union filter.
+            if let Some(union) = ty.as_union() {
+                let env = self.model.program_environment();
+                for elem in union.elements(self.model.db()).iter() {
+                    if let Some(n) = self.type_to_instance_qualname(*elem, &env)
+                        && !n.ends_with("None")
+                        && n != "None"
+                    {
+                        name = n;
+                        break;
+                    }
+                }
+            }
+        }
+        Some(name)
     }
 
     /// Resolve a concrete instance qualname, including union receivers.
