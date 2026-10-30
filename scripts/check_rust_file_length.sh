@@ -7,8 +7,17 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MAX=800
 failed=0
 
+# Count lines including a final line that lacks a trailing newline (wc -l misses it).
+line_count() {
+  local file="$1"
+  local n
+  n=$(grep -c '' "$file" || true)
+  # Empty file: grep -c '' prints 0 and exits 1 under pipefail-safe `|| true`.
+  printf '%s' "$n"
+}
+
 while IFS= read -r -d '' file; do
-  lines=$(wc -l < "$file")
+  lines=$(line_count "$file")
   if (( lines > MAX )); then
     printf 'error: %s has %d lines (limit %d)\n' "${file#"$ROOT"/}" "$lines" "$MAX" >&2
     failed=1
