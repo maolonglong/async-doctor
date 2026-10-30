@@ -12,8 +12,8 @@ use crate::extract::constants::{is_generator_consumer, literal_arg};
 use crate::extract::ctx::DefKey;
 use crate::extract::helpers::{
     is_asyncio_redis_type, is_callable_ref, is_getattr_call, is_in_memory_buffer_type,
-    is_partial_call, is_path_or_file_open_qual, is_task_spawn_callee,
-    normalize_asyncio_redis_type, qualname_from_definition, route_handler_arg,
+    is_partial_call, is_path_or_file_open_qual, is_task_spawn_callee, normalize_asyncio_redis_type,
+    qualname_from_definition, route_handler_arg,
 };
 
 impl<'a, 'db> CallCollector<'a, 'db> {

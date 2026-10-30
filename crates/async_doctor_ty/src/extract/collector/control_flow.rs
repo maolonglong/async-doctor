@@ -319,9 +319,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         if let crate::extract::helpers::NarrowFact::IsInstance(_) = &fact
             && let Expr::Call(call) = test
             && let Some(type_expr) = call.arguments.args.get(1)
-            && let Some(q) = self.type_instance_qualname(type_expr).or_else(|| {
-                self.external_qualname(type_expr)
-            })
+            && let Some(q) = self
+                .type_instance_qualname(type_expr)
+                .or_else(|| self.external_qualname(type_expr))
         {
             fact = crate::extract::helpers::NarrowFact::IsInstance(q);
         }
