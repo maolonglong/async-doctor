@@ -443,6 +443,112 @@ fn changed_rejects_basename_suffix_across_scan_root() {
 }
 
 #[test]
+fn changed_on_main_clean_reports_zero() {
+    // HEAD on the default branch with a clean tree → uncommitted-only filter,
+    // not a full backlog scan (stop hooks must not block forever on main).
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    git(root, &["init", "-b", "main"]);
+    git(root, &["config", "user.email", "a@b.c"]);
+    git(root, &["config", "user.name", "a"]);
+    fs::write(
+        root.join("app.py"),
+        "import time\n\nasync def handler():\n    time.sleep(1)\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("other.py"),
+        "import time\n\nasync def other():\n    time.sleep(1)\n",
+    )
+    .unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "backlog"]);
+
+    let out = bin()
+        .args(["--format", "json", "--changed"])
+        .arg(root)
+        .env_remove("GITHUB_BASE_REF")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={stderr} stdout={}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        !stderr.contains("reporting all findings"),
+        "must not full-scan on clean main: {stderr}"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        v["findings"].as_array().unwrap().is_empty(),
+        "clean main must report 0 findings, got {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn changed_on_main_uncommitted_filters_to_that_file() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    git(root, &["init", "-b", "main"]);
+    git(root, &["config", "user.email", "a@b.c"]);
+    git(root, &["config", "user.name", "a"]);
+    fs::write(
+        root.join("app.py"),
+        "import time\n\nasync def handler():\n    time.sleep(1)\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("other.py"),
+        "import time\n\nasync def other():\n    time.sleep(1)\n",
+    )
+    .unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "backlog"]);
+
+    // Uncommitted edit only to app.py — other.py backlog must stay filtered out.
+    fs::write(
+        root.join("app.py"),
+        "import time\n\nasync def handler():\n    time.sleep(2)\n",
+    )
+    .unwrap();
+
+    let out = bin()
+        .args(["--format", "json", "--changed"])
+        .arg(root)
+        .env_remove("GITHUB_BASE_REF")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stderr={stderr} stdout={}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        !stderr.contains("reporting all findings"),
+        "must not full-scan on dirty main: {stderr}"
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let findings = v["findings"].as_array().unwrap();
+    assert_eq!(
+        findings.len(),
+        1,
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let file = findings[0]["entry"]["file"].as_str().unwrap();
+    assert!(
+        file.ends_with("app.py"),
+        "expected only app.py finding, got {file}"
+    );
+}
+
+#[test]
 fn changed_shallow_detached_without_base_falls_back_to_full_scan() {
     // Simulate GitHub Actions' default shape: shallow clone of a feature branch,
     // detached HEAD, no origin/main. Must not silently report clean.
@@ -469,14 +575,18 @@ fn changed_shallow_detached_without_base_falls_back_to_full_scan() {
 
     let dst = TempDir::new().unwrap();
     let dst_root = dst.path().join("clone");
+    // file:// + --single-branch so depth is honored and origin/main is absent
+    // (the GHA-shaped case: detached tip of feat only).
+    let src_uri = format!("file://{}", src_root.canonicalize().unwrap().display());
     let st = Command::new("git")
         .args([
             "clone",
             "--depth",
             "1",
+            "--single-branch",
             "--branch",
             "feat",
-            src_root.to_str().unwrap(),
+            &src_uri,
             dst_root.to_str().unwrap(),
         ])
         .status()

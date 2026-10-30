@@ -165,10 +165,12 @@ fn to_repo_relative(path: &str, scan_root: &Path, repo_root: &Path) -> Option<St
 
 /// Resolve merge-base with a usable default branch.
 ///
-/// Skips candidates whose merge-base equals `HEAD` (not ahead of that ref) —
-/// otherwise a shallow detached feature checkout that only has `origin/feat`
-/// would silently diff against itself and report clean. Never falls back to
-/// bare `HEAD`. Callers treat `Err` as FullScan with a note.
+/// - Prefer a candidate whose merge-base differs from `HEAD` (PR ahead of base).
+/// - If merge-base equals `HEAD` for a **default** base (`main`/`master` /
+///   `GITHUB_BASE_REF` / …), HEAD is on/at that base → return `"HEAD"` so
+///   reporting filters to uncommitted + untracked only (not a full backlog scan).
+/// - If the only tip-equal refs are feature branches (shallow detached CI
+///   without the PR base), bail → FullScan with a note.
 fn default_merge_base(repo_root: &Path) -> anyhow::Result<String> {
     let head = git_stdout(repo_root, &["rev-parse", "HEAD"])
         .context("rev-parse HEAD")?
@@ -200,6 +202,11 @@ fn default_merge_base(repo_root: &Path) -> anyhow::Result<String> {
         }
     }
     if !skipped_same_as_head.is_empty() {
+        // On the default branch tip → uncommitted-only. Feature-only tips
+        // (shallow feat clone) → FullScan.
+        if skipped_same_as_head.iter().any(|b| is_default_base_ref(b)) {
+            return Ok("HEAD".to_string());
+        }
         bail!(
             "no usable base (merge-base equals HEAD for [{}]); \
              shallow or detached checkout without the PR base branch?",
@@ -216,6 +223,21 @@ fn default_merge_base(repo_root: &Path) -> anyhow::Result<String> {
             candidates.join(", ")
         ),
     }
+}
+
+/// True for default-branch-like refs (not feature branches).
+fn is_default_base_ref(name: &str) -> bool {
+    let base = name.rsplit('/').next().unwrap_or(name);
+    if matches!(base, "main" | "master") {
+        return true;
+    }
+    if let Ok(gbr) = std::env::var("GITHUB_BASE_REF") {
+        let gbr = gbr.trim();
+        if !gbr.is_empty() && (name == gbr || name == format!("origin/{gbr}") || base == gbr) {
+            return true;
+        }
+    }
+    false
 }
 
 fn candidate_base_refs(repo_root: &Path) -> Vec<String> {
