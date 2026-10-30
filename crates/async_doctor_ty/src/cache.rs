@@ -280,6 +280,9 @@ pub fn load_package_cache(
 }
 
 /// Persist a package summary atomically (temp file + rename).
+///
+/// Temp path includes pid so concurrent scanners sharing a cache dir cannot
+/// clobber each other's in-flight writes.
 pub fn save_package_cache(
     root: &Path,
     cache: &PackageCache,
@@ -291,7 +294,7 @@ pub fn save_package_cache(
     }
     let data = serde_json::to_string(cache)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let tmp = path.with_extension("json.tmp");
+    let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
     fs::write(&tmp, &data)?;
     fs::rename(&tmp, &path)?;
     Ok(())
