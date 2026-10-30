@@ -52,7 +52,10 @@ fn m3a_type_narrowing_isinstance_and_not_none() {
         );
     }
     for banned in ["not_narrowed_ok", "none_branch_ok"] {
-        assert!(!names.contains(&banned), "{banned} must stay clean: {names:?}");
+        assert!(
+            !names.contains(&banned),
+            "{banned} must stay clean: {names:?}"
+        );
     }
     let _ = fs::remove_dir_all(dir);
 }
@@ -75,7 +78,10 @@ fn m3a_inmemory_buffer_not_file_io() {
     }
     // No blocking-file candidates either for proven in-memory buffers.
     for c in &report.candidates {
-        if matches!(c.entry.name.as_str(), "image_open_bytesio_ok" | "image_save_bytesio_ok") {
+        if matches!(
+            c.entry.name.as_str(),
+            "image_open_bytesio_ok" | "image_save_bytesio_ok"
+        ) {
             assert_ne!(
                 c.rule, "blocking-file",
                 "in-memory must not be blocking-file candidate: {c:?}"

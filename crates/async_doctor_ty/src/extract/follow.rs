@@ -182,11 +182,15 @@ pub(crate) fn follow_third_party(
                 continue;
             };
             let edge_before = facts.edges.len();
-            if let Some(id) =
-                extract_third_party_function(
-                    db, facts, def_map, qual_map, follow_targets, package_meta, &target,
-                )
-            {
+            if let Some(id) = extract_third_party_function(
+                db,
+                facts,
+                def_map,
+                qual_map,
+                follow_targets,
+                package_meta,
+                &target,
+            ) {
                 qual_to_id.insert(q.clone(), id);
                 id_to_external_key.insert(id, q.clone());
                 reachable_fns.insert(id);
@@ -219,11 +223,15 @@ pub(crate) fn follow_third_party(
             continue;
         };
         let edge_before = facts.edges.len();
-        if let Some(id) =
-            extract_third_party_function(
-                    db, facts, def_map, qual_map, follow_targets, package_meta, &target,
-                )
-        {
+        if let Some(id) = extract_third_party_function(
+            db,
+            facts,
+            def_map,
+            qual_map,
+            follow_targets,
+            package_meta,
+            &target,
+        ) {
             qual_to_id.insert(q.clone(), id);
             id_to_external_key.insert(id, q.clone());
             reachable_fns.insert(id);
@@ -339,11 +347,15 @@ pub(crate) fn follow_third_party(
                 continue;
             };
             let edge_before = facts.edges.len();
-            if let Some(id) =
-                extract_third_party_function(
-                    db, facts, def_map, qual_map, follow_targets, package_meta, &target,
-                )
-            {
+            if let Some(id) = extract_third_party_function(
+                db,
+                facts,
+                def_map,
+                qual_map,
+                follow_targets,
+                package_meta,
+                &target,
+            ) {
                 qual_to_id.insert(qualname.clone(), id);
                 id_to_external_key.insert(id, qualname.clone());
                 reachable_fns.insert(id);
@@ -376,11 +388,15 @@ pub(crate) fn follow_third_party(
                 continue;
             };
             let edge_before = facts.edges.len();
-            if let Some(id) =
-                extract_third_party_function(
-                    db, facts, def_map, qual_map, follow_targets, package_meta, &target,
-                )
-            {
+            if let Some(id) = extract_third_party_function(
+                db,
+                facts,
+                def_map,
+                qual_map,
+                follow_targets,
+                package_meta,
+                &target,
+            ) {
                 qual_to_id.insert(q.clone(), id);
                 id_to_external_key.insert(id, q.clone());
                 reachable_fns.insert(id);

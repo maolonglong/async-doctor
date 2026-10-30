@@ -122,7 +122,10 @@ fn m3a_eager_offload_reports_and_mentions_pass_callable() {
     }
     let names: Vec<_> = by_entry.iter().map(|(n, _)| *n).collect();
     for banned in ["passed_to_thread_ok", "passed_run_in_executor_ok"] {
-        assert!(!names.contains(&banned), "{banned} must stay clean: {names:?}");
+        assert!(
+            !names.contains(&banned),
+            "{banned} must stay clean: {names:?}"
+        );
     }
     let _ = fs::remove_dir_all(dir);
 }
@@ -144,7 +147,10 @@ fn m3a_asyncio_pipeline_execute_still_clean() {
         "asyncio_pipeline_execute_ok",
         "asyncio_pipeline_set_ok",
     ] {
-        assert!(!names.contains(&banned), "{banned} must not fire: {names:?}");
+        assert!(
+            !names.contains(&banned),
+            "{banned} must not fire: {names:?}"
+        );
     }
     assert!(
         names.contains(&"sync_pipeline_execute_blocks"),

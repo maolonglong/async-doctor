@@ -52,7 +52,11 @@ fn offload_eager_call_still_reports() {
             f.fix.hint.contains("pass the callable") || f.fix.hint.contains("rather than calling")
         }),
         "eager hint must say pass callable: {:?}",
-        report.findings.iter().map(|f| &f.fix.hint).collect::<Vec<_>>()
+        report
+            .findings
+            .iter()
+            .map(|f| &f.fix.hint)
+            .collect::<Vec<_>>()
     );
     let _ = fs::remove_dir_all(dir);
 }

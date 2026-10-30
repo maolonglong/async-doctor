@@ -319,9 +319,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         if let crate::extract::helpers::NarrowFact::IsInstance(_) = &fact
             && let Expr::Call(call) = test
             && let Some(type_expr) = call.arguments.args.get(1)
-            && let Some(q) = self.type_instance_qualname(type_expr).or_else(|| {
-                self.external_qualname(type_expr)
-            })
+            && let Some(q) = self
+                .type_instance_qualname(type_expr)
+                .or_else(|| self.external_qualname(type_expr))
         {
             fact = crate::extract::helpers::NarrowFact::IsInstance(q);
         }
@@ -412,9 +412,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                     self.handle_call(call, false);
                     self.pending_with_enter = false;
                     self.walk_call_children(call);
-                } else if let Some(callee) =
-                    self.resolve_dunder(&item.context_expr, "__enter__")
-                {
+                } else if let Some(callee) = self.resolve_dunder(&item.context_expr, "__enter__") {
                     self.push_edge(
                         caller,
                         callee,
