@@ -1,12 +1,11 @@
 # m2_follow_budget_truncation
 
-`liba.a0` → `a1` → `a2` → `libb.gate` → `deep_sleep` → `deep_lock` (`time.sleep` +
-`threading.Lock.acquire`).
+`liba.a0` → `a1` → `a2` → `libb.gate` → `time.sleep`.
 
 With injectable follow budget `2`:
 
 - cold: `a0` free, then `a1`/`a2` consume the budget → never enters `libb`
-- buggy warm (transitive cache materialization): `a0..a2` loaded free from cache,
-  fresh budget then enters `libb` → extra sleep/lock hits
+- warm must replay the same cut (no free transitive cache materialization that
+  would keep a full budget and continue into `libb`)
 
-Warm must charge the same per-function budget as cold (no free transitive closure).
+See `tests::budget::m2_follow_budget_cold_warm_json_identical_when_truncated`.
