@@ -111,6 +111,9 @@ dependencies = [
 [[package]]
 name = "async_doctor_rules"
 version = "0.1.0"
+dependencies = [
+ "async_doctor_core",
+]
 
 [[package]]
 name = "async_doctor_ty"

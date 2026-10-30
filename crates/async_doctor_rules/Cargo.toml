@@ -7,3 +7,6 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+
+[dependencies]
+async_doctor_core = { workspace = true }
