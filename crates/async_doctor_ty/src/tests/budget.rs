@@ -56,6 +56,61 @@ fn m2_follow_budget_cold_warm_json_identical_when_truncated() {
     let _ = fs::remove_dir_all(&cache);
 }
 
+/// Populate cache with a full-budget run, then compare a tiny-budget cold
+/// (empty cache) to a tiny-budget warm (reusing the deep cache).
+///
+/// On main, warm transitively materialize'd the deep cached chain for free and
+/// still had budget left to enter `libb` — cold with the same tiny budget could
+/// not. After the fix both truncate identically.
+#[test]
+fn m2_follow_budget_warm_must_not_exceed_cold_via_deeper_cache() {
+    let dir = clone_fixture("m2_follow_budget_truncation");
+
+    // Seed: full budget reaches libb.gate / time.sleep and writes the cache.
+    let deep_cache = fresh_cache_dir("budget-deep-seed");
+    let seeded = report_json_with_cache_budget(&dir, &deep_cache, FOLLOW_BUDGET_DEFAULT);
+    let seeded_r: async_doctor_core::Report = serde_json::from_str(&seeded).unwrap();
+    assert!(
+        seeded_r
+            .findings
+            .iter()
+            .any(|f| f.rule == "blocking-sleep"),
+        "seed run must reach sleep so the cache holds the deep chain: {:?}",
+        seeded_r.findings
+    );
+
+    // Warm with tiny budget against the deep cache.
+    let warm_tiny = report_json_with_cache_budget(&dir, &deep_cache, TINY_BUDGET);
+
+    // Cold with the same tiny budget against an empty cache.
+    let empty = fresh_cache_dir("budget-tiny-cold");
+    let cold_tiny = report_json_with_cache_budget(&dir, &empty, TINY_BUDGET);
+
+    assert_eq!(
+        cold_tiny, warm_tiny,
+        "tiny-budget cold (empty cache) must match tiny-budget warm (deep cache)\n\
+         cold={cold_tiny}\nwarm={warm_tiny}"
+    );
+
+    let cold_r: async_doctor_core::Report = serde_json::from_str(&cold_tiny).unwrap();
+    assert!(
+        !cold_r
+            .findings
+            .iter()
+            .any(|f| f.rule == "blocking-sleep")
+            && !cold_r
+                .candidates
+                .iter()
+                .any(|c| c.rule == "blocking-sleep"),
+        "tiny budget must not reach sleep: {:?}",
+        cold_r
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&deep_cache);
+    let _ = fs::remove_dir_all(&empty);
+}
+
 #[test]
 fn m2_follow_budget_default_reaches_deep_sinks() {
     let dir = clone_fixture("m2_follow_budget_truncation");
