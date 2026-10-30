@@ -17,7 +17,7 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 #[test]
-fn explain_blocking_sleep_prints_fix_and_anchor() {
+fn explain_blocking_sleep_prints_fix_and_absolute_url() {
     let out = bin()
         .args(["explain", "blocking-sleep"])
         .output()
@@ -31,7 +31,9 @@ fn explain_blocking_sleep_prints_fix_and_anchor() {
     assert!(stdout.contains("blocking-sleep"));
     assert!(stdout.contains("asyncio.sleep"));
     assert!(stdout.contains("#blocking-sleep"));
-    assert!(stdout.contains("docs/rules.md"));
+    assert!(stdout.contains(
+        "https://github.com/maolonglong/async-doctor/blob/main/docs/rules.md#blocking-sleep"
+    ));
 }
 
 #[test]
@@ -58,7 +60,7 @@ fn explain_accepts_hash_anchor() {
 }
 
 #[test]
-fn json_includes_docs_anchor_and_full_chain() {
+fn json_includes_docs_url_chain_resolution_and_runnable_why() {
     let dir = fixture("m1_multihop");
     let out = bin()
         .args(["--format", "json"])
@@ -76,39 +78,57 @@ fn json_includes_docs_anchor_and_full_chain() {
     let finding = &v["findings"][0];
     assert_eq!(finding["rule"], "blocking-sleep");
     assert_eq!(finding["docsAnchor"], "#blocking-sleep");
+    assert!(
+        finding["docsUrl"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://github.com/maolonglong/async-doctor/blob/main/docs/rules.md#"),
+        "{}",
+        finding["docsUrl"]
+    );
     let chain = finding["chain"].as_array().expect("chain");
     assert!(chain.len() >= 2, "expected multi-hop chain, got {chain:?}");
     assert!(
-        chain
-            .iter()
-            .all(|s| s["file"].as_str().is_some() && s["line"].as_u64().is_some())
+        chain.iter().any(|s| s["resolution"]
+            .as_str()
+            .map(|r| !r.is_empty())
+            .unwrap_or(false)),
+        "expected resolution on at least one hop: {chain:?}"
     );
     let why = finding["why"].as_str().expect("why");
     assert!(why.starts_with("async-doctor why "), "{why}");
-    let fix = finding["fix"]["hint"].as_str().expect("fix");
+    assert!(why.contains(" --path "), "why must include --path: {why}");
     assert!(
-        fix.contains("asyncio.sleep") || fix.contains("to_thread"),
-        "{fix}"
+        why.contains(dir.to_str().unwrap()) || why.contains(&dir.display().to_string()),
+        "{why}"
     );
 }
 
 #[test]
-fn text_output_shows_chain_fix_explain_why() {
+fn text_default_is_grouped_expand_lists_all() {
     let dir = fixture("m1_multihop");
-    let out = bin().arg(&dir).output().expect("run");
-    assert_eq!(out.status.code(), Some(1));
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("[blocking-sleep]"));
-    assert!(stdout.contains("├─") || stdout.contains("└─"));
+    let grouped = bin().arg(&dir).output().expect("run");
+    assert_eq!(grouped.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&grouped.stdout);
+    assert!(stdout.contains("fix group"), "{stdout}");
+    assert!(stdout.contains("async def handler"));
     assert!(stdout.contains("fix:"));
-    assert!(stdout.contains("explain: async-doctor explain blocking-sleep"));
-    assert!(stdout.contains("why: async-doctor why "));
+    assert!(stdout.contains("https://github.com/maolonglong/async-doctor"));
+    assert!(
+        !stdout.contains("other  handler"),
+        "entry kind 'other' must not print: {stdout}"
+    );
+
+    let expanded = bin().args(["--expand"]).arg(&dir).output().expect("run");
+    let exp = String::from_utf8_lossy(&expanded.stdout);
+    assert!(exp.contains("why: async-doctor why "));
+    assert!(exp.contains(" --path "));
+    assert!(exp.contains("explain: async-doctor explain blocking-sleep"));
 }
 
 #[test]
-fn why_locates_multihop_sink() {
+fn why_locates_multihop_sink_with_resolution() {
     let dir = fixture("m1_multihop");
-    // Discover the sink location from JSON first.
     let json = bin()
         .args(["--format", "json"])
         .arg(&dir)
@@ -116,7 +136,9 @@ fn why_locates_multihop_sink() {
         .expect("run");
     let v: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
     let why = v["findings"][0]["why"].as_str().unwrap();
-    let location = why.strip_prefix("async-doctor why ").unwrap();
+    // `async-doctor why helpers.py:5 --path /abs`
+    let rest = why.strip_prefix("async-doctor why ").unwrap();
+    let location = rest.split_whitespace().next().unwrap();
 
     let out = bin()
         .args(["why", location, "--path"])
@@ -133,7 +155,36 @@ fn why_locates_multihop_sink() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("Evidence for "));
     assert!(stdout.contains("blocking-sleep"));
-    assert!(stdout.contains("Why it matters") || stdout.contains("asyncio.sleep"));
+    assert!(stdout.contains("Hop resolution:"));
+    assert!(
+        stdout.contains("blocking sink") || stdout.contains("resolved call"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn why_path_components_not_string_suffix() {
+    // Create a tiny project where `a.py:3` must not match a finding in `data.py`.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("data.py"),
+        "import time\n\nasync def handler():\n    time.sleep(1)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("a.py"),
+        "async def other():\n    return 1\n",
+    )
+    .unwrap();
+
+    let out = bin()
+        .args(["why", "a.py:3", "--path"])
+        .arg(tmp.path())
+        .output()
+        .expect("run");
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("No findings"), "{stdout}");
 }
 
 #[test]
