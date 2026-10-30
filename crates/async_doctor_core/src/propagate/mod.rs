@@ -238,6 +238,7 @@ pub fn analyze_with_options(
                         label: entry.label,
                     };
                     let why = format!("async-doctor why {}:{}", seed_edge.file, seed_edge.line);
+                    let docs_anchor = format!("#{}", hit.rule);
                     let fix = Fix {
                         hint,
                         fix_group_id: fix_group_id(hit.rule, hit.sink_qualname),
@@ -258,6 +259,7 @@ pub fn analyze_with_options(
                             reason: reason.to_string(),
                             fix,
                             why,
+                            docs_anchor,
                         });
                     } else {
                         raw_findings.push(Finding {
@@ -268,6 +270,7 @@ pub fn analyze_with_options(
                             conditions,
                             fix,
                             why,
+                            docs_anchor,
                         });
                     }
                 }
@@ -312,6 +315,7 @@ pub fn analyze_with_options(
                             fix_group_id: fix_group_id("unresolved-call", &sink_key),
                         },
                         why: format!("async-doctor why {}:{}", seed_edge.file, seed_edge.line),
+                        docs_anchor: "#unresolved-call".into(),
                     });
                 }
             }
