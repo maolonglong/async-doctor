@@ -21,6 +21,7 @@ pub(super) fn chain_step_for(
     text: String,
     resolution: String,
 ) -> ChainStep {
+    let text = truncate_hop_text(&text);
     let step = if caller.is_third_party {
         ChainStep::third_party(file, line, text, caller.package_name.clone())
     } else {
@@ -55,6 +56,17 @@ pub(super) fn resolution_for_edge(facts: &ProjectFacts, edge: &crate::graph::Cal
             format!("higher-order arg (positional {index})")
         }
     }
+}
+
+/// Chain hops must be a single line — multi-line call text (httpx/es wrappers)
+/// collapses to the first non-empty line so agents see one actionable site.
+pub(super) fn truncate_hop_text(text: &str) -> String {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or(text.trim());
+    line.to_string()
 }
 
 /// Aggregate key for unresolved sites: prefer a stable callee-ish snippet.

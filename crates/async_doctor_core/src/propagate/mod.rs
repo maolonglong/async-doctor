@@ -33,6 +33,9 @@ pub struct SinkHit {
     pub candidate_reason: Option<&'static str>,
     /// When true, only fire for `with` / context-manager enter edges (e.g. Engine.begin).
     pub with_only: bool,
+    /// When true, only fire when the call is consumed as a generator/iterator
+    /// (e.g. `for msg in pubsub.listen()` / comprehension over `listen()`).
+    pub consume_only: bool,
 }
 
 /// Lookup sinks and optional async-twin hint text for a resolved external name.
@@ -108,12 +111,22 @@ pub fn analyze_with_options(
         }
         match &edge.callee {
             CalleeRef::External { qualname } => {
-                // Awaited calls are never sync-IO sinks (e.g. `await pipe.execute()`).
-                if edge.is_awaited {
+                // Structural: a resolved `async def` callee never seeds as sync IO,
+                // even when its External qualname looks like a sync sink family
+                // (subclass / wrapper of AsyncClient, etc.).
+                if edge.callee_is_coroutine == Some(true) {
                     continue;
                 }
+                // Name-based async-counterpart rules are only a fallback when
+                // ty could not resolve coroutine-ness. Awaited *sync* defs
+                // (e.g. `await redis.Redis().get(...)`) still seed.
                 if let Some(hit) = sinks.lookup(qualname) {
                     if hit.with_only && !matches!(edge.kind, CallKind::WithEnter) {
+                        continue;
+                    }
+                    if hit.consume_only
+                        && !matches!(edge.kind, CallKind::GeneratorConsume | CallKind::ForIter)
+                    {
                         continue;
                     }
                     seeds.push(Seed {
@@ -163,6 +176,44 @@ pub fn analyze_with_options(
             let mut chain_qualnames: Vec<String> = Vec::new();
             let mut condition_tags: Vec<ConditionTag> = Vec::new();
             let mut param_guards: Vec<(FunctionId, ParamGuard)> = Vec::new();
+
+            // When the async entry *receives* a kwargs/partial callback, the
+            // reverse path stops at that receiver and would omit the call site
+            // that passed the callable. Prepend that binding hop so agents know
+            // which line to change.
+            for &edge_idx in &path.edges {
+                let e = &facts.edges[edge_idx];
+                let Some(binder) = e.context_from_caller else {
+                    continue;
+                };
+                if binder == entry_id {
+                    continue;
+                }
+                let already = path.edges.iter().any(|&i| {
+                    let be = &facts.edges[i];
+                    be.caller == binder
+                        && matches!(be.callee, CalleeRef::Project(id) if id == e.caller)
+                });
+                if already {
+                    continue;
+                }
+                let Some(bind_e) = facts.edges.iter().find(|be| {
+                    be.caller == binder
+                        && matches!(be.callee, CalleeRef::Project(id) if id == e.caller)
+                        && (!be.positional_callables.is_empty() || !be.keyword_callables.is_empty())
+                }) else {
+                    continue;
+                };
+                let binder_fn = facts.function(binder);
+                chain_steps.push(chain_step_for(
+                    binder_fn,
+                    bind_e.file.clone(),
+                    bind_e.line,
+                    bind_e.text.clone(),
+                    resolution_for_edge(facts, bind_e),
+                ));
+                condition_tags.extend(bind_e.conditions.iter().copied());
+            }
 
             for &edge_idx in &path.edges {
                 let e = &facts.edges[edge_idx];
@@ -233,6 +284,20 @@ pub fn analyze_with_options(
                     }
 
                     let mut hint = hit.fix_hint.to_string();
+                    // Eager offload may mark the edge into the sink's caller
+                    // (`to_thread(work())` → work → sleep) rather than the sink edge.
+                    let eager_offload = seed_edge.is_eager_offload_arg
+                        || path
+                            .edges
+                            .iter()
+                            .any(|&i| facts.edges[i].is_eager_offload_arg);
+                    if eager_offload {
+                        hint = format!(
+                            "{hint} This call runs on the event loop before offload — \
+                             pass the callable (e.g. `asyncio.to_thread(f, ...)`) \
+                             rather than calling it (`to_thread(f())`)."
+                        );
+                    }
                     if let Some(twin) = async_twin_hint(facts, entry_id, &path) {
                         hint = format!("{hint} Async twin available: `{twin}`.");
                     }

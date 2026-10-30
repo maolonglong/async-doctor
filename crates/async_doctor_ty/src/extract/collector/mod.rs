@@ -48,6 +48,10 @@ pub(crate) struct CallCollector<'a, 'db> {
     /// When true, the *next* recorded Call edge is the direct operand of
     /// `await` / `async for` iter / `async with` context (nested arg calls are not).
     pub(super) pending_is_awaited: bool,
+    /// When true, the next Call edge is a `with` context Call (e.g. `Engine.begin()`).
+    pub(super) pending_with_enter: bool,
+    /// True while visiting an eagerly-evaluated offload argument (`to_thread(f())`).
+    pub(super) in_eager_offload_arg: bool,
     /// Locals bound by `async with <asyncio-redis> as name` → receiver type qual.
     pub(super) async_with_receivers: HashMap<String, String>,
     pub(super) occurrence_counter: HashMap<(FunctionId, String), u32>,

@@ -19,7 +19,6 @@ pub(crate) struct DefKey {
 
 pub(crate) struct FileCtx<'db> {
     pub(crate) db: &'db AsyncDoctorDb,
-    #[allow(dead_code)]
     pub(crate) program_file: ProgramFile<'db>,
     #[allow(dead_code)]
     pub(crate) file: File,

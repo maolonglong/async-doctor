@@ -63,10 +63,35 @@ fn openai_async_never_fires() {
             .is_none()
     );
     assert!(t.lookup("openai.OpenAI").is_some());
+    assert!(t.lookup("openai.OpenAI.chat.completions.create").is_some());
+    // Helpers under openai.lib that merely contain "completions" must not match.
+    assert!(
+        t.lookup("openai.lib._parsing._completions._materialize_input_tools")
+            .is_none()
+    );
+    assert!(
+        t.lookup("openai.resources.chat.completions.AsyncCompletions.create")
+            .is_none()
+    );
 }
 
 #[test]
 fn stdlib_still_resolves() {
     let t = BuiltinSinkTable::new();
     assert!(t.lookup("time.sleep").is_some());
+}
+
+#[test]
+fn module_path_async_client_is_counterpart() {
+    assert!(crate::is_async_counterpart("httpx.AsyncClient.get"));
+    assert!(crate::is_async_counterpart("httpx._client.AsyncClient.get"));
+    assert!(crate::is_async_counterpart(
+        "elasticsearch.AsyncElasticsearch.search"
+    ));
+    assert!(crate::is_async_counterpart(
+        "elasticsearch._async.client.AsyncElasticsearch.search"
+    ));
+    // Sync must stay false.
+    assert!(!crate::is_async_counterpart("httpx.Client.get"));
+    assert!(!crate::is_async_counterpart("httpx._client.Client.get"));
 }

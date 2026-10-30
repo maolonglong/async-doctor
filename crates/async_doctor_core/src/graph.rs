@@ -133,9 +133,20 @@ pub struct CallEdge {
     /// When set, this edge only executes when positional parameter `index` is
     /// truthy (`if param:`) or falsy (`if not param:` when `inverted`).
     pub param_guard: Option<ParamGuard>,
-    /// True when this call appears under `await` (directly or nested).
-    /// Awaited calls are never sync-IO sinks.
+    /// True when this call is the *direct* operand of `await` / `async for` /
+    /// `async with`. Nested argument calls stay `false`.
+    ///
+    /// Awaited *async* APIs are not sync-IO sinks; awaited *sync* sinks still
+    /// run on the event loop before `await` and must be reported.
     pub is_awaited: bool,
+    /// Whether the resolved callee definition is an `async def` (coroutine).
+    /// `Some(true)` / `Some(false)` from ty (including through MRO / `super`);
+    /// `None` when unresolved — name-based async-counterpart rules are the
+    /// fallback only in that case.
+    pub callee_is_coroutine: Option<bool>,
+    /// True when this call is an argument to an offload wrapper and was
+    /// *evaluated* (eager `to_thread(f())`) rather than passed as a callable.
+    pub is_eager_offload_arg: bool,
     /// Higher-order materialization: this edge (`apply → block`) is only valid
     /// when the previous hop’s caller is this function (the call site that
     /// passed `block`). Cheap call-context sensitivity without cloning graphs.

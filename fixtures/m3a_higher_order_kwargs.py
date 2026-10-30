@@ -48,3 +48,12 @@ async def bound_method_keyword():
 async def safe_no_call():
     # Negative: higher-order receives a non-blocking lambda.
     apply_kw(fn=lambda: None)
+
+
+async def async_apply(*, fn):
+    """Async higher-order receiver — finding attaches here; binding hop required."""
+    fn()
+
+
+async def passes_to_async_apply():
+    await async_apply(fn=block)

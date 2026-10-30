@@ -1,5 +1,6 @@
 //! Callee resolution: project defs, externals, offloads, and follow targets.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use async_doctor_core::{CallEdge, CallKind, CalleeRef, FunctionId, OffloadKind};
@@ -18,8 +19,9 @@ use crate::sitepkgs::{FollowTarget, is_followable_site_packages_py};
 use super::CallCollector;
 use crate::extract::ctx::DefKey;
 use crate::extract::helpers::{
-    is_asyncio_redis_type, is_getattr_call, is_redis_commands_mixin, is_sync_redis_type,
-    module_of_definition, normalize_asyncio_redis_type, qualname_from_definition,
+    RedisClientFamily, is_asyncio_redis_type, is_getattr_call, is_redis_commands_mixin,
+    is_sync_redis_type, map_redis_mixin_to_canonical_sink, module_of_definition,
+    normalize_asyncio_redis_type, qualname_from_definition,
 };
 use crate::extract::path::relative_display;
 
@@ -31,6 +33,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         range: TextRange,
         kind: CallKind,
         is_offload_wrapper: bool,
+        callee_is_coroutine: Option<bool>,
     ) {
         // Bare generator call (`g = gen()`) must not propagate; only when consumed.
         if let CalleeRef::Project(id) = &callee
@@ -40,6 +43,12 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         {
             return;
         }
+
+        // Project callees always know async-ness from FunctionFact.
+        let callee_is_coroutine = match &callee {
+            CalleeRef::Project(id) => Some(self.facts.function(*id).is_async),
+            _ => callee_is_coroutine,
+        };
 
         let key = match &callee {
             CalleeRef::Project(id) => format!("P{}", id.0),
@@ -67,9 +76,55 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             keyword_callables: std::mem::take(&mut self.pending_keyword_callables),
             param_guard: self.active_param_guard,
             is_awaited: self.pending_is_awaited,
+            callee_is_coroutine,
+            is_eager_offload_arg: self.in_eager_offload_arg,
             context_from_caller: None,
         });
         self.pending_is_awaited = false;
+    }
+
+    /// Resolve whether `func` is an `async def` via ty definitions (MRO / `super`
+    /// included). `None` when the definition cannot be recovered.
+    pub(crate) fn resolve_callee_is_coroutine(&self, func: &Expr) -> Option<bool> {
+        if let Some(fid) = self.resolve_project_function(func) {
+            return Some(self.facts.function(fid).is_async);
+        }
+        let resolved = match func {
+            Expr::Name(name) => definitions_for_name(
+                self.model,
+                name.id.as_str(),
+                name.into(),
+                ImportAliasResolution::ResolveAliases,
+            ),
+            Expr::Attribute(attr) => definitions_for_attribute(self.model, attr),
+            _ => Vec::new(),
+        };
+        for r in &resolved {
+            let Some(def) = r.definition() else {
+                continue;
+            };
+            let kind = def.kind(self.model.db());
+            let DefinitionKind::Function(fdef) = kind else {
+                continue;
+            };
+            let parsed = parsed_module(self.model.db(), def.python_file(self.model.db()))
+                .load(self.model.db());
+            return Some(fdef.node(&parsed).is_async);
+        }
+        // Type-based FunctionLiteral / BoundMethod → definition.
+        let ty = func.inferred_type(self.model)?;
+        let env = self.model.program_environment();
+        let typedef = ty.definition(self.model.db(), &env)?;
+        let TypeDefinition::Function(def) = typedef else {
+            return None;
+        };
+        let kind = def.kind(self.model.db());
+        let DefinitionKind::Function(fdef) = kind else {
+            return None;
+        };
+        let parsed =
+            parsed_module(self.model.db(), def.python_file(self.model.db())).load(self.model.db());
+        Some(fdef.node(&parsed).is_async)
     }
 
     pub(crate) fn is_offload_callee(&self, func: &Expr) -> Option<OffloadKind> {
@@ -423,12 +478,25 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 } else {
                     recv
                 };
+                // Known redis receivers (Redis / Pipeline / asyncio): prefer
+                // receiver over mixin defining class.
+                if is_asyncio_redis_type(&recv) || is_sync_redis_type(&recv) {
+                    return Some(format!("{recv}.{}", attr.attr.as_str()));
+                }
+                // Project subclass / `super()` inside an override: map through
+                // the MRO defining class so sync-sink status is inherited;
+                // async defs stay on the asyncio key.
+                if let Some(mapped) = self.attribute_redis_mixin_sink(attr) {
+                    return Some(mapped);
+                }
                 return Some(format!("{recv}.{}", attr.attr.as_str()));
             }
             // dist-packages / weak typing: still recognize asyncio redis receivers.
             if self.expr_looks_like_asyncio_redis(&attr.value) {
                 return Some(format!("redis.asyncio.client.Redis.{}", attr.attr.as_str()));
             }
+            // Do not map bare CoreCommands without a typed non-redis receiver:
+            // untyped Pipeline shares that mixin and must stay non-sink.
         }
 
         // Prefer definitions_for_* → file_to_module + name + enclosing class.
@@ -447,7 +515,8 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             if let Some(def) = r.definition()
                 && let Some(q) = qualname_from_definition(self.model, def)
             {
-                // Bare redis mixin defs are not sync-IO without a receiver type.
+                // Bare redis mixin defs (no Attribute receiver context) are not
+                // sync-IO evidence — Pipeline buffering shares those mixins.
                 if is_redis_commands_mixin(&q) {
                     continue;
                 }
@@ -476,4 +545,223 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             _ => None,
         }
     }
+
+    /// When the receiver is a project subclass of redis, map the MRO defining
+    /// class (commands mixin) to the canonical `redis.Redis.*` /
+    /// `redis.asyncio.Redis.*` sink key — family from the *receiver* MRO.
+    fn attribute_redis_mixin_sink(&self, attr: &ruff_python_ast::ExprAttribute) -> Option<String> {
+        let family = self.receiver_redis_family(&attr.value)?;
+        let try_def = |def: ty_python_core::definition::Definition<'db>| -> Option<String> {
+            let q = qualname_from_definition(self.model, def)?;
+            map_redis_mixin_to_canonical_sink(&q, family)
+        };
+
+        let resolved = definitions_for_attribute(self.model, attr);
+        for r in &resolved {
+            if let Some(def) = r.definition()
+                && let Some(mapped) = try_def(def)
+            {
+                return Some(mapped);
+            }
+        }
+        // BoundMethod / FunctionLiteral on the attribute expression itself.
+        let ty = attr.inferred_type(self.model)?;
+        let env = self.model.program_environment();
+        match ty.definition(self.model.db(), &env)? {
+            TypeDefinition::Function(def) => try_def(def),
+            _ => None,
+        }
+    }
+
+    /// Sync vs asyncio redis for a receiver expression, via the type MRO
+    /// (or the enclosing class when the receiver is `super()`).
+    fn receiver_redis_family(&self, expr: &Expr) -> Option<RedisClientFamily> {
+        if self.expr_is_super(expr) {
+            return self.enclosing_class_redis_family();
+        }
+        let ty = expr.inferred_type(self.model)?;
+        self.type_redis_family(ty, &mut HashSet::new())
+    }
+
+    fn expr_is_super(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Name(n) => n.id.as_str() == "super",
+            Expr::Call(call) => match call.func.as_ref() {
+                Expr::Name(n) => n.id.as_str() == "super",
+                Expr::Attribute(attr) => {
+                    attr.attr.as_str() == "super"
+                        && matches!(attr.value.as_ref(), Expr::Name(n) if n.id.as_str() == "builtins")
+                }
+                _ => false,
+            },
+            _ => self
+                .type_instance_qualname(expr)
+                .is_some_and(|q| q == "builtins.super" || q.ends_with(".super")),
+        }
+    }
+
+    /// Walk the enclosing class's bases (for `super().get()` inside an override).
+    fn enclosing_class_redis_family(&self) -> Option<RedisClientFamily> {
+        let class_name = self.class_stack.last()?;
+        let parsed = parsed_module(
+            self.model.db(),
+            self.ctx.program_file.python_file(self.model.db()),
+        )
+        .load(self.model.db());
+        let class_def = find_class_def(parsed.suite(), self.class_stack.as_slice())?;
+        debug_assert_eq!(class_def.name.as_str(), class_name.as_str());
+        self.class_def_redis_family(class_def, &mut HashSet::new())
+    }
+
+    fn type_redis_family(
+        &self,
+        ty: Type<'db>,
+        visited: &mut HashSet<String>,
+    ) -> Option<RedisClientFamily> {
+        let env = self.model.program_environment();
+        if let Some(q) = self.type_to_instance_qualname(ty, &env) {
+            if is_asyncio_redis_type(&q) {
+                return Some(RedisClientFamily::Async);
+            }
+            if is_sync_redis_type(&q) {
+                return Some(RedisClientFamily::Sync);
+            }
+            if !visited.insert(q) {
+                return None;
+            }
+        }
+        let typedef = ty.definition(self.model.db(), &env)?;
+        let def = match typedef {
+            TypeDefinition::StaticClass(d) | TypeDefinition::DynamicClass(d) => d,
+            _ => return None,
+        };
+        // Module path of the class itself (site-packages redis.asyncio.*).
+        if let Some(module) = module_of_definition(self.model, def) {
+            if is_asyncio_redis_type(&module) {
+                return Some(RedisClientFamily::Async);
+            }
+            if module.starts_with("redis.") && !module.contains("asyncio") {
+                // redis.client.Redis / redis.connection — sync family.
+                let name = def.name(self.model.db()).unwrap_or_default();
+                if name.contains("Redis")
+                    || name.contains("Pipeline")
+                    || name.contains("StrictRedis")
+                {
+                    return Some(RedisClientFamily::Sync);
+                }
+            }
+        }
+        let kind = def.kind(self.model.db());
+        let DefinitionKind::Class(class_ref) = kind else {
+            return None;
+        };
+        let parsed =
+            parsed_module(self.model.db(), def.python_file(self.model.db())).load(self.model.db());
+        let class_def = class_ref.node(&parsed);
+        self.class_def_redis_family(class_def, visited)
+    }
+
+    fn class_def_redis_family(
+        &self,
+        class_def: &ruff_python_ast::StmtClassDef,
+        visited: &mut HashSet<String>,
+    ) -> Option<RedisClientFamily> {
+        // Prefer asyncio if any base is asyncio redis; sync if any sync redis.
+        // Mixed bases should not happen for redis clients; asyncio wins if both
+        // somehow appear (never map an asyncio subclass to a sync sink).
+        let mut saw_sync = false;
+        for base in class_def.bases() {
+            if let Some(family) = self.base_expr_redis_family(base, visited) {
+                match family {
+                    RedisClientFamily::Async => return Some(RedisClientFamily::Async),
+                    RedisClientFamily::Sync => saw_sync = true,
+                }
+            }
+        }
+        saw_sync.then_some(RedisClientFamily::Sync)
+    }
+
+    fn base_expr_redis_family(
+        &self,
+        base: &Expr,
+        visited: &mut HashSet<String>,
+    ) -> Option<RedisClientFamily> {
+        if let Some(q) = self.type_instance_qualname(base) {
+            if is_asyncio_redis_type(&q) {
+                return Some(RedisClientFamily::Async);
+            }
+            if is_sync_redis_type(&q) {
+                return Some(RedisClientFamily::Sync);
+            }
+        }
+        // Import / attribute bases: `redis.asyncio.Redis`, bare `Redis` from
+        // `from redis.asyncio import Redis`.
+        if let Some(q) = self.external_qualname_for_base(base) {
+            if is_asyncio_redis_type(&q) {
+                return Some(RedisClientFamily::Async);
+            }
+            if is_sync_redis_type(&q) {
+                return Some(RedisClientFamily::Sync);
+            }
+        }
+        if self.expr_looks_like_asyncio_redis(base) {
+            return Some(RedisClientFamily::Async);
+        }
+        let ty = base.inferred_type(self.model)?;
+        // Class object (not instance): definition is the class itself.
+        self.type_redis_family(ty, visited)
+    }
+
+    /// Qualname of a base expression without treating it as a call target.
+    fn external_qualname_for_base(&self, base: &Expr) -> Option<String> {
+        let resolved = match base {
+            Expr::Name(name) => definitions_for_name(
+                self.model,
+                name.id.as_str(),
+                name.into(),
+                ImportAliasResolution::ResolveAliases,
+            ),
+            Expr::Attribute(attr) => definitions_for_attribute(self.model, attr),
+            _ => Vec::new(),
+        };
+        for r in &resolved {
+            if let Some(def) = r.definition() {
+                if let FilePath::System(sys) = def.file(self.model.db()).path(self.model.db()) {
+                    let s = sys.as_str().replace('\\', "/");
+                    if s.contains("/redis/asyncio/") || s.contains("/redis/asyncio.py") {
+                        let name = def.name(self.model.db())?;
+                        return Some(format!("redis.asyncio.{name}"));
+                    }
+                }
+                if let Some(q) = qualname_from_definition(self.model, def) {
+                    return Some(q);
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Find a class definition matching `class_stack` (outermost → innermost).
+fn find_class_def<'a>(
+    body: &'a [ruff_python_ast::Stmt],
+    class_stack: &[String],
+) -> Option<&'a ruff_python_ast::StmtClassDef> {
+    if class_stack.is_empty() {
+        return None;
+    }
+    let (head, rest) = class_stack.split_first()?;
+    for stmt in body {
+        let ruff_python_ast::Stmt::ClassDef(class) = stmt else {
+            continue;
+        };
+        if class.name.as_str() != head.as_str() {
+            continue;
+        }
+        if rest.is_empty() {
+            return Some(class);
+        }
+        return find_class_def(&class.body, rest);
+    }
+    None
 }
