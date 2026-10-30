@@ -51,11 +51,45 @@ fn sarif_output_validates_against_2_1_0_schema() {
     );
     let doc: Value = serde_json::from_slice(&out.stdout).expect("sarif json");
     assert_eq!(doc["version"], "2.1.0");
-    assert_eq!(doc["runs"][0]["tool"]["driver"]["name"], "async-doctor");
+    let driver = &doc["runs"][0]["tool"]["driver"];
+    assert_eq!(driver["name"], "async-doctor");
+    assert!(
+        driver["version"].as_str().unwrap_or("").len() >= 1,
+        "driver.version must be set"
+    );
+    let rules = driver["rules"].as_array().expect("rules");
+    let sleep_rule = rules
+        .iter()
+        .find(|r| r["id"] == "blocking-sleep")
+        .expect("blocking-sleep rule");
+    let rule_name = sleep_rule["name"].as_str().unwrap();
+    assert_ne!(rule_name, "blocking-sleep", "name must differ from id");
+    assert!(!rule_name.is_empty());
+
+    let src = doc["runs"][0]["originalUriBaseIds"]["%SRCROOT%"]["uri"]
+        .as_str()
+        .expect("%SRCROOT% uri");
+    assert!(
+        src.starts_with("file://") && src.ends_with('/'),
+        "%SRCROOT% must be absolute file URI with trailing slash, got {src}"
+    );
+    assert_ne!(src, "./", "SARIF1004: %SRCROOT% must not be ./");
+
     let results = doc["runs"][0]["results"].as_array().expect("results");
     assert!(!results.is_empty());
     assert_eq!(results[0]["ruleId"], "blocking-sleep");
     assert!(results[0]["locations"][0]["physicalLocation"]["region"]["startLine"].is_number());
+    let uri = results[0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        results[0]["locations"][0]["physicalLocation"]["artifactLocation"]["uriBaseId"],
+        "%SRCROOT%"
+    );
+    assert!(
+        !uri.starts_with('/') && !uri.starts_with("file:"),
+        "artifact uri should be relative to %SRCROOT%, got {uri}"
+    );
     assert!(
         results[0]["codeFlows"][0]["threadFlows"][0]["locations"]
             .as_array()
@@ -83,6 +117,45 @@ fn sarif_output_validates_against_2_1_0_schema() {
             errors.join("\n")
         );
     }
+}
+
+#[test]
+fn sarif_uris_are_repo_root_relative_when_scanning_subdir() {
+    // Scan a subdirectory of this git repo; URIs must include the path from
+    // the repo toplevel (not just the basename relative to the scan root).
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("repo root");
+    let scan = repo.join("fixtures/m1_multihop");
+    let out = bin()
+        .args(["--format", "sarif"])
+        .arg(&scan)
+        .output()
+        .expect("run");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let doc: Value = serde_json::from_slice(&out.stdout).expect("sarif json");
+    let uri = doc["runs"][0]["results"][0]["locations"][0]["physicalLocation"]
+        ["artifactLocation"]["uri"]
+        .as_str()
+        .unwrap();
+    assert!(
+        uri.starts_with("fixtures/"),
+        "expected repo-relative uri under fixtures/, got {uri}"
+    );
+    let src = doc["runs"][0]["originalUriBaseIds"]["%SRCROOT%"]["uri"]
+        .as_str()
+        .unwrap();
+    let repo_uri = format!(
+        "file://{}/",
+        repo.to_string_lossy().replace('\\', "/")
+    );
+    assert_eq!(src, repo_uri, "%SRCROOT% should point at git toplevel");
 }
 
 #[test]

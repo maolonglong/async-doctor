@@ -49,7 +49,7 @@ chmod +x integrations/stop-hook/async-doctor-stop.sh
 
 ## Cursor
 
-`.cursor/hooks.json`:
+`.cursor/hooks.json` (see [Cursor hooks docs](https://cursor.com/docs/hooks)):
 
 ```json
 {
@@ -57,15 +57,23 @@ chmod +x integrations/stop-hook/async-doctor-stop.sh
   "hooks": {
     "stop": [
       {
-        "command": "./integrations/stop-hook/async-doctor-stop.sh"
+        "command": "./integrations/stop-hook/async-doctor-stop.sh",
+        "loop_limit": 5
       }
     ]
   }
 }
 ```
 
+On findings the script prints `{"followup_message":"..."}` on stdout (exit 0). Cursor
+auto-submits that as the next user message. Honor `loop_count` / `status` from the
+stdin payload so aborted/errored stops and high loop counts do not keep looping.
+
 ## Tips
 
 - Prefer `--changed` so the agent loop stays fast; analysis is still whole-project.
 - Pair with the [skill](../skill/SKILL.md) so the agent knows how to fix findings.
 - For backlog suppression in CI only: `--baseline baseline.json`.
+- Claude Code: see [hooks reference](https://code.claude.com/docs/en/hooks) — Stop
+  blocks only on exit **2** (or JSON `decision: "block"`); always honor
+  `stop_hook_active`.
