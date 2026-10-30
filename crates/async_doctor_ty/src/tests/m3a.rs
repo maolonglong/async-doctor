@@ -196,6 +196,9 @@ fn m3a_asyncio_pipeline_execute_still_clean() {
         "asyncio_pipeline_execute_ok",
         "asyncio_pipeline_set_ok",
         "asyncio_redis_subclass_get_ok",
+        "asyncio_redis_from_import_subclass_ok",
+        "asyncio_redis_alias_subclass_get_set_ok",
+        "asyncio_redis_subclass_super_get_ok",
     ] {
         assert!(
             !names.contains(&banned),
@@ -235,6 +238,44 @@ fn m3a_sync_redis_subclass_inherits_sink() {
         !names.contains(&"asyncio_redis_subclass_get_ok"),
         "asyncio Redis subclass must stay clean: {names:?}"
     );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&cache);
+}
+
+#[test]
+fn m3a_asyncio_redis_subclass_variants_never_fire() {
+    // Receiver-MRO family: asyncio subclasses must stay 0 even when ty resolves
+    // get/set to the shared plain-def commands mixin.
+    let dir = clone_fixture("m2_redis_pipeline_real");
+    let cache = fresh_cache_dir("m3a-asyncio-sub");
+    let report = scan_path_with_cache(&dir, Some(&cache)).unwrap();
+    let names: Vec<_> = report
+        .findings
+        .iter()
+        .map(|f| f.entry.name.as_str())
+        .collect();
+    for banned in [
+        "asyncio_redis_subclass_get_ok",
+        "asyncio_redis_from_import_subclass_ok",
+        "asyncio_redis_alias_subclass_get_set_ok",
+        "asyncio_redis_subclass_super_get_ok",
+    ] {
+        assert!(
+            !names.contains(&banned),
+            "{banned} must stay clean (asyncio subclass MRO): {names:?} findings={:?}",
+            report.findings
+        );
+    }
+    // Sync counterparts on the same fixture must still fire.
+    for expected in [
+        "sync_redis_subclass_get_blocks",
+        "sync_redis_subclass_override_get_blocks",
+    ] {
+        assert!(
+            names.contains(&expected),
+            "missing sync {expected}: findings={names:?}"
+        );
+    }
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&cache);
 }

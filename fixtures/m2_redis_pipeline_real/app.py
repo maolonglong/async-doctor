@@ -51,6 +51,25 @@ class MyAsyncRedis(aioredis.Redis):
     pass
 
 
+# Repro style 1: `from redis.asyncio import Redis`
+from redis.asyncio import Redis as AsyncRedisImported
+
+
+class RFromImport(AsyncRedisImported):
+    pass
+
+
+# Repro style 2: `import redis.asyncio as ar`
+class ARAlias(aioredis.Redis):
+    pass
+
+
+# Repro style 3: async override that awaits super().get
+class AsyncRedisOverride(aioredis.Redis):
+    async def get(self, name, **kwargs):
+        return await super().get(name, **kwargs)
+
+
 async def sync_redis_subclass_get_blocks():
     MyRedis().get("k")
 
@@ -61,3 +80,17 @@ async def sync_redis_subclass_override_get_blocks():
 
 async def asyncio_redis_subclass_get_ok():
     await MyAsyncRedis().get("k")
+
+
+async def asyncio_redis_from_import_subclass_ok():
+    await RFromImport().get("k")
+
+
+async def asyncio_redis_alias_subclass_get_set_ok():
+    r = ARAlias()
+    await r.get("k")
+    await r.set("k", "v")
+
+
+async def asyncio_redis_subclass_super_get_ok():
+    await AsyncRedisOverride().get("k")

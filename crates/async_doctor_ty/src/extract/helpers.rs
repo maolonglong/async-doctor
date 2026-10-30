@@ -33,21 +33,30 @@ pub(crate) fn is_redis_commands_core_method(q: &str) -> bool {
             .is_some_and(|rest| !rest.is_empty() && !rest.contains('.'))
 }
 
+/// Sync vs asyncio redis client family (from the *receiver* MRO, not the
+/// commands-mixin defining class — mixins are shared plain `def`s).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RedisClientFamily {
+    Sync,
+    Async,
+}
+
 /// Map a redis commands-mixin defining-class qualname to the canonical
 /// receiver sink key so project subclasses inherit sync/async status.
 ///
-/// `CoreCommands.get` / class-stripped `redis.commands.core.get` →
-/// `redis.Redis.get` (sync) or `redis.asyncio.Redis.get` when `is_async`.
-/// Cluster mixins are left unmapped.
-pub(crate) fn map_redis_mixin_to_canonical_sink(q: &str, is_async: bool) -> Option<String> {
+/// Family must come from the receiver type's MRO (`redis.asyncio.Redis` ⇒
+/// async), never from whether the mixin method is `async def`.
+pub(crate) fn map_redis_mixin_to_canonical_sink(
+    q: &str,
+    family: RedisClientFamily,
+) -> Option<String> {
     if !is_redis_commands_core_method(q) {
         return None;
     }
     let method = q.rsplit('.').next().filter(|m| !m.is_empty())?;
-    if is_async || q.contains("AsyncCoreCommands") {
-        Some(format!("redis.asyncio.Redis.{method}"))
-    } else {
-        Some(format!("redis.Redis.{method}"))
+    match family {
+        RedisClientFamily::Async => Some(format!("redis.asyncio.Redis.{method}")),
+        RedisClientFamily::Sync => Some(format!("redis.Redis.{method}")),
     }
 }
 
@@ -333,30 +342,32 @@ mod tests {
     #[test]
     fn redis_mixin_maps_to_canonical_sinks() {
         assert_eq!(
-            map_redis_mixin_to_canonical_sink("redis.commands.core.CoreCommands.get", false)
-                .as_deref(),
+            map_redis_mixin_to_canonical_sink(
+                "redis.commands.core.CoreCommands.get",
+                RedisClientFamily::Sync
+            )
+            .as_deref(),
             Some("redis.Redis.get")
         );
         assert_eq!(
-            map_redis_mixin_to_canonical_sink("redis.commands.core.AsyncCoreCommands.get", true)
+            map_redis_mixin_to_canonical_sink("redis.commands.core.get", RedisClientFamily::Async)
                 .as_deref(),
             Some("redis.asyncio.Redis.get")
         );
         assert_eq!(
-            map_redis_mixin_to_canonical_sink("redis.commands.core.get", false).as_deref(),
+            map_redis_mixin_to_canonical_sink("redis.commands.core.get", RedisClientFamily::Sync)
+                .as_deref(),
             Some("redis.Redis.get")
-        );
-        assert_eq!(
-            map_redis_mixin_to_canonical_sink("redis.commands.core.get", true).as_deref(),
-            Some("redis.asyncio.Redis.get")
         );
         assert!(
             map_redis_mixin_to_canonical_sink(
                 "redis.commands.cluster.RedisClusterCommands.get",
-                false
+                RedisClientFamily::Sync
             )
             .is_none()
         );
-        assert!(map_redis_mixin_to_canonical_sink("redis.Redis.get", false).is_none());
+        assert!(
+            map_redis_mixin_to_canonical_sink("redis.Redis.get", RedisClientFamily::Sync).is_none()
+        );
     }
 }
