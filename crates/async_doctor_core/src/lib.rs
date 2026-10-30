@@ -51,6 +51,7 @@ pub struct ChainStep {
 pub struct Entry {
     pub file: String,
     pub line: u32,
+    /// Qualified name when nested in a class (`Class.method`), otherwise the function name.
     pub name: String,
     pub label: EntryLabel,
 }
@@ -116,16 +117,35 @@ impl Report {
     }
 }
 
-/// Stable finding id: sha256(rule | entry | sink) hex-truncated.
-pub fn finding_id(rule: &str, entry_file: &str, entry_name: &str, sink: &str) -> String {
+/// Inputs that uniquely identify a finding for baseline / dedupe.
+#[derive(Debug, Clone, Copy)]
+pub struct FindingIdParts<'a> {
+    pub rule: &'a str,
+    pub entry_file: &'a str,
+    /// Qualified entry name, e.g. `handler` or `A.handle`.
+    pub entry_qualname: &'a str,
+    pub sink: &'a str,
+    pub call_file: &'a str,
+    pub call_line: u32,
+    pub call_column: u32,
+}
+
+/// Stable finding id: sha256 over rule, entry, sink, and call site.
+pub fn finding_id(parts: FindingIdParts<'_>) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(rule.as_bytes());
+    hasher.update(parts.rule.as_bytes());
     hasher.update(b"\0");
-    hasher.update(entry_file.as_bytes());
+    hasher.update(parts.entry_file.as_bytes());
     hasher.update(b"\0");
-    hasher.update(entry_name.as_bytes());
+    hasher.update(parts.entry_qualname.as_bytes());
     hasher.update(b"\0");
-    hasher.update(sink.as_bytes());
+    hasher.update(parts.sink.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(parts.call_file.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(parts.call_line.to_string().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(parts.call_column.to_string().as_bytes());
     let digest = hasher.finalize();
     hex::encode(&digest[..16])
 }
@@ -143,12 +163,34 @@ pub fn fix_group_id(rule: &str, sink: &str) -> String {
 mod tests {
     use super::*;
 
+    fn parts<'a>(qualname: &'a str, call_line: u32, call_column: u32) -> FindingIdParts<'a> {
+        FindingIdParts {
+            rule: "blocking-sleep",
+            entry_file: "a.py",
+            entry_qualname: qualname,
+            sink: "time.sleep",
+            call_file: "a.py",
+            call_line,
+            call_column,
+        }
+    }
+
     #[test]
     fn finding_id_is_stable() {
-        let a = finding_id("blocking-sleep", "a.py", "f", "time.sleep");
-        let b = finding_id("blocking-sleep", "a.py", "f", "time.sleep");
+        let a = finding_id(parts("f", 2, 5));
+        let b = finding_id(parts("f", 2, 5));
         assert_eq!(a, b);
-        assert_ne!(a, finding_id("blocking-sleep", "a.py", "g", "time.sleep"));
+    }
+
+    #[test]
+    fn finding_id_distinguishes_qualname_and_call_site() {
+        let a_handle = finding_id(parts("A.handle", 3, 5));
+        let b_handle = finding_id(parts("B.handle", 3, 5));
+        assert_ne!(a_handle, b_handle);
+
+        let first = finding_id(parts("f", 2, 5));
+        let second = finding_id(parts("f", 3, 5));
+        assert_ne!(first, second);
     }
 
     #[test]
