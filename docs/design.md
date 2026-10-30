@@ -191,11 +191,15 @@ langgraph, home-assistant core, plus small fixtures per rule/pattern.
   unless `--show-unresolved`. Metadata IO → candidates. Findings only when
   provable.
 - `conditions[]`: prove-only. `unconditional` / `all-paths` never accompany
-  `if`/`else`/`try`/`match` guards; also `loop`, `async-branch`,
-  `cache_miss_dependent`. Parameter-controlled branches → candidates
-  (`reason=conditional`) unless the guarding arg is provably truthy.
-- Dead-branch pruning for unreassigned module constants (`DEBUG = False`,
-  `_EMPTY = ()`) plus `if False` / `TYPE_CHECKING`.
+  `if`/`else`/`try`/`match` guards, early-exit guards (`if x: return` /
+  `raise`, cache-hit returns), or comprehension `if` filters; also `loop`,
+  `async-branch`, `cache_miss_dependent`. Parameter guards in *callees*
+  with non-literal caller args → candidates (`reason=conditional`); literal
+  falsy args prune. Entry-local param guards stay findings (`async-branch`).
+- Dead-branch pruning for unreassigned module constants only when ty
+  confirms the name binds to that module symbol (no local reassign, param
+  shadow, `global`, or import); always-true early exits make the rest
+  unreachable. Also `if False` / `TYPE_CHECKING`.
 - Generators: create-without-iterate does not propagate; consume via
   `for` / `list` / `next` / `yield from` does.
 - Zero-config scope: skip entries under tests/docs/examples/scripts/hidden

@@ -16,3 +16,9 @@ async def dead_debug():
 async def live_not_empty():
     if not _EMPTY:
         time.sleep(1)
+
+
+async def unreachable_after_empty_return():
+    if not _EMPTY:
+        return
+    time.sleep(1)
