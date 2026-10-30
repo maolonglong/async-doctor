@@ -134,7 +134,10 @@ fn normalize_third_party(qualname: &str) -> String {
         ("urllib3.connectionpool.", "urllib3."),
         ("httpx._client.", "httpx."),
         ("redis.client.", "redis."),
-        ("redis.commands.core.", "redis.Redis."),
+        // Never map mixin `redis.commands.core.CoreCommands.*` → `redis.Redis.*`:
+        // that turns asyncio-pipeline / union-receiver fallbacks into false
+        // sync Redis sinks. Receiver-typed Externals already key off Redis /
+        // Pipeline; bare mixin quals are not sync-IO evidence.
         ("sqlalchemy.engine.base.", "sqlalchemy.engine."),
         ("sqlalchemy.orm.session.", "sqlalchemy.orm."),
         ("botocore.client.", "botocore.client."),

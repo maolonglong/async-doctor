@@ -159,87 +159,48 @@ fn package_cache_path(root: &Path, package: &str, version: &str, fingerprint: &s
 
 /// Fingerprint package contents so editable/patched installs invalidate cache.
 ///
-/// Combines `*.dist-info/RECORD` bytes (when present) with sorted
-/// `(relpath,len,mtime)` of neighboring `.py` files so a locally patched
-/// package with an unchanged version/RECORD still misses the stale cache.
+/// Cheap path (preferred):
+/// 1. Hash `RECORD` bytes when present (covers wheel installs).
+/// 2. Else hash `METADATA` len+mtime plus the dist-info directory mtime.
+/// 3. Else (no dist-info): one-level `(name,len,mtime)` of `.py` files in the
+///    package dir — never a recursive walk (that dominated sys time on large
+///    venvs when called per call-site before memoization).
 pub fn package_content_fingerprint(dist_info_or_pkg_dir: &Path) -> String {
-    let (dist_info, pkg_dir) = if dist_info_or_pkg_dir
+    let dist_info = if dist_info_or_pkg_dir
         .file_name()
         .and_then(|n| n.to_str())
         .is_some_and(|n| n.ends_with(".dist-info"))
     {
-        let parent = dist_info_or_pkg_dir
-            .parent()
-            .unwrap_or(dist_info_or_pkg_dir);
-        let stem = dist_info_or_pkg_dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .trim_end_matches(".dist-info");
-        let top = stem.split('-').next().unwrap_or(stem);
-        // Dist names use dashes; import packages often use underscores.
-        let candidates = [top.to_string(), top.replace('-', "_")];
-        let pkg = candidates
-            .iter()
-            .map(|c| parent.join(c))
-            .find(|p| p.is_dir())
-            .unwrap_or_else(|| parent.join(top));
-        (dist_info_or_pkg_dir.to_path_buf(), pkg)
+        dist_info_or_pkg_dir.to_path_buf()
     } else {
-        let base = if dist_info_or_pkg_dir.is_file() {
-            dist_info_or_pkg_dir
-                .parent()
-                .unwrap_or(dist_info_or_pkg_dir)
-                .to_path_buf()
-        } else {
-            dist_info_or_pkg_dir.to_path_buf()
-        };
-        (PathBuf::new(), base)
+        PathBuf::new()
     };
 
-    let mut blob = Vec::new();
-    let record = dist_info.join("RECORD");
-    if record.is_file()
-        && let Ok(bytes) = fs::read(&record)
-    {
-        blob.extend_from_slice(b"RECORD:");
-        blob.extend_from_slice(&bytes);
-    }
-    let mut entries: Vec<(String, u64, u64)> = Vec::new();
-    collect_py_fingerprints(&pkg_dir, &pkg_dir, &mut entries);
-    entries.sort();
-    blob.extend_from_slice(b"|PY:");
-    blob.extend_from_slice(format!("{entries:?}").as_bytes());
-    short_hash(&blob)
-}
-
-fn collect_py_fingerprints(base: &Path, dir: &Path, out: &mut Vec<(String, u64, u64)>) {
-    let Ok(walker) = fs::read_dir(dir) else {
-        return;
-    };
-    for ent in walker.flatten() {
-        let p = ent.path();
-        if p.is_dir() {
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if name == "__pycache__" || name.ends_with(".dist-info") {
-                continue;
+    if dist_info.is_dir() {
+        let record = dist_info.join("RECORD");
+        if record.is_file()
+            && let Ok(bytes) = fs::read(&record)
+        {
+            // Mix in dist-info mtime so a reinstall that rewrites RECORD with
+            // identical bytes still invalidates (rare) and editable installs
+            // that refresh METADATA bump the fingerprint without a recursive
+            // `.py` walk.
+            let mut blob = Vec::with_capacity(bytes.len() + 32);
+            blob.extend_from_slice(b"RECORD:");
+            blob.extend_from_slice(&bytes);
+            if let Ok(meta) = fs::metadata(&dist_info) {
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                blob.extend_from_slice(format!("|DI:{mtime}").as_bytes());
             }
-            collect_py_fingerprints(base, &p, out);
-            continue;
+            return short_hash(&blob);
         }
-        if p.extension().and_then(|e| e.to_str()) != Some("py") {
-            continue;
-        }
-        if let Ok(meta) = ent.metadata() {
-            let rel = p
-                .strip_prefix(base)
-                .map(|r| r.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_else(|_| {
-                    p.file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("")
-                        .to_string()
-                });
+        let meta_path = dist_info.join("METADATA");
+        if let Ok(meta) = fs::metadata(&meta_path) {
             let len = meta.len();
             let mtime = meta
                 .modified()
@@ -247,9 +208,46 @@ fn collect_py_fingerprints(base: &Path, dir: &Path, out: &mut Vec<(String, u64, 
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            out.push((rel, len, mtime));
+            return short_hash(format!("META:{len}:{mtime}").as_bytes());
         }
     }
+
+    // No dist-info: shallow .py fingerprint only.
+    let base = if dist_info_or_pkg_dir.is_file() {
+        dist_info_or_pkg_dir
+            .parent()
+            .unwrap_or(dist_info_or_pkg_dir)
+    } else {
+        dist_info_or_pkg_dir
+    };
+    let mut entries: Vec<(String, u64, u64)> = Vec::new();
+    if let Ok(walker) = fs::read_dir(base) {
+        for ent in walker.flatten() {
+            let p = ent.path();
+            if p.extension().and_then(|e| e.to_str()) != Some("py") {
+                continue;
+            }
+            if let Ok(meta) = ent.metadata() {
+                let len = meta.len();
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                entries.push((
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    len,
+                    mtime,
+                ));
+            }
+        }
+    }
+    entries.sort();
+    short_hash(format!("PY:{entries:?}").as_bytes())
 }
 
 fn short_hash(bytes: &[u8]) -> String {

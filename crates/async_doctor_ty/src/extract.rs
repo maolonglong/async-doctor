@@ -21,7 +21,7 @@ use ruff_source_file::OneIndexed;
 use ruff_text_size::{Ranged, TextRange, TextSize};
 use ty_python_core::definition::DefinitionKind;
 use ty_python_core::{ProgramFile, semantic_index};
-use ty_python_semantic::types::TypeDefinition;
+use ty_python_semantic::types::{Type, TypeDefinition};
 use ty_python_semantic::{
     HasType, ImportAliasResolution, SemanticModel, definitions_for_attribute, definitions_for_name,
 };
@@ -29,8 +29,8 @@ use ty_python_semantic::{
 use crate::cache::{effective_cache_root, third_party_module_path};
 use crate::db::AsyncDoctorDb;
 use crate::sitepkgs::{
-    FollowTarget, PackageCacheBatch, is_followable_site_packages_py, materialize_cached_functions,
-    package_meta_for_path,
+    FollowTarget, PackageCacheBatch, clear_package_meta_memo, is_followable_site_packages_py,
+    materialize_cached_functions, package_meta_for_path,
 };
 use async_doctor_rules::{BuiltinSinkTable, is_async_counterpart};
 
@@ -45,6 +45,7 @@ pub fn extract_path_with_cache(
     path: &Path,
     cache_dir: Option<&Path>,
 ) -> anyhow::Result<ProjectFacts> {
+    clear_package_meta_memo();
     let path = absolute_utf8(path)?;
     if path.as_std_path().is_file() {
         if path.extension() != Some("py") {
@@ -1945,7 +1946,62 @@ impl<'a, 'db> CallCollector<'a, 'db> {
     fn type_instance_qualname(&self, expr: &Expr) -> Option<String> {
         let ty = expr.inferred_type(self.model)?;
         let env = self.model.program_environment();
-        let def = ty.definition(self.model.db(), &env)?;
+        self.type_to_instance_qualname(ty, &env)
+    }
+
+    /// Resolve a concrete instance qualname, including union receivers.
+    ///
+    /// For `Pipeline | ClusterPipeline` (all asyncio redis) → asyncio Pipeline.
+    /// Mixed asyncio/sync redis → `None` (caller must not fall back to a sync
+    /// mixin sink; prefer unresolved/candidate).
+    fn type_to_instance_qualname(
+        &self,
+        ty: Type<'_>,
+        env: &ty_python_semantic::ProgramEnvironment<'_>,
+    ) -> Option<String> {
+        if let Some(union) = ty.as_union() {
+            let mut names: Vec<String> = Vec::new();
+            for elem in union.elements(self.model.db()).iter() {
+                // Skip trivial None/Never noise in Optional unions.
+                if matches!(elem, Type::Never) {
+                    continue;
+                }
+                if let Some(n) = self.type_to_instance_qualname(*elem, env) {
+                    names.push(n);
+                } else if elem.definition(self.model.db(), env).is_some() {
+                    // Element has a definition we couldn't name — treat as opaque.
+                    names.push(String::new());
+                }
+            }
+            names.sort();
+            names.dedup();
+            names.retain(|n| !n.is_empty());
+            if names.is_empty() {
+                return None;
+            }
+            let all_asyncio = names.iter().all(|n| is_asyncio_redis_type(n));
+            let any_asyncio = names.iter().any(|n| is_asyncio_redis_type(n));
+            let any_sync_redis = names.iter().any(|n| is_sync_redis_type(n));
+            if all_asyncio {
+                // Prefer Pipeline when any member is a Pipeline.
+                if names.iter().any(|n| n.contains("Pipeline")) {
+                    return Some("redis.asyncio.client.Pipeline".to_string());
+                }
+                return Some("redis.asyncio.client.Redis".to_string());
+            }
+            if any_asyncio && any_sync_redis {
+                // Mixed → do not pick a sync sink; signal via None so callers
+                // avoid mixin→Redis normalization (emit unresolved instead).
+                return None;
+            }
+            if names.len() == 1 {
+                return Some(names.into_iter().next().unwrap());
+            }
+            // Homogeneous non-redis union: pick the first stable name.
+            return names.into_iter().next();
+        }
+
+        let def = ty.definition(self.model.db(), env)?;
         match def {
             TypeDefinition::StaticClass(definition) | TypeDefinition::DynamicClass(definition) => {
                 let name = definition.name(self.model.db())?;
@@ -2127,6 +2183,33 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             {
                 return Some(format!("{recv}.{}", attr.attr.as_str()));
             }
+            // Union receivers (Pipeline | ClusterPipeline, Redis | RedisCluster).
+            if let Some(ty) = attr.value.inferred_type(self.model) {
+                let env = self.model.program_environment();
+                if ty.as_union().is_some() {
+                    match self.type_to_instance_qualname(ty, &env) {
+                        Some(recv) => {
+                            let recv = if is_asyncio_redis_type(&recv) {
+                                normalize_asyncio_redis_type(&recv)
+                            } else {
+                                recv
+                            };
+                            return Some(format!("{recv}.{}", attr.attr.as_str()));
+                        }
+                        None => {
+                            // Mixed asyncio|sync (or unnameable union): never fall
+                            // through to CoreCommands → sync Redis.
+                            if self.expr_looks_like_asyncio_redis(&attr.value) {
+                                return Some(format!(
+                                    "redis.asyncio.client.Pipeline.{}",
+                                    attr.attr.as_str()
+                                ));
+                            }
+                            return None;
+                        }
+                    }
+                }
+            }
             if let Some(recv) = self.type_instance_qualname(&attr.value) {
                 let recv = if is_asyncio_redis_type(&recv) {
                     normalize_asyncio_redis_type(&recv)
@@ -2157,6 +2240,10 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             if let Some(def) = r.definition()
                 && let Some(q) = qualname_from_definition(self.model, def)
             {
+                // Bare redis mixin defs are not sync-IO without a receiver type.
+                if is_redis_commands_mixin(&q) {
+                    continue;
+                }
                 return Some(q);
             }
         }
@@ -2164,7 +2251,13 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         let ty = func.inferred_type(self.model)?;
         let env = self.model.program_environment();
         match ty.definition(self.model.db(), &env)? {
-            TypeDefinition::Function(def) => qualname_from_definition(self.model, def),
+            TypeDefinition::Function(def) => {
+                let q = qualname_from_definition(self.model, def)?;
+                if is_redis_commands_mixin(&q) {
+                    return None;
+                }
+                Some(q)
+            }
             TypeDefinition::Module(module) => {
                 Some(module.name(self.model.db()).as_str().to_string())
             }
@@ -2176,6 +2269,18 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             _ => None,
         }
     }
+}
+
+fn is_sync_redis_type(ty: &str) -> bool {
+    (ty.contains("redis.") || ty.contains(".redis"))
+        && !is_asyncio_redis_type(ty)
+        && (ty.contains("Redis") || ty.contains("Pipeline") || ty.contains("StrictRedis"))
+}
+
+fn is_redis_commands_mixin(q: &str) -> bool {
+    q.contains("redis.commands.core.CoreCommands")
+        || q.contains("redis.commands.core.AsyncCoreCommands")
+        || q.contains("redis.commands.cluster.")
 }
 
 fn qualname_from_definition<'db>(
