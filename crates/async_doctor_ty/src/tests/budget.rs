@@ -166,6 +166,7 @@ fn materialize_cached_functions_loads_only_wanted_keys() {
                 param_guard_index: None,
                 param_guard_inverted: None,
                 is_awaited: false,
+                callee_is_coroutine: None,
             }],
         },
     );
@@ -199,6 +200,7 @@ fn materialize_cached_functions_loads_only_wanted_keys() {
                 param_guard_index: None,
                 param_guard_inverted: None,
                 is_awaited: false,
+                callee_is_coroutine: Some(false),
             }],
         },
     );

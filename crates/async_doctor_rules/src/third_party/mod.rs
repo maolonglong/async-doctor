@@ -47,9 +47,24 @@ pub(super) fn hit(sink: &BuiltinSink) -> SinkHit {
 }
 
 pub fn is_async_counterpart(qualname: &str) -> bool {
-    let q = qualname;
-    // httpx
-    if q.starts_with("httpx.AsyncClient.") || q == "httpx.AsyncClient" {
+    // Normalize stub/runtime layouts (`httpx._client.AsyncClient` → `httpx.AsyncClient`)
+    // before matching — follow and lookup must agree, and definition-qualified
+    // paths from ty must not slip past the public-type checks.
+    let normalized = normalize_third_party(qualname);
+    for q in [qualname, normalized.as_str()] {
+        if is_async_counterpart_raw(q) {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_async_counterpart_raw(q: &str) -> bool {
+    // httpx — public type *or* any path segment `AsyncClient` under httpx.
+    if q.starts_with("httpx.AsyncClient.")
+        || q == "httpx.AsyncClient"
+        || (q.starts_with("httpx.") && q.split('.').any(|s| s == "AsyncClient"))
+    {
         return true;
     }
     // aiohttp
@@ -57,7 +72,7 @@ pub fn is_async_counterpart(qualname: &str) -> bool {
         return true;
     }
     // redis.asyncio
-    if q.starts_with("redis.asyncio.") {
+    if q.starts_with("redis.asyncio.") || (q.starts_with("redis.") && q.contains(".asyncio.")) {
         return true;
     }
     // sqlalchemy async
@@ -81,13 +96,20 @@ pub fn is_async_counterpart(qualname: &str) -> bool {
     // openai / anthropic async clients
     if q.starts_with("openai.AsyncOpenAI")
         || q.starts_with("openai.AsyncAzureOpenAI")
+        || q.contains("AsyncOpenAI")
         || q.starts_with("anthropic.AsyncAnthropic")
         || q.starts_with("anthropic.AsyncAnthropicBedrock")
+        || q.contains("AsyncAnthropic")
     {
         return true;
     }
-    // elasticsearch async
-    if q.starts_with("elasticsearch.AsyncElasticsearch") || q.starts_with("elasticsearch.Async") {
+    // elasticsearch async — public type, `Async*` segment, or `_async` package path
+    if q.starts_with("elasticsearch.AsyncElasticsearch")
+        || q.starts_with("elasticsearch.Async")
+        || q.starts_with("elasticsearch._async.")
+        || (q.starts_with("elasticsearch.")
+            && (q.contains("._async.") || q.split('.').any(|s| s.starts_with("Async"))))
+    {
         return true;
     }
     // grpc aio
@@ -98,6 +120,8 @@ pub fn is_async_counterpart(qualname: &str) -> bool {
     if q.starts_with("psycopg.AsyncConnection")
         || q.starts_with("psycopg.AsyncCursor")
         || q.starts_with("psycopg_pool.AsyncConnectionPool")
+        || q.contains("AsyncConnection")
+        || q.contains("AsyncCursor")
     {
         return true;
     }

@@ -15,6 +15,7 @@ impl SinkTable for TestSinks {
                 candidate_only: false,
                 candidate_reason: None,
                 with_only: false,
+                consume_only: false,
             }),
             "builtins.open" => Some(SinkHit {
                 rule: "blocking-file",
@@ -23,6 +24,7 @@ impl SinkTable for TestSinks {
                 candidate_only: false,
                 candidate_reason: None,
                 with_only: false,
+                consume_only: false,
             }),
             "io.TextIOWrapper.read" => Some(SinkHit {
                 rule: "blocking-file",
@@ -31,6 +33,7 @@ impl SinkTable for TestSinks {
                 candidate_only: false,
                 candidate_reason: None,
                 with_only: false,
+                consume_only: false,
             }),
             "os.stat" => Some(SinkHit {
                 rule: "blocking-file",
@@ -39,6 +42,7 @@ impl SinkTable for TestSinks {
                 candidate_only: true,
                 candidate_reason: Some("metadata"),
                 with_only: false,
+                consume_only: false,
             }),
             _ => None,
         }
@@ -88,8 +92,22 @@ fn edge(
         keyword_callables: vec![],
         param_guard: None,
         is_awaited: false,
+        callee_is_coroutine: None,
+        is_eager_offload_arg: false,
         context_from_caller: None,
     }
+}
+
+#[test]
+fn hop_text_truncates_to_first_line() {
+    assert_eq!(
+        super::grade::truncate_hop_text(
+            "self.request(\n            \"GET\",\n            url,\n        )"
+        ),
+        "self.request("
+    );
+    assert_eq!(super::grade::truncate_hop_text("  \n  fn()  \n"), "fn()");
+    assert_eq!(super::grade::truncate_hop_text("single"), "single");
 }
 
 #[test]

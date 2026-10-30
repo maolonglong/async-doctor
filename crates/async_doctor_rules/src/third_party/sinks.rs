@@ -139,6 +139,12 @@ pub static THIRD_PARTY_SINKS: &[BuiltinSink] = &[
         RULE_BLOCKING_DB,
         "Use `redis.asyncio` pipelines (`await pipe.execute()`), or offload.",
     ),
+    // PubSub.listen blocks when the generator is consumed (for / list / next / comp).
+    BuiltinSink::finding_consume_only(
+        "redis.PubSub.listen",
+        RULE_BLOCKING_DB,
+        "Use `redis.asyncio` pub/sub (`async for msg in pubsub.listen()`), or offload.",
+    ),
     // --- sqlalchemy sync ---
     BuiltinSink::finding(
         "sqlalchemy.orm.Session.execute",

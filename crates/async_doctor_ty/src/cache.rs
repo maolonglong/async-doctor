@@ -19,7 +19,12 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// Bump when the on-disk JSON shape / key layout changes incompatibly.
-pub const CACHE_SCHEMA_VERSION: u32 = 3;
+///
+/// v4: edges carry `callee_is_coroutine` (structural async-def gate).
+/// v5: redis subclass Externals key off receiver MRO (asyncio base ⇒
+/// `redis.asyncio.Redis.*`). A v4 cache written before that fix still stores
+/// sync `redis.Redis.*` for asyncio subclasses and must not be reused.
+pub const CACHE_SCHEMA_VERSION: u32 = 5;
 
 /// Tool version embedded in the cache path (from this crate's Cargo.toml).
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -55,6 +60,9 @@ pub struct CachedEdge {
     /// Call was under `await` when recorded.
     #[serde(default)]
     pub is_awaited: bool,
+    /// Resolved `async def` callee when known (`None` = unresolved / legacy cache).
+    #[serde(default)]
+    pub callee_is_coroutine: Option<bool>,
 }
 
 /// Per-function summary stored in the package cache.
@@ -380,6 +388,7 @@ mod tests {
                     param_guard_index: None,
                     param_guard_inverted: None,
                     is_awaited: false,
+                    callee_is_coroutine: None,
                 }],
             },
         );
@@ -393,6 +402,65 @@ mod tests {
         assert!(!loaded.functions.contains_key("demo.mod:fn"));
         // Different fingerprint must miss.
         assert!(load_package_cache(&root, "demo", "1.0.0", "otherfp").is_none());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stale_schema_cache_is_not_reused() {
+        // v4 added `callee_is_coroutine`; v5 changed redis-subclass External
+        // keys. Older schema_version documents (or v3/v4 directories) must miss.
+        let dir =
+            std::env::temp_dir().join(format!("async-doctor-cache-stale-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let root = dir.join("async-doctor");
+
+        let mut cache = PackageCache::new("demo", "1.0.0");
+        assert_eq!(cache.schema_version, CACHE_SCHEMA_VERSION);
+        assert!(cache.is_compatible());
+        for stale in [3u32, 4u32] {
+            cache.schema_version = stale;
+            assert!(
+                !cache.is_compatible(),
+                "schema {stale} must be incompatible with v{CACHE_SCHEMA_VERSION}"
+            );
+        }
+
+        // Spoof stale schema_version into the *current* package path.
+        cache.schema_version = CACHE_SCHEMA_VERSION;
+        save_package_cache(&root, &cache, "fpstale").unwrap();
+        let path = package_cache_path(&root, "demo", "1.0.0", "fpstale");
+        for stale in [3u32, 4u32] {
+            let mut spoofed: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+            spoofed["schema_version"] = serde_json::json!(stale);
+            fs::write(&path, serde_json::to_string(&spoofed).unwrap()).unwrap();
+            assert!(
+                load_package_cache(&root, "demo", "1.0.0", "fpstale").is_none(),
+                "schema {stale} in the v{CACHE_SCHEMA_VERSION} path must not load"
+            );
+        }
+
+        // Legacy directory layouts (v3/, v4/) must also miss.
+        for stale in [3u32, 4u32] {
+            let stale_dir = root
+                .join(format!("v{stale}"))
+                .join(sanitize(TOOL_VERSION))
+                .join(sanitize("demo"));
+            fs::create_dir_all(&stale_dir).unwrap();
+            let stale_path = stale_dir.join(format!(
+                "{}-{}.json",
+                sanitize("1.0.0"),
+                sanitize("fpstale")
+            ));
+            let mut stale_doc = PackageCache::new("demo", "1.0.0");
+            stale_doc.schema_version = stale;
+            fs::write(&stale_path, serde_json::to_string(&stale_doc).unwrap()).unwrap();
+        }
+        assert!(
+            load_package_cache(&root, "demo", "1.0.0", "fpstale").is_none(),
+            "files under v3/ or v4/ must not be reused by schema v{CACHE_SCHEMA_VERSION}"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
