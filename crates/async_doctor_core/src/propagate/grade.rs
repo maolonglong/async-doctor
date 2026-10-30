@@ -19,11 +19,41 @@ pub(super) fn chain_step_for(
     file: String,
     line: u32,
     text: String,
+    resolution: String,
 ) -> ChainStep {
-    if caller.is_third_party {
+    let step = if caller.is_third_party {
         ChainStep::third_party(file, line, text, caller.package_name.clone())
     } else {
         ChainStep::project(file, line, text)
+    };
+    step.with_resolution(resolution)
+}
+
+/// Describe how a call-graph edge was resolved (for `why` evidence).
+pub(super) fn resolution_for_edge(facts: &ProjectFacts, edge: &crate::graph::CallEdge) -> String {
+    use crate::graph::CalleeRef;
+    match &edge.callee {
+        CalleeRef::Project(id) => {
+            let callee = facts.function(*id);
+            if callee.is_third_party {
+                match &callee.package_name {
+                    Some(pkg) => {
+                        format!("third-party follow → `{}` ({pkg})", callee.full_qualname())
+                    }
+                    None => format!("third-party follow → `{}`", callee.full_qualname()),
+                }
+            } else {
+                format!("resolved call → `{}`", callee.full_qualname())
+            }
+        }
+        CalleeRef::External { qualname } => {
+            format!("typed external → `{qualname}`")
+        }
+        CalleeRef::Unresolved { reason } => format!("unresolved ({reason})"),
+        CalleeRef::Offload(kind) => format!("offload boundary (`{}`)", kind.as_str()),
+        CalleeRef::ParamInvoke { index } => {
+            format!("higher-order arg (positional {index})")
+        }
     }
 }
 

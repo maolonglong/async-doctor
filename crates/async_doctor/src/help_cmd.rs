@@ -1,13 +1,14 @@
 //! `explain` and `why` subcommands — agent-facing long-form help.
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 
 use anyhow::{Context, bail};
 use async_doctor_core::{AnalyzeOptions, EXIT_FINDINGS, EXIT_OK, Report};
 use async_doctor_rules::rule_doc;
 
+use crate::paths::{normalize_path, paths_equal};
 use crate::text::{write_candidate, write_finding};
 
 pub fn run_explain(rule: &str) -> anyhow::Result<ExitCode> {
@@ -59,12 +60,32 @@ pub fn run_why(
     )?;
     for f in &matches.findings {
         write_finding(&mut out, f)?;
+        writeln!(out, "Hop resolution:")?;
+        for (i, step) in f.chain.iter().enumerate() {
+            let res = if step.resolution.is_empty() {
+                "(unspecified)"
+            } else {
+                step.resolution.as_str()
+            };
+            writeln!(out, "  {}. {}:{} — {res}", i + 1, step.file, step.line)?;
+        }
+        writeln!(out)?;
         if let Some(doc) = rule_doc(&f.rule) {
             writeln!(out, "{}", doc.explain_text())?;
         }
     }
     for c in &matches.candidates {
         write_candidate(&mut out, c)?;
+        writeln!(out, "Hop resolution:")?;
+        for (i, step) in c.chain.iter().enumerate() {
+            let res = if step.resolution.is_empty() {
+                "(unspecified)"
+            } else {
+                step.resolution.as_str()
+            };
+            writeln!(out, "  {}. {}:{} — {res}", i + 1, step.file, step.line)?;
+        }
+        writeln!(out)?;
         if let Some(doc) = rule_doc(&c.rule) {
             writeln!(out, "{}", doc.explain_text())?;
         }
@@ -114,17 +135,24 @@ fn findings_at(report: &Report, file: &str, line: u32) -> SiteMatches {
 }
 
 fn why_matches(why: &str, file: &str, line: u32) -> bool {
-    // `async-doctor why helpers.py:5`
+    // `async-doctor why helpers.py:5 --path /proj`
     let Some(rest) = why.strip_prefix("async-doctor why ") else {
         return false;
     };
-    parse_location(rest)
+    let loc = rest.split_whitespace().next().unwrap_or(rest);
+    parse_location(loc)
         .map(|(f, l)| l == line && paths_equal(&f, file))
         .unwrap_or(false)
 }
 
 fn parse_location(location: &str) -> anyhow::Result<(String, u32)> {
     let location = location.trim();
+    // Allow accidental `--path …` suffix if the user pasted the full why line.
+    let location = location
+        .split_once(" --path ")
+        .map(|(l, _)| l)
+        .unwrap_or(location)
+        .trim();
     let Some((file, line_s)) = location.rsplit_once(':') else {
         bail!("missing :line");
     };
@@ -133,19 +161,4 @@ fn parse_location(location: &str) -> anyhow::Result<(String, u32)> {
         bail!("file and line must be non-empty / positive");
     }
     Ok((normalize_path(file), line))
-}
-
-fn normalize_path(p: &str) -> String {
-    let p = p.replace('\\', "/");
-    PathBuf::from(p.trim_start_matches("./"))
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-fn paths_equal(a: &str, b: &str) -> bool {
-    let a = normalize_path(a);
-    let b = normalize_path(b);
-    a == b || a.ends_with(&b) || b.ends_with(&a)
 }

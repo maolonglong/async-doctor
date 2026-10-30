@@ -47,12 +47,17 @@ pub struct Cli {
     #[arg(long)]
     pub show_unresolved: bool,
 
+    /// Print every finding with its full chain (default human output is grouped).
+    #[arg(long)]
+    pub expand: bool,
+
     /// Report only findings whose chain touches files changed vs GIT_REF.
     ///
     /// Use `--changed` for the merge-base with the default branch plus
     /// uncommitted changes, or `--changed=GIT_REF` for an explicit ref.
     /// (`=` is required so the project path is not swallowed.) Analysis still
-    /// covers the whole project; only reporting is filtered.
+    /// covers the whole project; only reporting is filtered. Outside a git
+    /// repo (or when the base cannot be resolved), falls back to a full report.
     #[arg(
         long,
         num_args = 0..=1,
@@ -67,7 +72,9 @@ pub struct Cli {
     #[arg(long, value_name = "FILE")]
     pub baseline: Option<PathBuf>,
 
-    /// Write current findings' stable ids to FILE (after suppressions / --changed).
+    /// Write current findings' stable ids to FILE (after suppressions; before
+    /// `--baseline` filtering). Incompatible with `--changed` (would write a
+    /// partial set).
     #[arg(long, value_name = "FILE")]
     pub write_baseline: Option<PathBuf>,
 }

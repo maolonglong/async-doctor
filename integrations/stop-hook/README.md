@@ -1,25 +1,33 @@
 # Stop hook: block completion on new blocking-IO findings
 
 Generic examples that run `async-doctor --changed` when a coding agent finishes
-a turn. Exit code `1` means findings remain — the agent should keep fixing.
-Exit `0` allows completion. Exit `2` is a tool error (treat as a failure).
+a turn. Requires `async-doctor` on `PATH` (no `uvx` fallback — that name is not
+a registered package).
 
-No company-specific paths. Requires `async-doctor` on `PATH` (or adjust the
-command to `uvx async-doctor` / `cargo run -p async_doctor --`).
+[`async-doctor-stop.sh`](async-doctor-stop.sh) auto-detects Claude Code vs
+Cursor from the stdin JSON payload (or set `ASYNC_DOCTOR_HOOK_AGENT=claude|cursor`).
+
+## Behaviour
+
+| Situation | Claude Code | Cursor |
+|-----------|-------------|--------|
+| Clean (`async-doctor` exit 0) | exit 0 — allow stop | `{}` on stdout |
+| Findings (exit 1) | **exit 2** + reason on stderr (and `{"decision":"block","reason":…}` on stdout) — continues the turn | `{"followup_message":…}` on stdout — auto follow-up |
+| Tool / infra failure (missing binary, not a git repo, exit 2) | **exit 0** + note on stderr — do not block | `{}` + note |
+| `stop_hook_active: true` / high `loop_count` | exit 0 — avoid loops | `{}` — avoid loops |
+
+Claude Code: only exit **2** blocks Stop (exit 1 is a non-blocking hook error).
+Cursor: stop hooks continue via `followup_message`, not exit codes.
 
 ## Script
 
-[`async-doctor-stop.sh`](async-doctor-stop.sh) runs from the project root and
-exits with async-doctor's status.
-
 ```bash
 chmod +x integrations/stop-hook/async-doctor-stop.sh
-./integrations/stop-hook/async-doctor-stop.sh
 ```
 
 ## Claude Code
 
-Add a Stop hook in `.claude/settings.json` (or user settings):
+`.claude/settings.json` (or user settings):
 
 ```json
 {
@@ -29,7 +37,7 @@ Add a Stop hook in `.claude/settings.json` (or user settings):
         "hooks": [
           {
             "type": "command",
-            "command": "async-doctor --changed",
+            "command": "./integrations/stop-hook/async-doctor-stop.sh",
             "timeout": 120
           }
         ]
@@ -39,19 +47,9 @@ Add a Stop hook in `.claude/settings.json` (or user settings):
 }
 ```
 
-Or point `command` at this repo's script:
-
-```json
-{
-  "type": "command",
-  "command": "./integrations/stop-hook/async-doctor-stop.sh"
-}
-```
-
 ## Cursor
 
-Use a project hook that runs after the agent stops editing. Example
-`.cursor/hooks.json` fragment:
+`.cursor/hooks.json`:
 
 ```json
 {
@@ -59,15 +57,12 @@ Use a project hook that runs after the agent stops editing. Example
   "hooks": {
     "stop": [
       {
-        "command": "async-doctor --changed"
+        "command": "./integrations/stop-hook/async-doctor-stop.sh"
       }
     ]
   }
 }
 ```
-
-Exact Cursor hook schema may evolve — keep the command identical; only the
-wrapper JSON changes.
 
 ## Tips
 

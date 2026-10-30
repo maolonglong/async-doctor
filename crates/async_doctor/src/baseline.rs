@@ -83,10 +83,13 @@ pub fn read_baseline(path: &Path) -> anyhow::Result<BaselineFile> {
 }
 
 /// Drop findings whose stable id appears in the baseline. Candidates unchanged.
-pub fn filter_report(mut report: Report, baseline: &BaselineFile) -> Report {
+/// Returns `(filtered_report, suppressed_count)`.
+pub fn filter_report(mut report: Report, baseline: &BaselineFile) -> (Report, u32) {
     let ids = baseline.id_set();
+    let before = report.findings.len();
     report.findings.retain(|f| !ids.contains(&f.id));
-    report
+    let suppressed = (before - report.findings.len()) as u32;
+    (report, suppressed)
 }
 
 #[cfg(test)]
@@ -112,6 +115,7 @@ mod tests {
             },
             why: "async-doctor why a.py:10".into(),
             docs_anchor: format!("#{rule}"),
+            docs_url: String::new(),
         }
     }
 
@@ -127,7 +131,8 @@ mod tests {
             ids: vec!["aaa".into()],
             findings: vec![],
         };
-        let filtered = filter_report(report, &baseline);
+        let (filtered, n) = filter_report(report, &baseline);
+        assert_eq!(n, 1);
         assert_eq!(filtered.findings.len(), 1);
         assert_eq!(filtered.findings[0].id, "bbb");
     }
@@ -140,7 +145,8 @@ mod tests {
         assert_eq!(bl.ids, vec!["stable"]);
         // Shift the line; id unchanged → still suppressed.
         report.findings[0].entry.line = 999;
-        let filtered = filter_report(report, &bl);
+        let (filtered, n) = filter_report(report, &bl);
+        assert_eq!(n, 1);
         assert!(filtered.findings.is_empty());
     }
 }
