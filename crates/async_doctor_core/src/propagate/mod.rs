@@ -18,8 +18,8 @@ use crate::report::{
 
 use grade::{
     ParamVerdict, async_twin_hint, chain_step_for, evaluate_param_guards, label_rank,
-    merge_file_io_findings, reconcile_conditions, shortest_paths_to_async_entries,
-    unresolved_pattern,
+    merge_file_io_findings, reconcile_conditions, resolution_for_edge,
+    shortest_paths_to_async_entries, unresolved_pattern,
 };
 use higher_order::materialize_higher_order;
 
@@ -172,6 +172,7 @@ pub fn analyze_with_options(
                     e.file.clone(),
                     e.line,
                     e.text.clone(),
+                    resolution_for_edge(facts, e),
                 ));
                 if let CalleeRef::Project(fid) = e.callee {
                     let callee_fn = facts.function(fid);
@@ -181,12 +182,14 @@ pub fn analyze_with_options(
             }
 
             let seed_caller_fn = facts.function(seed_caller);
-            chain_steps.push(chain_step_for(
+            // Seed hop resolution is finalized after we know Sink vs Unresolved.
+            let mut seed_step = chain_step_for(
                 seed_caller_fn,
                 seed_edge.file.clone(),
                 seed_edge.line,
                 seed_edge.text.clone(),
-            ));
+                resolution_for_edge(facts, seed_edge),
+            );
             condition_tags.extend(seed_edge.conditions.iter().copied());
             if let Some(g) = seed_edge.param_guard {
                 param_guards.push((seed_caller, g));
@@ -213,6 +216,8 @@ pub fn analyze_with_options(
 
             match &seed.kind {
                 SeedKind::Sink(hit) => {
+                    seed_step.resolution = format!("blocking sink `{}`", hit.sink_qualname);
+                    chain_steps.push(seed_step);
                     chain_qualnames.push(hit.sink_qualname.to_string());
                     let chain_refs: Vec<&str> =
                         chain_qualnames.iter().map(String::as_str).collect();
@@ -238,8 +243,12 @@ pub fn analyze_with_options(
                         name: entry.qualname.clone(),
                         label: entry.label,
                     };
+                    // CLI rewrites `--path` to the actual scan root after analysis.
                     let why = format!("async-doctor why {}:{}", seed_edge.file, seed_edge.line);
                     let docs_anchor = format!("#{}", hit.rule);
+                    let docs_url = format!(
+                        "https://github.com/maolonglong/async-doctor/blob/main/docs/rules.md{docs_anchor}"
+                    );
                     let fix = Fix {
                         hint,
                         fix_group_id: fix_group_id(hit.rule, hit.sink_qualname),
@@ -261,6 +270,7 @@ pub fn analyze_with_options(
                             fix,
                             why,
                             docs_anchor,
+                            docs_url,
                         });
                     } else {
                         raw_findings.push(Finding {
@@ -272,10 +282,13 @@ pub fn analyze_with_options(
                             fix,
                             why,
                             docs_anchor,
+                            docs_url,
                         });
                     }
                 }
                 SeedKind::Unresolved { reason } => {
+                    seed_step.resolution = format!("unresolved call ({reason})");
+                    chain_steps.push(seed_step);
                     let pattern = unresolved_pattern(reason, &seed_edge.text);
                     let agg = unresolved_agg.entry(pattern.clone()).or_default();
                     agg.0 += 1;
@@ -317,6 +330,7 @@ pub fn analyze_with_options(
                         },
                         why: format!("async-doctor why {}:{}", seed_edge.file, seed_edge.line),
                         docs_anchor: "#unresolved-call".into(),
+                        docs_url: "https://github.com/maolonglong/async-doctor/blob/main/docs/rules.md#unresolved-call".into(),
                     });
                 }
             }
