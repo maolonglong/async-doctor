@@ -85,8 +85,10 @@ fn edge(
         is_offload_wrapper: false,
         positional_literals: vec![],
         positional_callables: vec![],
+        keyword_callables: vec![],
         param_guard: None,
         is_awaited: false,
+        context_from_caller: None,
     }
 }
 

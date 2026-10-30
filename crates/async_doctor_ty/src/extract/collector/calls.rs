@@ -11,7 +11,8 @@ use super::CallCollector;
 use crate::extract::constants::{is_generator_consumer, literal_arg};
 use crate::extract::ctx::DefKey;
 use crate::extract::helpers::{
-    is_asyncio_redis_type, is_callable_ref, is_getattr_call, is_partial_call, is_task_spawn_callee,
+    is_asyncio_redis_type, is_callable_ref, is_getattr_call, is_in_memory_buffer_type,
+    is_partial_call, is_path_or_file_open_qual, is_task_spawn_callee,
     normalize_asyncio_redis_type, qualname_from_definition, route_handler_arg,
 };
 
@@ -210,6 +211,20 @@ impl<'a, 'db> CallCollector<'a, 'db> {
 
         self.pending_literals = call.arguments.args.iter().map(literal_arg).collect();
         self.pending_callables = self.resolve_positional_callables(call.arguments.args.as_ref());
+        self.pending_keyword_callables = self.resolve_keyword_callables(call);
+
+        // In-memory buffer args to open/Image.open: not blocking file IO — skip
+        // the edge (and therefore follow into PIL internals that would open paths).
+        if let Some(q) = self.external_qualname(&call.func)
+            && is_path_or_file_open_qual(&q)
+            && self.first_arg_is_in_memory_buffer(call)
+        {
+            self.pending_literals.clear();
+            self.pending_callables.clear();
+            self.pending_keyword_callables.clear();
+            self.pending_is_awaited = false;
+            return;
+        }
 
         if let Some(kind) = self.is_offload_callee(&call.func) {
             // Passing a callable param into a real offload → this function is a wrapper.
@@ -228,6 +243,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             );
             self.pending_literals.clear();
             self.pending_callables.clear();
+            self.pending_keyword_callables.clear();
             return;
         }
 
@@ -244,6 +260,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             );
             self.pending_literals.clear();
             self.pending_callables.clear();
+            self.pending_keyword_callables.clear();
             return;
         }
 
@@ -259,6 +276,73 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
         self.pending_literals.clear();
         self.pending_callables.clear();
+        self.pending_keyword_callables.clear();
+    }
+
+    pub(crate) fn first_arg_is_in_memory_buffer(&self, call: &ast::ExprCall) -> bool {
+        let Some(arg) = call.arguments.args.first() else {
+            // Also accept fp=/file= kwargs used by PIL.
+            let kw = call.arguments.keywords.iter().find(|k| {
+                k.arg
+                    .as_ref()
+                    .is_some_and(|a| matches!(a.as_str(), "fp" | "file" | "filename"))
+            });
+            return kw.is_some_and(|k| self.expr_is_in_memory_buffer(&k.value));
+        };
+        self.expr_is_in_memory_buffer(arg)
+    }
+
+    pub(crate) fn expr_is_in_memory_buffer(&self, expr: &Expr) -> bool {
+        if let Expr::Call(c) = expr {
+            // BytesIO(...) / StringIO(...) constructor call.
+            if let Some(q) = self.external_qualname(&c.func)
+                && is_in_memory_buffer_type(&q)
+            {
+                return true;
+            }
+            if let Expr::Attribute(a) = c.func.as_ref()
+                && matches!(a.attr.as_str(), "BytesIO" | "StringIO")
+            {
+                return true;
+            }
+            if let Expr::Name(n) = c.func.as_ref()
+                && matches!(n.id.as_str(), "BytesIO" | "StringIO")
+            {
+                return true;
+            }
+        }
+        if let Some(ty) = self.type_instance_qualname(expr)
+            && is_in_memory_buffer_type(&ty)
+        {
+            return true;
+        }
+        false
+    }
+
+    pub(crate) fn resolve_keyword_callables(
+        &mut self,
+        call: &'a ast::ExprCall,
+    ) -> Vec<(String, FunctionId)> {
+        let mut out = Vec::new();
+        for kw in &call.arguments.keywords {
+            let Some(name) = kw.arg.as_ref() else {
+                continue;
+            };
+            let fid = match &kw.value {
+                Expr::Name(_) | Expr::Attribute(_) => self.resolve_project_function(&kw.value),
+                Expr::Call(c) if is_partial_call(c) => c
+                    .arguments
+                    .args
+                    .first()
+                    .and_then(|a| self.resolve_project_function(a)),
+                Expr::Lambda(lam) => Some(self.ensure_lambda_fact(lam)),
+                _ => None,
+            };
+            if let Some(fid) = fid {
+                out.push((name.as_str().to_string(), fid));
+            }
+        }
+        out
     }
 
     pub(crate) fn note_local_assign(&mut self, assign: &'a ast::StmtAssign) {
@@ -322,6 +406,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
         self.pending_literals.clear();
         self.pending_callables.clear();
+        self.pending_keyword_callables.clear();
         self.push_edge(
             caller,
             CalleeRef::Project(fid),

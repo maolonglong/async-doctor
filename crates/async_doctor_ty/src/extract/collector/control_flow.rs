@@ -13,6 +13,7 @@ use crate::extract::constants::{
     EarlyExitKind, ModuleConst, body_always_exits, is_cache_hit_test, is_cache_miss_test,
     param_guard_from_test,
 };
+use crate::extract::helpers::narrow_from_test;
 use crate::extract::path::relative_display;
 
 impl<'a, 'db> CallCollector<'a, 'db> {
@@ -220,7 +221,15 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         if let Some(g) = param_guard {
             self.active_param_guard = Some(g);
         }
+        let pushed_narrow = if !dead {
+            self.push_narrowing(&if_stmt.test)
+        } else {
+            None
+        };
         self.visit_body_seq(&if_stmt.body);
+        if let Some(key) = pushed_narrow {
+            self.narrowed_locals.remove(&key);
+        }
         self.active_param_guard = prev_guard;
         if !dead {
             if cache_miss {
@@ -270,7 +279,15 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             if let Some(g) = elif_guard {
                 self.active_param_guard = Some(g);
             }
+            let pushed_narrow = if !elif_dead {
+                clause.test.as_ref().and_then(|t| self.push_narrowing(t))
+            } else {
+                None
+            };
             self.visit_body_seq(&clause.body);
+            if let Some(key) = pushed_narrow {
+                self.narrowed_locals.remove(&key);
+            }
             self.active_param_guard = prev_guard;
             if !elif_dead {
                 if elif_cache {
@@ -282,6 +299,34 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 self.dead_depth -= 1;
             }
         }
+    }
+
+    /// Apply one cheap narrowing for the duration of a branch body.
+    fn push_narrowing(&mut self, test: &Expr) -> Option<String> {
+        let (name, mut fact) = narrow_from_test(test)?;
+        // Don't overwrite a tighter isinstance with NotNone.
+        if matches!(
+            (&fact, self.narrowed_locals.get(&name)),
+            (
+                crate::extract::helpers::NarrowFact::NotNone,
+                Some(crate::extract::helpers::NarrowFact::IsInstance(_))
+            )
+        ) {
+            return None;
+        }
+        // Resolve `isinstance(x, Redis)` / `isinstance(x, redis.Redis)` to a
+        // stable instance qualname when ty can name the class.
+        if let crate::extract::helpers::NarrowFact::IsInstance(_) = &fact
+            && let Expr::Call(call) = test
+            && let Some(type_expr) = call.arguments.args.get(1)
+            && let Some(q) = self.type_instance_qualname(type_expr).or_else(|| {
+                self.external_qualname(type_expr)
+            })
+        {
+            fact = crate::extract::helpers::NarrowFact::IsInstance(q);
+        }
+        self.narrowed_locals.insert(name.clone(), fact);
+        Some(name)
     }
 
     pub(crate) fn visit_try(&mut self, try_stmt: &'a ast::StmtTry) {
