@@ -7,15 +7,29 @@ use std::time::Instant;
 
 use async_doctor_core::{AnalyzeOptions, EntryLabel};
 
-use crate::{scan_path, scan_path_with_options};
+use crate::{scan_path, scan_path_with_cache, scan_path_with_options};
 
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures")
 }
 
+#[allow(dead_code)]
 fn report_json(path: &Path) -> String {
     let report = scan_path(path).unwrap();
     serde_json::to_string(&report).unwrap()
+}
+
+fn report_json_with_cache(path: &Path, cache_dir: &Path) -> String {
+    let report = scan_path_with_cache(path, Some(cache_dir)).unwrap();
+    serde_json::to_string(&report).unwrap()
+}
+
+fn fresh_cache_dir(label: &str) -> PathBuf {
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let cache = std::env::temp_dir().join(format!("async-doctor-{label}-{n}"));
+    let _ = fs::remove_dir_all(&cache);
+    fs::create_dir_all(&cache).unwrap();
+    cache
 }
 
 /// Copy a fixture tree into an isolated temp dir (so cache/XDG tests cannot
@@ -1139,13 +1153,7 @@ fn m2_show_unresolved_aggregates_by_pattern() {
 #[test]
 fn m2_analysis_is_byte_identical_across_runs() {
     let dir = clone_fixture("m2_third_party_rules");
-    let cache = std::env::temp_dir().join(format!(
-        "async-doctor-det-cache-{}",
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = fs::remove_dir_all(&cache);
-    fs::create_dir_all(&cache).unwrap();
-    unsafe { std::env::set_var("XDG_CACHE_HOME", &cache) };
+    let cache = fresh_cache_dir("det-cache");
 
     const N: usize = 5;
     let mut jsons = Vec::with_capacity(N);
@@ -1153,7 +1161,7 @@ fn m2_analysis_is_byte_identical_across_runs() {
         // Drop cache between cold runs so we exercise follow selection, not hit path.
         let _ = fs::remove_dir_all(&cache);
         fs::create_dir_all(&cache).unwrap();
-        jsons.push(report_json(&dir));
+        jsons.push(report_json_with_cache(&dir, &cache));
     }
     for (i, j) in jsons.iter().enumerate().skip(1) {
         assert_eq!(
@@ -1190,26 +1198,19 @@ fn m2_analysis_is_byte_identical_across_runs() {
 
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&cache);
-    unsafe { std::env::remove_var("XDG_CACHE_HOME") };
 }
 
 #[test]
 fn m2_sitepkgs_cold_warm_json_identical_and_warm_faster() {
     let dir = clone_fixture("m2_sitepkgs_cache");
-    let cache = std::env::temp_dir().join(format!(
-        "async-doctor-warm-cache-{}",
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = fs::remove_dir_all(&cache);
-    fs::create_dir_all(&cache).unwrap();
-    unsafe { std::env::set_var("XDG_CACHE_HOME", &cache) };
+    let cache = fresh_cache_dir("warm-cache");
 
     let t0 = Instant::now();
-    let cold = report_json(&dir);
+    let cold = report_json_with_cache(&dir, &cache);
     let cold_ms = t0.elapsed();
 
     let t1 = Instant::now();
-    let warm = report_json(&dir);
+    let warm = report_json_with_cache(&dir, &cache);
     let warm_ms = t1.elapsed();
 
     assert_eq!(
@@ -1255,21 +1256,14 @@ fn m2_sitepkgs_cold_warm_json_identical_and_warm_faster() {
 
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&cache);
-    unsafe { std::env::remove_var("XDG_CACHE_HOME") };
 }
 
 #[test]
 fn m2_redis_pipeline_buffering_vs_execute_fixture() {
     let dir = clone_fixture("m2_third_party_rules");
-    let cache = std::env::temp_dir().join(format!(
-        "async-doctor-pipe-cache-{}",
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = fs::remove_dir_all(&cache);
-    fs::create_dir_all(&cache).unwrap();
-    unsafe { std::env::set_var("XDG_CACHE_HOME", &cache) };
+    let cache = fresh_cache_dir("pipe-cache");
 
-    let report = scan_path(&dir).unwrap();
+    let report = scan_path_with_cache(&dir, Some(&cache)).unwrap();
     let names: Vec<_> = report
         .findings
         .iter()
@@ -1296,21 +1290,14 @@ fn m2_redis_pipeline_buffering_vs_execute_fixture() {
 
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&cache);
-    unsafe { std::env::remove_var("XDG_CACHE_HOME") };
 }
 
 #[test]
 fn m2_redis_real_hierarchy_pipeline_receiver_type() {
     let dir = clone_fixture("m2_redis_pipeline_real");
-    let cache = std::env::temp_dir().join(format!(
-        "async-doctor-redis-real-{}",
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = fs::remove_dir_all(&cache);
-    fs::create_dir_all(&cache).unwrap();
-    unsafe { std::env::set_var("XDG_CACHE_HOME", &cache) };
+    let cache = fresh_cache_dir("redis-real");
 
-    let report = scan_path(&dir).unwrap();
+    let report = scan_path_with_cache(&dir, Some(&cache)).unwrap();
     let names: Vec<_> = report
         .findings
         .iter()
@@ -1347,21 +1334,14 @@ fn m2_redis_real_hierarchy_pipeline_receiver_type() {
 
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&cache);
-    unsafe { std::env::remove_var("XDG_CACHE_HOME") };
 }
 
 #[test]
 fn m2_third_party_async_never_entry() {
     let dir = clone_fixture("m2_third_party_never_entry");
-    let cache = std::env::temp_dir().join(format!(
-        "async-doctor-tp-entry-{}",
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = fs::remove_dir_all(&cache);
-    fs::create_dir_all(&cache).unwrap();
-    unsafe { std::env::set_var("XDG_CACHE_HOME", &cache) };
+    let cache = fresh_cache_dir("tp-entry");
 
-    let report = scan_path(&dir).unwrap();
+    let report = scan_path_with_cache(&dir, Some(&cache)).unwrap();
     assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
     assert_eq!(report.findings[0].entry.name, "handler");
     assert_eq!(report.findings[0].entry.file, "app.py");
@@ -1376,22 +1356,15 @@ fn m2_third_party_async_never_entry() {
 
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&cache);
-    unsafe { std::env::remove_var("XDG_CACHE_HOME") };
 }
 
 #[test]
 fn m2_multipkg_cold_warm_byte_identical() {
     let dir = clone_fixture("m2_cache_multipkg");
-    let cache = std::env::temp_dir().join(format!(
-        "async-doctor-multipkg-{}",
-        COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = fs::remove_dir_all(&cache);
-    fs::create_dir_all(&cache).unwrap();
-    unsafe { std::env::set_var("XDG_CACHE_HOME", &cache) };
+    let cache = fresh_cache_dir("multipkg");
 
-    let cold = report_json(&dir);
-    let warm = report_json(&dir);
+    let cold = report_json_with_cache(&dir, &cache);
+    let warm = report_json_with_cache(&dir, &cache);
     assert_eq!(
         cold, warm,
         "multi-package cold/warm JSON must match\ncold={cold}\nwarm={warm}"
@@ -1402,10 +1375,214 @@ fn m2_multipkg_cold_warm_byte_identical() {
         "expected findings via libx→liby: {:?}",
         report.findings
     );
-    let warm2 = report_json(&dir);
+    let warm2 = report_json_with_cache(&dir, &cache);
     assert_eq!(cold, warm2);
 
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&cache);
-    unsafe { std::env::remove_var("XDG_CACHE_HOME") };
+}
+
+#[test]
+fn m1_await_nested_sync_sinks_still_reported() {
+    // Regression: is_awaited must mark only the direct await operand, not nested
+    // calls in arguments (`await send(open(p).read())` must still find open).
+    let dir = temp_project(&[(
+        "app.py",
+        r#"
+from pathlib import Path
+import asyncio
+import time
+
+async def send(x):
+    return x
+
+async def await_open_read(p):
+    await send(open(p).read())
+
+async def await_path_read_text(p):
+    await send(Path(p).read_text())
+
+async def await_gather_sleep():
+    await asyncio.gather(send(time.sleep(1)))
+"#,
+    )]);
+    let report = scan_path(&dir).unwrap();
+    let names: Vec<_> = report
+        .findings
+        .iter()
+        .map(|f| f.entry.name.as_str())
+        .collect();
+    for expected in [
+        "await_open_read",
+        "await_path_read_text",
+        "await_gather_sleep",
+    ] {
+        assert!(
+            names.contains(&expected),
+            "missing M1 TP {expected}: findings={names:?} candidates={:?}",
+            report
+                .candidates
+                .iter()
+                .map(|c| &c.entry.name)
+                .collect::<Vec<_>>()
+        );
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn m2_awaited_async_api_not_followed_into_internals() {
+    // `await psycopg.AsyncConnection.connect` / `await redis.eval` must not FP
+    // via third-party async internals.
+    let dir = clone_fixture("m2_awaited_async_no_follow");
+    let cache = fresh_cache_dir("await-nofollow");
+    let report = scan_path_with_cache(&dir, Some(&cache)).unwrap();
+    let finding_names: Vec<_> = report
+        .findings
+        .iter()
+        .map(|f| f.entry.name.as_str())
+        .collect();
+    for banned in ["use_async_connect", "use_asyncio_redis_eval"] {
+        assert!(
+            !finding_names.contains(&banned),
+            "{banned} must not be a finding via library internals: {finding_names:?}"
+        );
+    }
+    // Still report the known sync sink through a real third-party sync path.
+    assert!(
+        finding_names.contains(&"use_libz_sleep"),
+        "must still follow unknown TP async → sync: {finding_names:?}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&cache);
+}
+
+#[test]
+fn m2_asyncio_redis_pipeline_async_with_and_scan_iter() {
+    let dir = clone_fixture("m2_asyncio_redis_ctx");
+    let cache = fresh_cache_dir("asyncio-redis-ctx");
+    let report = scan_path_with_cache(&dir, Some(&cache)).unwrap();
+    let names: Vec<_> = report
+        .findings
+        .iter()
+        .map(|f| f.entry.name.as_str())
+        .collect();
+    for banned in [
+        "asyncio_pipeline_async_with_set_ok",
+        "asyncio_scan_iter_ok",
+        "asyncio_eval_await_ok",
+    ] {
+        assert!(
+            !names.contains(&banned),
+            "{banned} must not fire: {names:?}"
+        );
+    }
+    assert!(
+        names.contains(&"sync_redis_get_blocks"),
+        "sync redis must still fire: {names:?}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&cache);
+}
+
+#[test]
+fn m2_pil_param_branch_sink_is_candidate() {
+    let dir = clone_fixture("m2_pil_param_branch");
+    let cache = fresh_cache_dir("pil-branch");
+    let report = scan_path_with_cache(&dir, Some(&cache)).unwrap();
+    let finding_names: Vec<_> = report
+        .findings
+        .iter()
+        .map(|f| f.entry.name.as_str())
+        .collect();
+    assert!(
+        !finding_names
+            .iter()
+            .any(|n| n.contains("image_open") || n.contains("image_save")),
+        "PIL param-guarded builtins.open must not be findings: {finding_names:?}"
+    );
+    // Demoted to candidates (conditional).
+    let cand_names: Vec<_> = report
+        .candidates
+        .iter()
+        .map(|c| c.entry.name.as_str())
+        .collect();
+    assert!(
+        cand_names
+            .iter()
+            .any(|n| *n == "use_image_open" || *n == "use_image_save")
+            || report.candidates.iter().any(|c| c.reason == "conditional"),
+        "expected conditional candidates for PIL path: cands={cand_names:?} {:?}",
+        report.candidates
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&cache);
+}
+
+#[test]
+fn m2_large_multipkg_cold_warm_json_identical() {
+    let dir = clone_fixture("m2_cache_multipkg_large");
+    let cache = fresh_cache_dir("multipkg-large");
+    let cold = report_json_with_cache(&dir, &cache);
+    let warm = report_json_with_cache(&dir, &cache);
+    assert_eq!(
+        cold, warm,
+        "large multipkg cold/warm JSON must match\ncold={cold}\nwarm={warm}"
+    );
+    let report: async_doctor_core::Report = serde_json::from_str(&cold).unwrap();
+    assert!(
+        report.findings.len() >= 3,
+        "expected several findings across packages: {:?}",
+        report.findings.len()
+    );
+    // Candidate counts must also match (the large-repo cold/warm bug).
+    let cold_r: async_doctor_core::Report = serde_json::from_str(&cold).unwrap();
+    let warm_r: async_doctor_core::Report = serde_json::from_str(&warm).unwrap();
+    assert_eq!(
+        cold_r.candidates.len(),
+        warm_r.candidates.len(),
+        "candidate count cold={} warm={}",
+        cold_r.candidates.len(),
+        warm_r.candidates.len()
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&cache);
+}
+
+#[test]
+fn m2_cache_fingerprint_invalidates_on_content_change() {
+    use crate::cache::{
+        PackageCache, load_package_cache, package_content_fingerprint, save_package_cache,
+    };
+    let root = fresh_cache_dir("fp-root");
+    let pkg = root.join("site-packages").join("demo");
+    fs::create_dir_all(&pkg).unwrap();
+    let dist = root.join("site-packages").join("demo-1.0.0.dist-info");
+    fs::create_dir_all(&dist).unwrap();
+    fs::write(dist.join("RECORD"), "demo/__init__.py,,\n").unwrap();
+    let fp1 = package_content_fingerprint(&dist);
+    let mut cache = PackageCache::new("demo", "1.0.0");
+    cache.functions.insert(
+        "demo.f".into(),
+        crate::cache::CachedFunction {
+            key: "demo.f".into(),
+            qualname: "f".into(),
+            module: "demo".into(),
+            line: 1,
+            is_async: false,
+            is_generator: false,
+            param_names: vec![],
+            invokes_params: vec![],
+            is_offload_wrapper: false,
+            edges: vec![],
+        },
+    );
+    save_package_cache(&root, &cache, &fp1).unwrap();
+    assert!(load_package_cache(&root, "demo", "1.0.0", &fp1).is_some());
+    // Patch RECORD → new fingerprint must miss the old cache entry.
+    fs::write(dist.join("RECORD"), "demo/__init__.py,,\ndemo/extra.py,,\n").unwrap();
+    let fp2 = package_content_fingerprint(&dist);
+    assert_ne!(fp1, fp2);
+    assert!(load_package_cache(&root, "demo", "1.0.0", &fp2).is_none());
+    let _ = fs::remove_dir_all(&root);
 }
