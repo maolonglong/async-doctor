@@ -127,12 +127,19 @@ pub struct CallEdge {
     pub positional_literals: Vec<Option<LiteralArg>>,
     /// Positional arguments that resolve to project/followed functions (higher-order).
     pub positional_callables: Vec<Option<FunctionId>>,
+    /// Keyword arguments that resolve to project functions (`fn=block`, including
+    /// `partial` / bound methods). Cheap call-context for higher-order kwargs.
+    pub keyword_callables: Vec<(String, FunctionId)>,
     /// When set, this edge only executes when positional parameter `index` is
     /// truthy (`if param:`) or falsy (`if not param:` when `inverted`).
     pub param_guard: Option<ParamGuard>,
     /// True when this call appears under `await` (directly or nested).
     /// Awaited calls are never sync-IO sinks.
     pub is_awaited: bool,
+    /// Higher-order materialization: this edge (`apply → block`) is only valid
+    /// when the previous hop’s caller is this function (the call site that
+    /// passed `block`). Cheap call-context sensitivity without cloning graphs.
+    pub context_from_caller: Option<FunctionId>,
 }
 
 /// Parameter-controlled branch guarding a call site.
