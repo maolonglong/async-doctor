@@ -177,17 +177,50 @@ langgraph, home-assistant core, plus small fixtures per rule/pattern.
 
 ## M1 delivered
 
-- Type-resolved call graph, stdlib sink propagation, offload cuts, entry
-  labels, prove-only conditions, generators, zero-config scope, stable ids.
-  See git history / M1 PR for the full list.
+- Type-resolved call graph in the adapter (`SemanticModel` +
+  `definitions_for_name` / `definitions_for_attribute` / `HasType`).
+- Blocking propagation from stdlib sinks up the reverse call graph to
+  `async def` entries; shortest evidence chain via BFS.
+- Offload cuts: `asyncio.to_thread`, `run_in_executor`,
+  `anyio.to_thread.run_sync`, `starlette.concurrency.run_in_threadpool`,
+  `ThreadPoolExecutor.submit/map`, plus callable refs / `partial` / lambdas
+  passed to those. Eager `to_thread(f())` still reports.
+- Entry labels inferred (`route` / `lifecycle` / `task` / `other`). Sync
+  FastAPI/Starlette-style route handlers are not entries.
+- Unresolved dynamic dispatch → `candidates` (`reason=unresolved`), hidden
+  unless `--show-unresolved`. Metadata IO → candidates. Findings only when
+  provable.
+- `conditions[]`: prove-only. `unconditional` / `all-paths` never accompany
+  `if`/`else`/`try`/`match` guards, early-exit guards (`if x: return` /
+  `raise`, cache-hit returns), or comprehension `if` filters; also `loop`,
+  `async-branch`, `cache_miss_dependent`. Parameter guards in *callees*
+  with non-literal caller args → candidates (`reason=conditional`); literal
+  falsy args prune. Entry-local param guards stay findings (`async-branch`).
+- Dead-branch pruning for unreassigned module constants only when ty
+  confirms the name binds to that module symbol (no local reassign, param
+  shadow, `global`, or import); always-true early exits make the rest
+  unreachable. Also `if False` / `TYPE_CHECKING`.
+- Generators: create-without-iterate does not propagate; consume via
+  `for` / `list` / `next` / `yield from` does.
+- Zero-config scope: skip entries under tests/docs/examples/scripts/hidden
+  dirs by default (`--include-non-production` to include; count in summary).
+- Merge `open(...)` + same-entry `f.read()`/`f.write()` into one finding.
+- Stable `id`: hash(rule + entry qualname + sink qualname + chain qualnames
+  + occurrence). **Not** line/column.
+- Async-twin names only in `fix.hint`.
 
 ## M2 delivered here
 
 - **Site-packages follow** for functions reachable from project async entries,
   down to stdlib blocking primitives; third-party hops marked on `chain[]`.
-- **Per-`(package, version)` disk cache** under the user cache dir.
+  Sink-table Externals are never rewritten to Project (deterministic; no lost
+  direct findings). Follow budget is relevance-ranked and sorted.
+- **Per-`(package, version)` disk cache** under the user cache dir, keyed by
+  External qualname and versioned by tool + schema; full edge summaries;
+  atomic batched writes. Cold and warm runs must agree.
 - **Built-in third-party rule table** (type-based + C-extension shortcut) with
-  async-twin fix hints; async counterparts never fire.
+  async-twin fix hints; async counterparts never fire. Redis `Pipeline`
+  buffering (`set`/`get`/…) is not IO — only `execute()` blocks.
 - **Higher-order** callable arguments; **ty-resolved** offload only, plus
   inferred wrappers whose bodies call a real offload primitive.
 - Nested defs keyed by full scope; lambda assign+call; `@property` gets;

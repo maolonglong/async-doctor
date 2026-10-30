@@ -97,7 +97,14 @@ pub fn is_async_counterpart(qualname: &str) -> bool {
 }
 
 fn lookup_third_party(qualname: &str) -> Option<SinkHit> {
+    // Pipeline buffering methods are never sinks (even if aliased to Redis.*).
+    if is_redis_pipeline_buffering(qualname) {
+        return None;
+    }
     let normalized = normalize_third_party(qualname);
+    if is_redis_pipeline_buffering(&normalized) {
+        return None;
+    }
     for sink in THIRD_PARTY_SINKS {
         if sink.qualname == normalized || sink.qualname == qualname {
             return Some(hit(sink));
@@ -200,9 +207,29 @@ fn match_family(q: &str) -> Option<SinkHit> {
             "Use an async HTTP client (`httpx.AsyncClient`), or offload.",
         )));
     }
-    // redis sync
+    // redis Pipeline / client.Pipeline: command buffering is not IO; only execute() blocks.
+    // `client.pipeline()` itself only constructs a buffer — never a sink.
+    if is_redis_pipeline_buffering(q) || q.ends_with(".pipeline") {
+        return None;
+    }
+    // Pipeline.execute (any redis.*Pipeline layout) is the buffering→IO boundary.
+    if q.contains("Pipeline")
+        && (q.ends_with(".execute")
+            || q.ends_with(".execute_command")
+            || q.ends_with(".immediate_execute_command"))
+        && !q.starts_with("redis.asyncio.")
+    {
+        return Some(hit(&BuiltinSink::finding(
+            "redis.client.Pipeline.execute",
+            RULE_BLOCKING_DB,
+            "Use `redis.asyncio` pipelines (`await pipe.execute()`), or offload.",
+        )));
+    }
+    // redis sync client (not asyncio, not Pipeline buffering)
     if (q.starts_with("redis.Redis.") || q.starts_with("redis.StrictRedis."))
         && !q.starts_with("redis.asyncio.")
+        && !q.contains("Pipeline")
+        && !q.ends_with(".pipeline")
     {
         return Some(hit(&BuiltinSink::finding(
             "redis.Redis.execute_command",
@@ -384,6 +411,22 @@ fn match_family(q: &str) -> Option<SinkHit> {
     None
 }
 
+/// `client.pipeline()` / `pipe.set()` / `pipe.get()` only buffer; `pipe.execute()` blocks.
+fn is_redis_pipeline_buffering(q: &str) -> bool {
+    let is_pipeline = q.contains("Pipeline") || q.contains("pipeline.Pipeline");
+    if !is_pipeline {
+        return false;
+    }
+    // execute / execute_command on a pipeline are real IO.
+    if q.ends_with(".execute")
+        || q.ends_with(".execute_command")
+        || q.ends_with(".immediate_execute_command")
+    {
+        return false;
+    }
+    true
+}
+
 fn method_looks_like_aws_op(q: &str) -> bool {
     // boto3 dynamic client methods: client.get_object, etc.
     let Some((_, method)) = q.rsplit_once('.') else {
@@ -549,6 +592,12 @@ pub static THIRD_PARTY_SINKS: &[BuiltinSink] = &[
         "redis.Redis.ping",
         RULE_BLOCKING_DB,
         "Use `redis.asyncio.Redis` instead of sync `redis.Redis`.",
+    ),
+    // Pipeline.execute is the only buffering→IO boundary.
+    BuiltinSink::finding(
+        "redis.client.Pipeline.execute",
+        RULE_BLOCKING_DB,
+        "Use `redis.asyncio` pipelines (`await pipe.execute()`), or offload.",
     ),
     // --- sqlalchemy sync ---
     BuiltinSink::finding(
@@ -744,6 +793,19 @@ mod tests {
     fn redis_asyncio_never_fires() {
         let t = BuiltinSinkTable::new();
         assert!(t.lookup("redis.asyncio.Redis.get").is_none());
+        assert!(t.lookup("redis.Redis.get").is_some());
+    }
+
+    #[test]
+    fn redis_pipeline_buffering_never_fires_execute_does() {
+        let t = BuiltinSinkTable::new();
+        assert!(t.lookup("redis.client.Pipeline.set").is_none());
+        assert!(t.lookup("redis.client.Pipeline.get").is_none());
+        assert!(t.lookup("redis.client.Pipeline.delete").is_none());
+        assert!(t.lookup("redis.Redis.pipeline").is_none());
+        assert!(t.lookup("redis.Pipeline.set").is_none());
+        assert!(t.lookup("redis.client.Pipeline.execute").is_some());
+        assert!(t.lookup("redis.Pipeline.execute").is_some());
         assert!(t.lookup("redis.Redis.get").is_some());
     }
 
