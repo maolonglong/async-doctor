@@ -1,0 +1,300 @@
+//! Grading helpers: conditions, param guards, file-IO merge, shortest paths.
+
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+
+use crate::graph::{CalleeRef, ConditionTag, FunctionId, LiteralArg, ParamGuard, ProjectFacts};
+use crate::report::{ChainStep, EntryLabel, Finding};
+
+pub(super) fn label_rank(label: EntryLabel) -> u8 {
+    match label {
+        EntryLabel::Route => 0,
+        EntryLabel::Lifecycle => 1,
+        EntryLabel::Task => 2,
+        EntryLabel::Other => 3,
+    }
+}
+
+pub(super) fn chain_step_for(
+    caller: &crate::graph::FunctionFact,
+    file: String,
+    line: u32,
+    text: String,
+) -> ChainStep {
+    if caller.is_third_party {
+        ChainStep::third_party(file, line, text, caller.package_name.clone())
+    } else {
+        ChainStep::project(file, line, text)
+    }
+}
+
+/// Aggregate key for unresolved sites: prefer a stable callee-ish snippet.
+pub(super) fn unresolved_pattern(reason: &str, text: &str) -> String {
+    let t = text.trim();
+    // Keep a short head of the call text (before `(`) when present.
+    if let Some(head) = t.split('(').next() {
+        let head = head.trim();
+        if !head.is_empty() && head.len() <= 80 {
+            return format!("{reason}:{head}");
+        }
+    }
+    reason.to_string()
+}
+
+/// Merge hop tags into a coherent list: never keep unconditional/all-paths
+/// alongside any branch-like tag.
+pub(super) fn reconcile_conditions(tags: &[ConditionTag]) -> Vec<String> {
+    let has_branch = tags.iter().any(|t| t.is_branch_like());
+    let has_loop = tags.contains(&ConditionTag::Loop);
+    let has_cache = tags.contains(&ConditionTag::CacheMissDependent);
+    let has_async_branch = tags.contains(&ConditionTag::AsyncBranch);
+    let mut out = Vec::new();
+    if has_loop {
+        out.push(ConditionTag::Loop.as_str().to_string());
+    }
+    if has_cache {
+        out.push(ConditionTag::CacheMissDependent.as_str().to_string());
+    }
+    // Emit async-branch for if/else/try/match (and when both cache + other branch tags appear).
+    if has_async_branch || (has_branch && !has_cache) {
+        out.push(ConditionTag::AsyncBranch.as_str().to_string());
+    }
+    if !has_branch && !has_loop {
+        if tags.contains(&ConditionTag::Unconditional) {
+            out.push(ConditionTag::Unconditional.as_str().to_string());
+        }
+        if tags.contains(&ConditionTag::AllPaths) {
+            out.push(ConditionTag::AllPaths.as_str().to_string());
+        }
+        if out.is_empty() {
+            out.push(ConditionTag::Unconditional.as_str().to_string());
+            out.push(ConditionTag::AllPaths.as_str().to_string());
+        }
+    }
+    out
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ParamVerdict {
+    ProvablyTrue,
+    ProvablyFalse,
+    Unknown,
+}
+
+pub(super) fn evaluate_param_guards(
+    facts: &ProjectFacts,
+    path: &PathToEntry,
+    guards: &[(FunctionId, ParamGuard)],
+) -> ParamVerdict {
+    if guards.is_empty() {
+        return ParamVerdict::ProvablyTrue;
+    }
+    let mut any_unknown = false;
+    for &(fn_id, guard) in guards {
+        // Guards in the async entry's own body depend on external input — keep
+        // as findings (tagged async-branch). Only demote for callee guards.
+        if fn_id == path.entry {
+            continue;
+        }
+        // Find the edge on the path that calls into the guarded callee.
+        let call_edge = path.edges.iter().find_map(|&eidx| {
+            let e = &facts.edges[eidx];
+            match e.callee {
+                CalleeRef::Project(id) if id == fn_id => Some(e),
+                _ => None,
+            }
+        });
+        let Some(edge) = call_edge else {
+            // No caller on this path — cannot prove; demote.
+            any_unknown = true;
+            continue;
+        };
+        let lit = edge
+            .positional_literals
+            .get(guard.index as usize)
+            .copied()
+            .flatten();
+        match (lit, guard.inverted) {
+            (Some(LiteralArg::True), false) | (Some(LiteralArg::False), true) => {}
+            (Some(LiteralArg::False), false)
+            | (Some(LiteralArg::None), false)
+            | (Some(LiteralArg::True), true) => {
+                return ParamVerdict::ProvablyFalse;
+            }
+            _ => any_unknown = true,
+        }
+    }
+    if any_unknown {
+        ParamVerdict::Unknown
+    } else {
+        ParamVerdict::ProvablyTrue
+    }
+}
+
+/// Merge `open(...)` + subsequent `f.read()`/`f.write()` findings for the same entry.
+pub(super) fn merge_file_io_findings(findings: Vec<Finding>) -> Vec<Finding> {
+    let mut opens: Vec<Finding> = Vec::new();
+    let mut others: Vec<Finding> = Vec::new();
+    for f in findings {
+        let sink_text = f.chain.last().map(|c| c.text.as_str()).unwrap_or("");
+        if is_open_call_text(sink_text)
+            || f.fix.fix_group_id.contains("open") && f.rule == "blocking-file"
+        {
+            // Prefer matching by last chain hop looking like open(
+            if is_open_call_text(sink_text) {
+                opens.push(f);
+                continue;
+            }
+        }
+        if f.rule == "blocking-file" && is_file_rw_text(sink_text) {
+            others.push(f);
+            continue;
+        }
+        others.push(f);
+    }
+
+    // For each open finding, absorb same-entry file rw findings in the same file.
+    let mut absorbed: HashSet<usize> = HashSet::new();
+    for open in &mut opens {
+        for (i, rw) in others.iter().enumerate() {
+            if absorbed.contains(&i) {
+                continue;
+            }
+            if rw.rule != "blocking-file"
+                || !is_file_rw_text(rw.chain.last().map(|c| c.text.as_str()).unwrap_or(""))
+            {
+                continue;
+            }
+            if rw.entry.file != open.entry.file || rw.entry.name != open.entry.name {
+                continue;
+            }
+            // Same entry: append rw hop if not already present.
+            for step in &rw.chain {
+                if !open
+                    .chain
+                    .iter()
+                    .any(|s| s.file == step.file && s.line == step.line && s.text == step.text)
+                {
+                    open.chain.push(step.clone());
+                }
+            }
+            absorbed.insert(i);
+        }
+    }
+
+    let mut out = opens;
+    for (i, f) in others.into_iter().enumerate() {
+        if !absorbed.contains(&i) {
+            out.push(f);
+        }
+    }
+    out
+}
+
+pub(super) fn is_open_call_text(text: &str) -> bool {
+    let t = text.trim();
+    t.starts_with("open(") || t.contains(".open(")
+}
+
+pub(super) fn is_file_rw_text(text: &str) -> bool {
+    let t = text.trim();
+    t.contains(".read(")
+        || t.contains(".readline(")
+        || t.contains(".readlines(")
+        || t.contains(".write(")
+        || t.contains(".writelines(")
+}
+
+pub(super) struct PathToEntry {
+    pub(super) entry: FunctionId,
+    /// Edges from entry toward the seed caller (may be empty if seed is inside entry).
+    pub(super) edges: Vec<usize>,
+}
+
+pub(super) fn shortest_paths_to_async_entries(
+    facts: &ProjectFacts,
+    reverse: &BTreeMap<FunctionId, Vec<usize>>,
+    seed_caller: FunctionId,
+) -> Vec<PathToEntry> {
+    let seed_fn = facts.function(seed_caller);
+    // Third-party async helpers (site-packages / dist-packages) are never entries.
+    if seed_fn.is_async && !seed_fn.is_sync_route && !seed_fn.is_third_party {
+        return vec![PathToEntry {
+            entry: seed_caller,
+            edges: vec![],
+        }];
+    }
+
+    let mut via_edge: HashMap<FunctionId, usize> = HashMap::new();
+    let mut visited: HashSet<FunctionId> = HashSet::new();
+    let mut queue: VecDeque<FunctionId> = VecDeque::new();
+    queue.push_back(seed_caller);
+    visited.insert(seed_caller);
+
+    let mut entries = Vec::new();
+
+    while let Some(node) = queue.pop_front() {
+        let Some(preds) = reverse.get(&node) else {
+            continue;
+        };
+        for &edge_idx in preds {
+            let edge = &facts.edges[edge_idx];
+            let pred = edge.caller;
+            if !visited.insert(pred) {
+                continue;
+            }
+            via_edge.insert(pred, edge_idx);
+            let pred_fn = facts.function(pred);
+            // Never treat third-party async as an entry, and do not walk *through*
+            // it toward first-party callers (stops FPs via awaited library internals).
+            if pred_fn.is_third_party && pred_fn.is_async {
+                continue;
+            }
+            if pred_fn.is_async && !pred_fn.is_sync_route {
+                let mut edges = Vec::new();
+                let mut cur = pred;
+                while cur != seed_caller {
+                    let eidx = via_edge[&cur];
+                    edges.push(eidx);
+                    match facts.edges[eidx].callee {
+                        CalleeRef::Project(next) => cur = next,
+                        _ => break,
+                    }
+                }
+                entries.push(PathToEntry { entry: pred, edges });
+            } else {
+                queue.push_back(pred);
+            }
+        }
+    }
+
+    entries
+}
+
+pub(super) fn async_twin_hint(
+    facts: &ProjectFacts,
+    entry_id: FunctionId,
+    path: &PathToEntry,
+) -> Option<String> {
+    let host = if let Some(&last) = path.edges.last() {
+        match facts.edges[last].callee {
+            CalleeRef::Project(fid) => facts.function(fid),
+            _ => facts.function(entry_id),
+        }
+    } else {
+        facts.function(entry_id)
+    };
+
+    let method = host.qualname.rsplit('.').next().unwrap_or(&host.qualname);
+    for (sync_name, twin) in &host.async_twins {
+        if sync_name == method {
+            let class = host.qualname.rsplit_once('.').map(|(c, _)| c).unwrap_or("");
+            let q = if class.is_empty() {
+                twin.clone()
+            } else {
+                format!("{class}.{twin}")
+            };
+            return Some(q);
+        }
+    }
+    None
+}

@@ -27,6 +27,9 @@ jobs:
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
+      - name: rust file length (AGENTS.md <=800)
+        run: ./scripts/check_rust_file_length.sh
+
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 

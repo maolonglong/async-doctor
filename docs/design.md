@@ -81,6 +81,18 @@ parse (ruff_python_parser, parallel)
 | `async_doctor_rules` | Built-in rule table (static data) |
 | `async_doctor` | clap CLI + reporters |
 
+### Module map (source layout)
+
+| Path | Responsibility |
+| --- | --- |
+| `async_doctor_ty::extract` | Path discovery, function collection, call-graph edges, third-party follow |
+| `async_doctor_ty::extract::collector` | Per-file `CallCollector` (visit / control-flow / calls / resolve) |
+| `async_doctor_ty::tests` | Integration tests split by area (`basics`, `offload`, `entries`, `conditions`, `constants`, `m2`) |
+| `async_doctor_core::propagate` | Sink seeding, reverse BFS, grading (`higher_order`, `grade`) |
+| `async_doctor_rules::third_party` | Type-based third-party sinks (`families`, `sinks`) |
+
+Source files under `crates/` aim for ~500 lines and must stay at or under **800** (enforced in CI).
+
 Blocking propagation is reachability, not taint: mark sinks, push up the reverse
 call graph, report at call sites inside `async def`, BFS for the shortest chain.
 
