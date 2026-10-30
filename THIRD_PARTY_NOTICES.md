@@ -29,7 +29,3 @@ the Python standard library.
 
 Remaining crates are recorded in `Cargo.lock`. Most are MIT and/or Apache-2.0;
 run `cargo license` for a machine-readable inventory.
-
-## fast-rust agent skill (`.cursor/skills/fast-rust/`)
-
-Vendored unmodified from [PsiACE/skills](https://redirect.github.com/PsiACE/skills) at commit `2265aed05caf199426a8062461e2c9901be996d8` (skills/fast-rust) by PsiACE and contributors, for use by coding agents working on this repository. It is development guidance only and is not part of the shipped tool. The upstream repository declares no license; review before any public release.
