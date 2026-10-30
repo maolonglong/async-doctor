@@ -11,7 +11,7 @@ use async_doctor_core::{FunctionId, LiteralArg, ParamGuard, ProjectFacts};
 use ruff_python_ast::{self as ast};
 use ty_python_semantic::SemanticModel;
 
-use crate::sitepkgs::FollowTarget;
+use crate::sitepkgs::{FollowTarget, PackageMetaMemo};
 
 use super::constants::ModuleConst;
 use super::ctx::{DefKey, FileCtx, TaskTargets};
@@ -27,6 +27,7 @@ pub(crate) struct CallCollector<'a, 'db> {
     pub(super) property_defs: &'a HashSet<DefKey>,
     pub(super) task_targets: &'a mut TaskTargets,
     pub(super) follow_targets: &'a mut HashMap<String, FollowTarget>,
+    pub(super) package_meta: &'a mut PackageMetaMemo,
     pub(super) module_constants: &'a HashMap<String, ModuleConst>,
     pub(super) current_fn: Option<FunctionId>,
     pub(super) current_param_names: Vec<String>,
@@ -58,6 +59,10 @@ pub(crate) struct CallCollector<'a, 'db> {
     pub(super) pending_literals: Vec<Option<LiteralArg>>,
     /// Positional callables for the call currently being recorded.
     pub(super) pending_callables: Vec<Option<FunctionId>>,
+    /// Keyword callables for the call currently being recorded.
+    pub(super) pending_keyword_callables: Vec<(String, FunctionId)>,
+    /// Cheap type narrowing from `isinstance` / `is not None` in the current branch.
+    pub(super) narrowed_locals: HashMap<String, crate::extract::helpers::NarrowFact>,
     /// Local name → lambda assigned in the current function.
     pub(super) local_lambdas: HashMap<String, &'a ast::ExprLambda>,
     /// Local name → generator expression assigned in the current function.

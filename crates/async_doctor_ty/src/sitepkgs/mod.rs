@@ -8,7 +8,6 @@ pub(crate) use batch::materialize_cached_functions;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use ruff_db::system::SystemPathBuf;
 
@@ -31,17 +30,55 @@ type PackageMetaKey = (String, String);
 /// Cached `(name, version, fingerprint)` (or absence).
 type PackageMetaValue = Option<(String, String, String)>;
 
-/// Process-local memo for package meta lookups.
+/// Per-scan memo for package meta lookups.
 ///
-/// `package_meta_for_path` used to re-`read_dir` + fingerprint on every call site;
-/// one large venv made that dominate wall/sys time. Memoize once per scan.
-static PACKAGE_META_MEMO: Mutex<Option<HashMap<PackageMetaKey, PackageMetaValue>>> =
-    Mutex::new(None);
+/// `meta_for_path` used to re-`read_dir` + fingerprint on every call site; one
+/// large venv made that dominate wall/sys time. Owned by the scan context —
+/// never process-global — so concurrent scans cannot share or clobber state.
+#[derive(Debug, Default)]
+pub struct PackageMetaMemo {
+    map: HashMap<PackageMetaKey, PackageMetaValue>,
+}
 
-/// Clear the package-meta memo at the start of each scan (and in tests).
-pub fn clear_package_meta_memo() {
-    if let Ok(mut g) = PACKAGE_META_MEMO.lock() {
-        *g = None;
+impl PackageMetaMemo {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Locate neighboring `*.dist-info` for a file under site-/dist-packages.
+    /// Returns `(name, version, content_fingerprint)`.
+    pub fn meta_for_path(&mut self, py_path: &Path) -> Option<(String, String, String)> {
+        let s = py_path.to_string_lossy().replace('\\', "/");
+        let (root, rest) = match (s.find("/site-packages/"), s.find("/dist-packages/")) {
+            (Some(idx), _) => (
+                PathBuf::from(&s[..idx + "/site-packages".len()]),
+                &s[idx + "/site-packages/".len()..],
+            ),
+            (None, Some(idx)) => (
+                PathBuf::from(&s[..idx + "/dist-packages".len()]),
+                &s[idx + "/dist-packages/".len()..],
+            ),
+            (None, None) => return None,
+        };
+        let top = rest.split('/').next()?.to_string();
+        if top.is_empty() {
+            return None;
+        }
+
+        let key = (root.to_string_lossy().to_string(), top.clone());
+        if let Some(cached) = self.map.get(&key) {
+            return cached.clone();
+        }
+
+        let computed = package_meta_uncached(&root, &top);
+        self.map.insert(key, computed.clone());
+        computed
+    }
+
+    /// Number of memoized package keys (test seam).
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.map.len()
     }
 }
 
@@ -66,43 +103,6 @@ pub fn parse_dist_info_metadata(text: &str) -> Option<(String, String)> {
         }
     }
     Some((name?, version?))
-}
-
-/// Locate neighboring `*.dist-info` for a file under site-/dist-packages.
-/// Returns `(name, version, content_fingerprint)`.
-pub fn package_meta_for_path(py_path: &Path) -> Option<(String, String, String)> {
-    let s = py_path.to_string_lossy().replace('\\', "/");
-    let (root, rest) = match (s.find("/site-packages/"), s.find("/dist-packages/")) {
-        (Some(idx), _) => (
-            PathBuf::from(&s[..idx + "/site-packages".len()]),
-            &s[idx + "/site-packages/".len()..],
-        ),
-        (None, Some(idx)) => (
-            PathBuf::from(&s[..idx + "/dist-packages".len()]),
-            &s[idx + "/dist-packages/".len()..],
-        ),
-        (None, None) => return None,
-    };
-    let top = rest.split('/').next()?.to_string();
-    if top.is_empty() {
-        return None;
-    }
-
-    let key = (root.to_string_lossy().to_string(), top.clone());
-    {
-        let mut guard = PACKAGE_META_MEMO.lock().ok()?;
-        let memo = guard.get_or_insert_with(HashMap::new);
-        if let Some(cached) = memo.get(&key) {
-            return cached.clone();
-        }
-    }
-
-    let computed = package_meta_uncached(&root, &top);
-    if let Ok(mut guard) = PACKAGE_META_MEMO.lock() {
-        let memo = guard.get_or_insert_with(HashMap::new);
-        memo.insert(key, computed.clone());
-    }
-    computed
 }
 
 fn package_meta_uncached(root: &Path, top: &str) -> Option<(String, String, String)> {
@@ -150,4 +150,37 @@ fn normalize_dist_name(name: &str) -> String {
 pub fn is_followable_site_packages_py(path_str: &str) -> bool {
     let s = path_str.replace('\\', "/");
     path_str_is_third_party_python(&s) && s.ends_with(".py") && !s.ends_with(".pyi")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn package_meta_memo_is_per_instance_not_global() {
+        let dir = tempfile::tempdir().unwrap();
+        let site = dir.path().join("lib/python3.12/site-packages");
+        let pkg = site.join("demo");
+        let dist = site.join("demo-1.0.0.dist-info");
+        fs::create_dir_all(&pkg).unwrap();
+        fs::create_dir_all(&dist).unwrap();
+        fs::write(pkg.join("__init__.py"), "").unwrap();
+        fs::write(dist.join("METADATA"), "Name: demo\nVersion: 1.0.0\n").unwrap();
+        fs::write(dist.join("RECORD"), "demo/__init__.py,,\n").unwrap();
+
+        let py = pkg.join("__init__.py");
+        let mut a = PackageMetaMemo::new();
+        let mut b = PackageMetaMemo::new();
+        let ma = a.meta_for_path(&py).unwrap();
+        let mb = b.meta_for_path(&py).unwrap();
+        assert_eq!(ma.0, "demo");
+        assert_eq!(mb.0, "demo");
+        assert_eq!(a.len(), 1);
+        assert_eq!(b.len(), 1);
+        // Filling `a` further must not grow `b`.
+        let _ = a.meta_for_path(&py);
+        assert_eq!(a.len(), 1);
+        assert_eq!(b.len(), 1);
+    }
 }

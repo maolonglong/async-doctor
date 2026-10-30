@@ -224,25 +224,38 @@ pub(super) fn shortest_paths_to_async_entries(
         }];
     }
 
-    let mut via_edge: HashMap<FunctionId, usize> = HashMap::new();
-    let mut visited: HashSet<FunctionId> = HashSet::new();
-    let mut queue: VecDeque<FunctionId> = VecDeque::new();
-    queue.push_back(seed_caller);
-    visited.insert(seed_caller);
+    // State is (node, required predecessor caller for the next hop).
+    // `required` comes from higher-order `context_from_caller` so kwargs/partial
+    // bindings do not leak across call sites of the same apply() helper.
+    type State = (FunctionId, Option<FunctionId>);
+    // via[parent_state] = (child_state_toward_seed, edge_idx)
+    let mut via: HashMap<State, (State, usize)> = HashMap::new();
+    let mut visited: HashSet<State> = HashSet::new();
+    let mut queue: VecDeque<State> = VecDeque::new();
+    let seed_state: State = (seed_caller, None);
+    queue.push_back(seed_state);
+    visited.insert(seed_state);
 
     let mut entries = Vec::new();
 
-    while let Some(node) = queue.pop_front() {
+    while let Some((node, required)) = queue.pop_front() {
         let Some(preds) = reverse.get(&node) else {
             continue;
         };
         for &edge_idx in preds {
             let edge = &facts.edges[edge_idx];
-            let pred = edge.caller;
-            if !visited.insert(pred) {
+            if let Some(req) = required
+                && edge.caller != req
+            {
                 continue;
             }
-            via_edge.insert(pred, edge_idx);
+            let pred = edge.caller;
+            let next_req = edge.context_from_caller;
+            let pred_state: State = (pred, next_req);
+            if !visited.insert(pred_state) {
+                continue;
+            }
+            via.insert(pred_state, ((node, required), edge_idx));
             let pred_fn = facts.function(pred);
             // Never treat third-party async as an entry, and do not walk *through*
             // it toward first-party callers (stops FPs via awaited library internals).
@@ -251,18 +264,17 @@ pub(super) fn shortest_paths_to_async_entries(
             }
             if pred_fn.is_async && !pred_fn.is_sync_route {
                 let mut edges = Vec::new();
-                let mut cur = pred;
-                while cur != seed_caller {
-                    let eidx = via_edge[&cur];
+                let mut cur = pred_state;
+                while cur.0 != seed_caller {
+                    let Some(&(child, eidx)) = via.get(&cur) else {
+                        break;
+                    };
                     edges.push(eidx);
-                    match facts.edges[eidx].callee {
-                        CalleeRef::Project(next) => cur = next,
-                        _ => break,
-                    }
+                    cur = child;
                 }
                 entries.push(PathToEntry { entry: pred, edges });
             } else {
-                queue.push_back(pred);
+                queue.push_back(pred_state);
             }
         }
     }

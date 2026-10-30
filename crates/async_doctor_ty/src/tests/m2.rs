@@ -519,22 +519,18 @@ fn m2_pil_param_branch_sink_is_candidate() {
         !finding_names
             .iter()
             .any(|n| n.contains("image_open") || n.contains("image_save")),
-        "PIL param-guarded builtins.open must not be findings: {finding_names:?}"
+        "PIL BytesIO open/save must not be findings: {finding_names:?}"
     );
-    // Demoted to candidates (conditional).
-    let cand_names: Vec<_> = report
-        .candidates
-        .iter()
-        .map(|c| c.entry.name.as_str())
-        .collect();
-    assert!(
-        cand_names
-            .iter()
-            .any(|n| *n == "use_image_open" || *n == "use_image_save")
-            || report.candidates.iter().any(|c| c.reason == "conditional"),
-        "expected conditional candidates for PIL path: cands={cand_names:?} {:?}",
-        report.candidates
-    );
+    // M3a: proven in-memory buffers must not surface as blocking-file at all.
+    for c in &report.candidates {
+        if matches!(c.entry.name.as_str(), "use_image_open" | "use_image_save") {
+            assert_ne!(
+                c.rule.as_str(),
+                "blocking-file",
+                "in-memory PIL must not be blocking-file candidate: {c:?}"
+            );
+        }
+    }
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&cache);
 }

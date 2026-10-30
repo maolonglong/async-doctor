@@ -28,7 +28,7 @@ pub(super) fn materialize_higher_order(facts: &ProjectFacts) -> ProjectFacts {
         }
     }
 
-    // Resolve ParamInvoke via caller's positional_callables.
+    // Resolve ParamInvoke via caller's positional_callables / keyword_callables.
     let mut extras: Vec<CallEdge> = Vec::new();
     let n_edges = out.edges.len();
     for ei in 0..n_edges {
@@ -45,11 +45,22 @@ pub(super) fn materialize_higher_order(facts: &ProjectFacts) -> ProjectFacts {
             let CalleeRef::ParamInvoke { index } = out.edges[pei].callee else {
                 continue;
             };
-            let Some(Some(fid)) = out.edges[ei]
+            let fid = out.edges[ei]
                 .positional_callables
                 .get(index as usize)
                 .copied()
-            else {
+                .flatten()
+                .or_else(|| {
+                    let name = out.functions[callee_id.index()]
+                        .param_names
+                        .get(index as usize)?;
+                    out.edges[ei]
+                        .keyword_callables
+                        .iter()
+                        .find(|(k, _)| k == name)
+                        .map(|(_, id)| *id)
+                });
+            let Some(fid) = fid else {
                 continue;
             };
             let param_edge = &out.edges[pei];
@@ -76,9 +87,12 @@ pub(super) fn materialize_higher_order(facts: &ProjectFacts) -> ProjectFacts {
                 is_offload_wrapper: false,
                 positional_literals: vec![],
                 positional_callables: vec![],
+                keyword_callables: vec![],
                 param_guard: param_edge.param_guard,
                 is_awaited: param_edge.is_awaited,
                 is_eager_offload_arg: param_edge.is_eager_offload_arg,
+                // Only valid when reverse-walk came from this call site.
+                context_from_caller: Some(out.edges[ei].caller),
             });
         }
     }
