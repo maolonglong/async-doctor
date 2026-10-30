@@ -58,6 +58,10 @@ pub(crate) struct CallCollector<'a, 'db> {
     pub(super) pending_literals: Vec<Option<LiteralArg>>,
     /// Positional callables for the call currently being recorded.
     pub(super) pending_callables: Vec<Option<FunctionId>>,
+    /// Keyword callables for the call currently being recorded.
+    pub(super) pending_keyword_callables: Vec<(String, FunctionId)>,
+    /// Cheap type narrowing from `isinstance` / `is not None` in the current branch.
+    pub(super) narrowed_locals: HashMap<String, crate::extract::helpers::NarrowFact>,
     /// Local name → lambda assigned in the current function.
     pub(super) local_lambdas: HashMap<String, &'a ast::ExprLambda>,
     /// Local name → generator expression assigned in the current function.

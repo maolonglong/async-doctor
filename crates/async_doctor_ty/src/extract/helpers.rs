@@ -196,3 +196,103 @@ pub(crate) fn is_task_spawn_callee(func: &Expr) -> bool {
         _ => false,
     }
 }
+
+/// In-memory buffer / byte-stream types that are not blocking file IO.
+pub(crate) fn is_in_memory_buffer_type(ty: &str) -> bool {
+    let t = ty;
+    t.contains("BytesIO")
+        || t.contains("StringIO")
+        || t.contains("BufferedIOBase")
+        || t.ends_with("bytearray")
+        || t.ends_with(".memoryview")
+        || t.contains("io.BytesIO")
+        || t.contains("io.StringIO")
+        || t.contains("_io.BytesIO")
+        || t.contains("_io.StringIO")
+}
+
+/// Qualnames whose first argument is a path/file and may be an in-memory buffer instead.
+pub(crate) fn is_path_or_file_open_qual(q: &str) -> bool {
+    matches!(
+        q,
+        "builtins.open"
+            | "io.open"
+            | "pathlib.Path.open"
+            | "pathlib.Path.read_text"
+            | "pathlib.Path.read_bytes"
+            | "pathlib.Path.write_text"
+            | "pathlib.Path.write_bytes"
+    ) || q.ends_with(".Image.open")
+        || q.ends_with(".Image.save")
+        || q.ends_with("PIL.Image.open")
+        || q.ends_with("PIL.Image.save")
+}
+
+/// Cheap narrowing facts from `isinstance(x, T)` / `x is not None`.
+#[derive(Debug, Clone)]
+pub(crate) enum NarrowFact {
+    /// `isinstance(name, T)` → use this instance qualname for `name`.
+    IsInstance(String),
+    /// `name is not None` → drop None from unions when resolving `name`.
+    NotNone,
+}
+
+/// Extract a single cheap narrowing from an `if` test (no `and`/`or` explosion).
+pub(crate) fn narrow_from_test(test: &Expr) -> Option<(String, NarrowFact)> {
+    match test {
+        Expr::Compare(cmp) if cmp.ops.len() == 1 && cmp.operands.len() == 2 => {
+            let op = cmp.ops[0];
+            let left = &cmp.operands[0];
+            let right = &cmp.operands[1];
+            // `x is not None` / `x != None`
+            if matches!(op, ast::CmpOp::IsNot | ast::CmpOp::NotEq)
+                && matches!(right, Expr::NoneLiteral(_))
+                && let Expr::Name(n) = left
+            {
+                return Some((n.id.to_string(), NarrowFact::NotNone));
+            }
+            None
+        }
+        Expr::Call(call) => {
+            let is_isinstance = match call.func.as_ref() {
+                Expr::Name(n) => n.id.as_str() == "isinstance",
+                Expr::Attribute(a) => a.attr.as_str() == "isinstance",
+                _ => false,
+            };
+            if !is_isinstance || call.arguments.args.len() < 2 {
+                return None;
+            }
+            let Expr::Name(n) = &call.arguments.args[0] else {
+                return None;
+            };
+            let type_expr = &call.arguments.args[1];
+            let ty_name = match type_expr {
+                Expr::Name(tn) => tn.id.to_string(),
+                Expr::Attribute(attr) => format_attr_path(attr),
+                _ => return None,
+            };
+            Some((n.id.to_string(), NarrowFact::IsInstance(ty_name)))
+        }
+        _ => None,
+    }
+}
+
+fn format_attr_path(attr: &ast::ExprAttribute) -> String {
+    let mut parts = vec![attr.attr.as_str().to_string()];
+    let mut cur = attr.value.as_ref();
+    loop {
+        match cur {
+            Expr::Attribute(a) => {
+                parts.push(a.attr.as_str().to_string());
+                cur = a.value.as_ref();
+            }
+            Expr::Name(n) => {
+                parts.push(n.id.to_string());
+                break;
+            }
+            _ => break,
+        }
+    }
+    parts.reverse();
+    parts.join(".")
+}
