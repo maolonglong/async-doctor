@@ -1,0 +1,31 @@
+[project]
+name = "async-doctor"
+description = "Your agent blocks the event loop. This catches it."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+requires-python = ">=3.9"
+keywords = ["asyncio", "static-analysis", "linter", "event-loop", "blocking"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "Programming Language :: Rust",
+    "Topic :: Software Development :: Quality Assurance",
+]
+dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/maolonglong/async-doctor"
+
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[tool.maturin]
+bindings = "bin"
+manifest-path = "crates/async_doctor/Cargo.toml"
+module-name = "async_doctor"
+strip = true
+exclude = ["fixtures/**", "target/**", "docs/**"]

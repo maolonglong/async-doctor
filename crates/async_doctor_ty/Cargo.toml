@@ -1,0 +1,25 @@
+[package]
+name = "async_doctor_ty"
+description = "The only crate that touches ty/ruff: salsa Db and Python fact extraction."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+async_doctor_core = { workspace = true }
+async_doctor_rules = { workspace = true }
+ignore = { workspace = true }
+ruff_db = { workspace = true }
+ruff_python_ast = { workspace = true }
+ruff_source_file = { workspace = true }
+ruff_text_size = { workspace = true }
+salsa = { workspace = true }
+ty_module_resolver = { workspace = true }
+ty_python_core = { workspace = true }
+ty_python_semantic = { workspace = true }
+ty_site_packages = { workspace = true }
+ty_vendored = { workspace = true }

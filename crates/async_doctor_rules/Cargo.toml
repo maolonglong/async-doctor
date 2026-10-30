@@ -1,0 +1,12 @@
+[package]
+name = "async_doctor_rules"
+description = "Built-in rule metadata for async-doctor."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+async_doctor_core = { workspace = true }
