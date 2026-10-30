@@ -6,11 +6,11 @@ use std::fs;
 use async_doctor_core::ProjectFacts;
 
 use super::helpers::{clone_fixture, fresh_cache_dir, report_json_with_cache_budget};
-use crate::FOLLOW_BUDGET_DEFAULT;
 use crate::cache::{
     CachedEdge, CachedFollowTarget, CachedFunction, PackageCache, save_package_cache,
 };
-use crate::sitepkgs::materialize_cached_functions;
+use crate::extract::FOLLOW_BUDGET_DEFAULT;
+use crate::sitepkgs::{PackageCacheBatch, materialize_cached_functions};
 
 /// Tiny budget: `a0` free, then `a1`/`a2` consume it — never enters `libb.gate`.
 const TINY_BUDGET: usize = 2;
@@ -71,10 +71,7 @@ fn m2_follow_budget_warm_must_not_exceed_cold_via_deeper_cache() {
     let seeded = report_json_with_cache_budget(&dir, &deep_cache, FOLLOW_BUDGET_DEFAULT);
     let seeded_r: async_doctor_core::Report = serde_json::from_str(&seeded).unwrap();
     assert!(
-        seeded_r
-            .findings
-            .iter()
-            .any(|f| f.rule == "blocking-sleep"),
+        seeded_r.findings.iter().any(|f| f.rule == "blocking-sleep"),
         "seed run must reach sleep so the cache holds the deep chain: {:?}",
         seeded_r.findings
     );
@@ -94,14 +91,8 @@ fn m2_follow_budget_warm_must_not_exceed_cold_via_deeper_cache() {
 
     let cold_r: async_doctor_core::Report = serde_json::from_str(&cold_tiny).unwrap();
     assert!(
-        !cold_r
-            .findings
-            .iter()
-            .any(|f| f.rule == "blocking-sleep")
-            && !cold_r
-                .candidates
-                .iter()
-                .any(|c| c.rule == "blocking-sleep"),
+        !cold_r.findings.iter().any(|f| f.rule == "blocking-sleep")
+            && !cold_r.candidates.iter().any(|c| c.rule == "blocking-sleep"),
         "tiny budget must not reach sleep: {:?}",
         cold_r
     );
@@ -226,9 +217,10 @@ fn materialize_cached_functions_loads_only_wanted_keys() {
     let mut qual_to_id = BTreeMap::new();
     let mut id_to_external_key = HashMap::new();
     let mut follow_targets = HashMap::new();
+    let mut cache_batch = PackageCacheBatch::new(root.clone());
     let loaded = materialize_cached_functions(
         &mut facts,
-        &root,
+        &mut cache_batch,
         "liba",
         "1.0.0",
         fp,
