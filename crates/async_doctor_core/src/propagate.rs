@@ -155,10 +155,7 @@ pub fn analyze(facts: &ProjectFacts, sinks: &dyn SinkTable) -> Report {
                         name: entry.qualname.clone(),
                         label: entry.label,
                     };
-                    let why = format!(
-                        "async-doctor why {}:{}",
-                        seed_edge.file, seed_edge.line
-                    );
+                    let why = format!("async-doctor why {}:{}", seed_edge.file, seed_edge.line);
                     let fix = Fix {
                         hint,
                         fix_group_id: fix_group_id(hit.rule, hit.sink_qualname),
@@ -171,10 +168,7 @@ pub fn analyze(facts: &ProjectFacts, sinks: &dyn SinkTable) -> Report {
                             entry: entry_out,
                             chain: chain_steps,
                             conditions,
-                            reason: hit
-                                .candidate_reason
-                                .unwrap_or("uncertain")
-                                .to_string(),
+                            reason: hit.candidate_reason.unwrap_or("uncertain").to_string(),
                             fix,
                             why,
                         });
@@ -218,14 +212,10 @@ pub fn analyze(facts: &ProjectFacts, sinks: &dyn SinkTable) -> Report {
                         conditions,
                         reason: reason.clone(),
                         fix: Fix {
-                            hint: "Could not resolve call target; inspect dynamically."
-                                .to_string(),
+                            hint: "Could not resolve call target; inspect dynamically.".to_string(),
                             fix_group_id: fix_group_id("unresolved-call", &sink_key),
                         },
-                        why: format!(
-                            "async-doctor why {}:{}",
-                            seed_edge.file, seed_edge.line
-                        ),
+                        why: format!("async-doctor why {}:{}", seed_edge.file, seed_edge.line),
                     });
                 }
             }
@@ -329,10 +319,7 @@ fn shortest_paths_to_async_entries(
                         _ => break,
                     }
                 }
-                entries.push(PathToEntry {
-                    entry: pred,
-                    edges,
-                });
+                entries.push(PathToEntry { entry: pred, edges });
                 // Shortest path only: do not expand past async entries.
             } else {
                 queue.push_back(pred);
@@ -347,9 +334,10 @@ fn async_twin_hint(
     facts: &ProjectFacts,
     entry_id: FunctionId,
     path: &PathToEntry,
-    sink_qualname: &str,
+    _sink_qualname: &str,
 ) -> Option<String> {
-    // Prefer twins recorded on the last project function before the sink.
+    // Prefer twins recorded on the last project function before the sink
+    // (e.g. `Client.fetch` → `afetch` when both exist on the same class).
     let host = if let Some(&last) = path.edges.last() {
         match facts.edges[last].callee {
             CalleeRef::Project(fid) => facts.function(fid),
@@ -359,10 +347,18 @@ fn async_twin_hint(
         facts.function(entry_id)
     };
 
-    let method = sink_qualname.rsplit('.').next().unwrap_or(sink_qualname);
+    let method = host.qualname.rsplit('.').next().unwrap_or(&host.qualname);
     for (sync_name, twin) in &host.async_twins {
         if sync_name == method {
-            return Some(twin.clone());
+            return Some(
+                format!(
+                    "{}.{}",
+                    host.qualname.rsplit_once('.').map(|(c, _)| c).unwrap_or(""),
+                    twin
+                )
+                .trim_start_matches('.')
+                .to_string(),
+            );
         }
     }
     None
@@ -399,13 +395,7 @@ mod tests {
         }
     }
 
-    fn fn_fact(
-        id: u32,
-        name: &str,
-        is_async: bool,
-        file: &str,
-        line: u32,
-    ) -> FunctionFact {
+    fn fn_fact(id: u32, name: &str, is_async: bool, file: &str, line: u32) -> FunctionFact {
         FunctionFact {
             id: FunctionId(id),
             file: file.into(),

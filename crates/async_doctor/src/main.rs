@@ -83,20 +83,26 @@ fn write_text(report: &Report) -> anyhow::Result<()> {
 
     writeln!(out, "Found {} finding(s):\n", report.findings.len())?;
     for finding in &report.findings {
-        let call = finding
-            .chain
-            .first()
-            .map(|c| format!("{}:{}  {}", c.file, c.line, c.text))
-            .unwrap_or_else(|| "(no chain)".into());
         writeln!(
             out,
-            "[{}] {}  (entry {} {}:{})",
+            "[{}] reachable from {} {} {}:{}",
             finding.rule,
-            call,
             finding.entry.label.as_str(),
+            finding.entry.name,
             finding.entry.file,
             finding.entry.line
         )?;
+        for (i, step) in finding.chain.iter().enumerate() {
+            let pipe = if i + 1 == finding.chain.len() {
+                "└─"
+            } else {
+                "├─"
+            };
+            writeln!(out, "  {pipe} {}:{}  {}", step.file, step.line, step.text)?;
+        }
+        if !finding.conditions.is_empty() {
+            writeln!(out, "  conditions: {}", finding.conditions.join(", "))?;
+        }
         writeln!(out, "  fix: {}", finding.fix.hint)?;
         writeln!(out, "  why: {}", finding.why)?;
         writeln!(out)?;

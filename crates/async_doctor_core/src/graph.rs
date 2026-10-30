@@ -42,13 +42,9 @@ pub enum CalleeRef {
     Project(FunctionId),
     /// Resolved external/stdlib/third-party callable by dotted qualified name
     /// (e.g. `time.sleep`, `subprocess.run`, `pathlib.Path.read_text`).
-    External {
-        qualname: String,
-    },
+    External { qualname: String },
     /// Dynamic / unresolvable dispatch — never guess by name.
-    Unresolved {
-        reason: String,
-    },
+    Unresolved { reason: String },
     /// Offload boundary: the callable argument is *not* invoked on the event loop.
     Offload(OffloadKind),
 }
