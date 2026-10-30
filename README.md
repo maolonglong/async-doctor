@@ -18,6 +18,7 @@ uvx async-doctor .
 # Or during development:
 cargo run -p async_doctor -- .
 cargo run -p async_doctor -- --format json .
+cargo run -p async_doctor -- --include-non-production --show-unresolved .
 ```
 
 Exit codes:
@@ -30,6 +31,11 @@ Exit codes:
 
 Incomplete analysis sets `complete=false` in JSON (and warns on stderr); it
 does **not** use exit code 2. Candidates never affect the exit code.
+
+By default, entries under `tests/` / `docs/` / `examples/` / `scripts/` /
+hidden dirs are skipped (count shown in the summary;
+`--include-non-production` to include). `reason=unresolved` candidates are
+hidden unless `--show-unresolved`.
 
 ## What M1 detects
 
@@ -45,8 +51,15 @@ does **not** use exit code 2. Candidates never affect the exit code.
   `to_thread(f())` still reports.
 - Entry labels: `route` / `lifecycle` / `task` / `other`. FastAPI/Starlette
   sync `def` routes are not treated as entries.
+- Prove-only `conditions[]` (`unconditional`/`all-paths` never share a path
+  with `if`/`else`/`try`/`match`; `cache_miss_dependent` for module-cache
+  checks). Parameter-guarded sinks → `candidates` (`reason=conditional`)
+  unless the arg is provably truthy.
+- Generators: bare `g = gen()` does not propagate; `for` / `list()` / `next()`
+  / `yield from` do. Module-level constant dead branches are pruned.
+- `open(...)` + same-entry `f.read()`/`f.write()` merge into one finding.
 - Unresolvable dynamic dispatch (`getattr`, …) → `candidates` with reason
-  `unresolved`. Small metadata IO (`os.stat`, `Path.exists`, …) → candidates.
+  `unresolved` (hidden by default). Small metadata IO → candidates.
 - Stable finding `id`s (rule + entry + sink + chain qualnames — not
   line/column). Async-twin names appear only as `fix.hint` text.
 

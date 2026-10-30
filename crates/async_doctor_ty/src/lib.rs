@@ -6,7 +6,7 @@ mod scan;
 
 pub use db::AsyncDoctorDb;
 pub use extract::extract_path;
-pub use scan::scan_path;
+pub use scan::{scan_path, scan_path_with_options};
 
 #[cfg(test)]
 mod tests;

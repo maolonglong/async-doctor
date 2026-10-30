@@ -94,6 +94,16 @@ pub struct Report {
     pub candidates: Vec<Candidate>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<String>,
+    /// Async entries omitted because they live under tests/docs/examples/… (zero-config).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub omitted_non_production_entries: u32,
+    /// `unresolved` candidates omitted unless `--show-unresolved`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub hidden_unresolved_candidates: u32,
+}
+
+fn is_zero(v: &u32) -> bool {
+    *v == 0
 }
 
 impl Report {
@@ -104,6 +114,8 @@ impl Report {
             findings: Vec::new(),
             candidates: Vec::new(),
             skipped: Vec::new(),
+            omitted_non_production_entries: 0,
+            hidden_unresolved_candidates: 0,
         }
     }
 
