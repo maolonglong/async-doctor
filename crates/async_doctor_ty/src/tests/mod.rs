@@ -1,6 +1,7 @@
 //! Integration tests for call-graph extraction + propagation.
 
 mod basics;
+mod budget;
 mod conditions;
 mod constants;
 mod entries;

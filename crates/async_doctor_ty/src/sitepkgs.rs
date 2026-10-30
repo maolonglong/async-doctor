@@ -389,6 +389,10 @@ fn parse_literal(s: &str) -> Option<LiteralArg> {
 ///
 /// Keys in `wanted` must be External qualnames (same as cache keys).
 /// Returns the set of keys that were materialized from cache.
+///
+/// Only the explicitly requested keys are loaded — no transitive closure.
+/// Nested callees are followed by later budgeted waves (same as cold extract),
+/// so warm runs cannot bypass [`crate::extract::FOLLOW_BUDGET_DEFAULT`].
 #[allow(clippy::too_many_arguments)]
 pub fn materialize_cached_functions(
     facts: &mut ProjectFacts,
@@ -430,7 +434,7 @@ pub fn materialize_cached_functions(
             });
     }
     let mut loaded = Vec::new();
-    // First pass: create FunctionFacts for wanted keys present in cache.
+    // Create FunctionFacts for wanted keys present in cache (no transitive extras).
     let mut pending_edges: Vec<(FunctionId, Vec<CachedEdge>)> = Vec::new();
     for q in wanted {
         if qual_to_id.contains_key(q) {
@@ -464,60 +468,9 @@ pub fn materialize_cached_functions(
         loaded.push(q.clone());
     }
 
-    // Transitive closure: materialize every cached callee referenced by edges
-    // (third_party / external / positional callables) so warm runs do not need
-    // follow_targets for nested site-packages hops.
-    let mut frontier: Vec<String> = Vec::new();
-    for (_, edges) in &pending_edges {
-        collect_cacheable_callees(edges, &mut frontier);
-    }
-    frontier.sort();
-    frontier.dedup();
-    let mut fi = 0;
-    while fi < frontier.len() {
-        let q = frontier[fi].clone();
-        fi += 1;
-        if qual_to_id.contains_key(&q) {
-            continue;
-        }
-        let Some(cf) = cache.functions.get(&q) else {
-            continue;
-        };
-        let id = FunctionId(facts.functions.len() as u32);
-        facts.functions.push(FunctionFact {
-            id,
-            file: format!("site-packages/{}.py", cf.module.replace('.', "/")),
-            line: cf.line,
-            module: cf.module.clone(),
-            qualname: cf.qualname.clone(),
-            is_async: cf.is_async,
-            is_generator: cf.is_generator,
-            label: EntryLabel::Other,
-            is_sync_route: false,
-            async_twins: Vec::new(),
-            param_names: cf.param_names.clone(),
-            is_third_party: true,
-            package_name: Some(package.to_string()),
-            package_version: Some(version.to_string()),
-            invokes_params: cf.invokes_params.clone(),
-            is_offload_wrapper: cf.is_offload_wrapper,
-        });
-        qual_to_id.insert(q.clone(), id);
-        id_to_external_key.insert(id, q.clone());
-        pending_edges.push((id, cf.edges.clone()));
-        loaded.push(q.clone());
-        let mut more = Vec::new();
-        collect_cacheable_callees(&cf.edges, &mut more);
-        for m in more {
-            if !qual_to_id.contains_key(&m) && !frontier.contains(&m) {
-                frontier.push(m);
-            }
-        }
-    }
-
-    // Second pass: emit edges with full summaries, resolving third_party → Project.
-    // Sort pending by external key for stable FunctionId-independent edge order…
-    // (FunctionIds already assigned; sort edges when pushing for determinism.)
+    // Emit edges with full summaries, resolving third_party → Project when the
+    // callee was also in `wanted` (and thus already assigned an id). Nested
+    // callees stay External for a later budgeted wave — matching cold extract.
     pending_edges.sort_by(|a, b| {
         let ka = id_to_external_key
             .get(&a.0)
@@ -591,17 +544,6 @@ pub fn materialize_cached_functions(
     }
     loaded.sort();
     loaded
-}
-
-fn collect_cacheable_callees(edges: &[CachedEdge], out: &mut Vec<String>) {
-    for e in edges {
-        if matches!(e.callee_kind.as_str(), "third_party" | "external") {
-            out.push(e.callee_qualname.clone());
-        }
-        for cq in e.positional_callable_quals.iter().flatten() {
-            out.push(cq.clone());
-        }
-    }
 }
 
 fn cached_callee_to_ref(edge: &CachedEdge, qual_to_id: &BTreeMap<String, FunctionId>) -> CalleeRef {

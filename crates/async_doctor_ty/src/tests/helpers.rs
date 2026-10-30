@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::TempDir;
 
 use crate::sitepkgs::clear_package_meta_memo;
-use crate::{scan_path, scan_path_with_cache};
+use crate::{scan_path, scan_path_with_cache, scan_path_with_cache_budget};
 
 pub(crate) fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures")
@@ -22,6 +22,17 @@ pub(crate) fn report_json(path: &Path) -> String {
 pub(crate) fn report_json_with_cache(path: &Path, cache_dir: &Path) -> String {
     clear_package_meta_memo();
     let report = scan_path_with_cache(path, Some(cache_dir)).unwrap();
+    serde_json::to_string(&report).unwrap()
+}
+
+/// Like [`report_json_with_cache`] with an injectable follow budget (no env vars).
+pub(crate) fn report_json_with_cache_budget(
+    path: &Path,
+    cache_dir: &Path,
+    follow_budget: usize,
+) -> String {
+    clear_package_meta_memo();
+    let report = scan_path_with_cache_budget(path, Some(cache_dir), follow_budget).unwrap();
     serde_json::to_string(&report).unwrap()
 }
 
