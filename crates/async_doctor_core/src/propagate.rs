@@ -203,7 +203,12 @@ pub fn analyze_with_options(
             for &edge_idx in &path.edges {
                 let e = &facts.edges[edge_idx];
                 let caller_fn = facts.function(e.caller);
-                chain_steps.push(chain_step_for(caller_fn, e.file.clone(), e.line, e.text.clone()));
+                chain_steps.push(chain_step_for(
+                    caller_fn,
+                    e.file.clone(),
+                    e.line,
+                    e.text.clone(),
+                ));
                 if let CalleeRef::Project(fid) = e.callee {
                     let callee_fn = facts.function(fid);
                     chain_qualnames.push(callee_fn.full_qualname());

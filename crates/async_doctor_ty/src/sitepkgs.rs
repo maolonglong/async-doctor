@@ -127,10 +127,7 @@ pub fn materialize_cached_functions(
         let id = FunctionId(facts.functions.len() as u32);
         facts.functions.push(FunctionFact {
             id,
-            file: format!(
-                "site-packages/{package}/{}.py",
-                cf.module.replace('.', "/")
-            ),
+            file: format!("site-packages/{package}/{}.py", cf.module.replace('.', "/")),
             line: cf.line,
             module: cf.module.clone(),
             qualname: cf.qualname.clone(),
@@ -212,9 +209,11 @@ pub fn upsert_cache_function(
                 CalleeRef::External { qualname } => {
                     ("external".to_string(), qualname.clone(), None)
                 }
-                CalleeRef::Offload(k) => {
-                    ("offload".to_string(), k.as_str().to_string(), Some(k.as_str().to_string()))
-                }
+                CalleeRef::Offload(k) => (
+                    "offload".to_string(),
+                    k.as_str().to_string(),
+                    Some(k.as_str().to_string()),
+                ),
                 CalleeRef::Unresolved { reason } => {
                     ("unresolved".to_string(), reason.clone(), None)
                 }
@@ -252,4 +251,3 @@ pub fn upsert_cache_function(
     );
     let _ = save_package_cache(&cache);
 }
-

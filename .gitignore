@@ -2,7 +2,13 @@
 **/target/
 .venv/
 venv/
-__pycache__/
+# Keep M2 fixture stub venvs (clean-room package stubs for type matching)
+!fixtures/
+!fixtures/**
+!fixtures/**/.venv/
+!fixtures/**/.venv/**
+**/__pycache__/
+*.py[cod]
 *.egg-info/
 dist/
 .pytest_cache/
