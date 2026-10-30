@@ -234,7 +234,11 @@ langgraph, home-assistant core, plus small fixtures per rule/pattern.
   third-party — they are followed when reachable, tagged `is_third_party`, and
   **never** treated as finding entries. Attribute Externals prefer the
   *receiver type* over mixin defining classes (redis `Pipeline` vs
-  `CoreCommands`).   Only the Call that is the *direct* operand of `await` /
+  `CoreCommands`). Project subclasses of `redis.Redis` /
+  `redis.asyncio.Redis` inherit sink status from the *receiver MRO*
+  (asyncio base ⇒ never a sync sink), not from whether the shared
+  commands-mixin method is `async def`. Only the Call that is the *direct*
+  operand of `await` /
   `async for` iter / `async with` context is marked `is_awaited` (nested
   argument calls like `await send(open(p).read())` stay sync sinks). Awaited
   *known-async* APIs are not sync sinks and are not followed into library
