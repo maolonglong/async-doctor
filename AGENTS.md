@@ -11,3 +11,15 @@ Read and follow the project skills in `.cursor/skills/`:
 - When a file grows past that, split it by responsibility into a module directory (for example `extract/` with one file per concern), not by arbitrary line ranges. Keep the public interface of the module unchanged while splitting.
 - Large test suites go in separate files per area under `tests/` or a `tests/` module directory, not one growing `tests.rs`.
 - Fixtures and generated data are exempt.
+
+## Ignored / stress tests
+
+Default `cargo test` stays fast for CI. Longer stress loops are marked `#[ignore]`.
+
+- Concurrent cold-cache race stress (`concurrent_cache`):
+
+  ```bash
+  cargo test -p async_doctor --test concurrent_cache -- --ignored
+  ```
+
+  CI runs a short N≈15–20 variant (under ~20s). The ignored N=100 stress is for local/regression hunting; pre-fix sticky-miss failures were ~2.5–5% of trials on `m2_cache_multipkg_large`, so N=20 catches a regression with about 40–64% probability per CI run.

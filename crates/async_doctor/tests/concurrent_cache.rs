@@ -63,7 +63,7 @@ fn fresh_cache(label: &str) -> PathBuf {
     cache
 }
 
-fn run_json(bin: &str, project: &Path, cache: &Path) -> String {
+fn run_json(bin: &Path, project: &Path, cache: &Path) -> String {
     let out = Command::new(bin)
         .args(["--format", "json"])
         .arg(project)
@@ -98,62 +98,15 @@ fn assert_same_report(solo: &str, concurrent: &str, ctx: &str) {
     );
 }
 
-/// CI-sized loop: two processes, shared cache, many trials.
-///
-/// Pre-fix (b341 sticky miss, no snapshot fallback): ~2–5% wrong on
-/// m2_cache_multipkg_large (e.g. 2/80, 4/80). N=100 keeps CI false-pass risk low;
-/// local stress uses ≥300 iterations.
-#[test]
-fn concurrent_cold_scans_match_solo_multipkg_large() {
+fn run_concurrent_trials(fixture: &str, trials: usize, label: &str) {
     let bin = async_doctor_bin();
-    let project = clone_fixture("m2_cache_multipkg_large");
-    let solo_cache = fresh_cache("solo-large");
-    let solo = run_json(bin.to_str().unwrap(), &project, &solo_cache);
+    let project = clone_fixture(fixture);
+    let solo_cache = fresh_cache(&format!("solo-{label}"));
+    let solo = run_json(&bin, &project, &solo_cache);
 
-    const TRIALS: usize = 100;
     let mut mismatches = 0usize;
-    for trial in 0..TRIALS {
-        let cache = fresh_cache(&format!("pair-large-{trial}"));
-        let mut children = Vec::new();
-        for _ in 0..2 {
-            children.push(
-                Command::new(&bin)
-                    .args(["--format", "json"])
-                    .arg(&project)
-                    .env("XDG_CACHE_HOME", &cache)
-                    .output()
-                    .expect("spawn"),
-            );
-        }
-        for (proc_i, out) in children.into_iter().enumerate() {
-            assert!(
-                out.status.success() || out.status.code() == Some(1),
-                "trial {trial} proc {proc_i} failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-            let json = String::from_utf8(out.stdout).unwrap();
-            if json != solo {
-                mismatches += 1;
-                assert_same_report(&solo, &json, &format!("trial {trial} proc {proc_i}"));
-            }
-        }
-        let _ = fs::remove_dir_all(&cache);
-    }
-    assert_eq!(mismatches, 0, "expected 0/{TRIALS} concurrent mismatches");
-    let _ = fs::remove_dir_all(&project);
-    let _ = fs::remove_dir_all(&solo_cache);
-}
-
-#[test]
-fn concurrent_cold_scans_match_solo_multipkg() {
-    let bin = async_doctor_bin();
-    let project = clone_fixture("m2_cache_multipkg");
-    let solo_cache = fresh_cache("solo-multi");
-    let solo = run_json(bin.to_str().unwrap(), &project, &solo_cache);
-
-    const TRIALS: usize = 80;
-    for trial in 0..TRIALS {
-        let cache = fresh_cache(&format!("pair-multi-{trial}"));
+    for trial in 0..trials {
+        let cache = fresh_cache(&format!("pair-{label}-{trial}"));
         let outs: Vec<_> = (0..2)
             .map(|_| {
                 Command::new(&bin)
@@ -167,13 +120,50 @@ fn concurrent_cold_scans_match_solo_multipkg() {
         for (proc_i, out) in outs.into_iter().enumerate() {
             assert!(
                 out.status.success() || out.status.code() == Some(1),
-                "trial {trial} proc {proc_i} failed"
+                "trial {trial} proc {proc_i} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
             );
             let json = String::from_utf8(out.stdout).unwrap();
-            assert_same_report(&solo, &json, &format!("trial {trial} proc {proc_i}"));
+            if json != solo {
+                mismatches += 1;
+                assert_same_report(&solo, &json, &format!("trial {trial} proc {proc_i}"));
+            }
         }
         let _ = fs::remove_dir_all(&cache);
     }
+    assert_eq!(mismatches, 0, "expected 0/{trials} concurrent mismatches");
     let _ = fs::remove_dir_all(&project);
     let _ = fs::remove_dir_all(&solo_cache);
+}
+
+/// Fast CI check (N=20). Pre-fix sticky-miss rate on `m2_cache_multipkg_large`
+/// was about 2.5–5% of trials (2/80, 4/80 locally; 6/200 on CI). With independent
+/// trials, P(catch ≥1 failure | bug present) at p=2.5% is ≈40%, at p=5% ≈64%.
+#[test]
+fn concurrent_cold_scans_match_solo_multipkg_large() {
+    run_concurrent_trials("m2_cache_multipkg_large", 20, "large");
+}
+
+/// Fast CI check for the smaller multipkg fixture (pre-fix ~1/100).
+#[test]
+fn concurrent_cold_scans_match_solo_multipkg() {
+    run_concurrent_trials("m2_cache_multipkg", 15, "multi");
+}
+
+/// Stress (N=100). Not run in default CI — see AGENTS.md.
+///
+/// ```text
+/// cargo test -p async_doctor --test concurrent_cache -- --ignored
+/// ```
+#[test]
+#[ignore = "slow stress; run with: cargo test -p async_doctor --test concurrent_cache -- --ignored"]
+fn concurrent_cold_scans_match_solo_multipkg_large_stress() {
+    run_concurrent_trials("m2_cache_multipkg_large", 100, "large-stress");
+}
+
+/// Stress (N=100) for the smaller multipkg fixture.
+#[test]
+#[ignore = "slow stress; run with: cargo test -p async_doctor --test concurrent_cache -- --ignored"]
+fn concurrent_cold_scans_match_solo_multipkg_stress() {
+    run_concurrent_trials("m2_cache_multipkg", 100, "multi-stress");
 }
