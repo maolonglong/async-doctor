@@ -57,7 +57,7 @@ pub enum LiteralArg {
 /// What a call resolves to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CalleeRef {
-    /// Call into another first-party function.
+    /// Call into another first-party (or followed third-party) function.
     Project(FunctionId),
     /// Resolved external/stdlib/third-party callable by dotted qualified name
     /// (e.g. `time.sleep`, `subprocess.run`, `pathlib.Path.read_text`).
@@ -66,6 +66,8 @@ pub enum CalleeRef {
     Unresolved { reason: String },
     /// Offload boundary: the callable argument is *not* invoked on the event loop.
     Offload(OffloadKind),
+    /// Call of a positional parameter (higher-order): resolve via caller args.
+    ParamInvoke { index: u32 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -123,6 +125,8 @@ pub struct CallEdge {
     pub is_offload_wrapper: bool,
     /// Positional argument literals when known (`None` = unknown / non-literal).
     pub positional_literals: Vec<Option<LiteralArg>>,
+    /// Positional arguments that resolve to project/followed functions (higher-order).
+    pub positional_callables: Vec<Option<FunctionId>>,
     /// When set, this edge only executes when positional parameter `index` is
     /// truthy (`if param:`) or falsy (`if not param:` when `inverted`).
     pub param_guard: Option<ParamGuard>,
@@ -137,7 +141,7 @@ pub struct ParamGuard {
     pub inverted: bool,
 }
 
-/// A first-party function or method.
+/// A first-party or followed third-party function or method.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionFact {
     pub id: FunctionId,
@@ -145,7 +149,7 @@ pub struct FunctionFact {
     pub line: u32,
     /// Module-relative dotted path without the function (`pkg.mod`), or empty for scripts.
     pub module: String,
-    /// Class-nested name (`Class.method`) or bare function name.
+    /// Scope-qualified name: `Class.method`, `outer.inner` for nested defs, or bare name.
     pub qualname: String,
     pub is_async: bool,
     /// True when the body contains `yield` / `yield from` (generator function).
@@ -155,8 +159,18 @@ pub struct FunctionFact {
     pub is_sync_route: bool,
     /// Async twins discovered on the same class (method name → twin name), for fix hints.
     pub async_twins: Vec<(String, String)>,
-    /// Positional parameter names (for guard matching).
+    /// Positional parameter names (for guard matching / higher-order).
     pub param_names: Vec<String>,
+    /// True when this function was extracted from site-packages (not first-party).
+    pub is_third_party: bool,
+    /// Distribution name when `is_third_party` (e.g. `requests`).
+    pub package_name: Option<String>,
+    /// Distribution version when known (e.g. `2.32.3`).
+    pub package_version: Option<String>,
+    /// Positional parameter indices that this function *calls* (higher-order).
+    pub invokes_params: Vec<u32>,
+    /// Inferred offload wrapper: body passes a callable param into a real offload primitive.
+    pub is_offload_wrapper: bool,
 }
 
 impl FunctionFact {
@@ -176,10 +190,12 @@ pub struct AnalyzeOptions {
     /// Include entries under tests/docs/examples/scripts/hidden dirs.
     pub include_non_production: bool,
     /// Include `reason=unresolved` candidates in the report.
+    /// When set, unresolved sites are aggregated by callee pattern and ranked
+    /// by number of entries affected (see [`crate::Report::unresolved_summary`]).
     pub show_unresolved: bool,
 }
 
-/// All facts for one project scan (first-party only for M1).
+/// All facts for one project scan (first-party + reachable third-party for M2).
 #[derive(Debug, Clone, Default)]
 pub struct ProjectFacts {
     pub functions: Vec<FunctionFact>,

@@ -1,9 +1,9 @@
-//! Public scan entry: extract facts, then grade with the stdlib sink table.
+//! Public scan entry: extract facts, then grade with the builtin sink table.
 
 use std::path::Path;
 
 use async_doctor_core::{AnalyzeOptions, Report, analyze_with_options};
-use async_doctor_rules::StdlibSinkTable;
+use async_doctor_rules::BuiltinSinkTable;
 
 use crate::extract::extract_path;
 
@@ -17,7 +17,7 @@ pub fn scan_path_with_options(path: &Path, options: AnalyzeOptions) -> anyhow::R
     let facts = extract_path(path)?;
     Ok(analyze_with_options(
         &facts,
-        &StdlibSinkTable::new(),
+        &BuiltinSinkTable::new(),
         options,
     ))
 }

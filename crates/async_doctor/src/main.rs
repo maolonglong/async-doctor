@@ -143,5 +143,23 @@ fn write_text(report: &Report) -> anyhow::Result<()> {
             }
         )?;
     }
+    if !report.unresolved_summary.is_empty() {
+        writeln!(out, "\nUnresolved patterns (by entries affected):")?;
+        for pat in &report.unresolved_summary {
+            writeln!(
+                out,
+                "  {} — {} entr{}, {} site{}",
+                pat.pattern,
+                pat.entries_affected,
+                if pat.entries_affected == 1 {
+                    "y"
+                } else {
+                    "ies"
+                },
+                pat.sites,
+                if pat.sites == 1 { "" } else { "s" }
+            )?;
+        }
+    }
     Ok(())
 }

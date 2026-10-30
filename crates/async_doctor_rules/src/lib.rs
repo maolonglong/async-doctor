@@ -1,6 +1,10 @@
 //! Built-in rule / sink tables for async-doctor.
 //!
-//! M1 covers stdlib sinks. Third-party HTTP/DB/cloud rules land in M2.
+//! Stdlib sinks (M1) plus third-party type-based rules (M2).
+
+mod third_party;
+
+pub use third_party::{BuiltinSinkTable, THIRD_PARTY_SINKS, is_async_counterpart};
 
 use async_doctor_core::{SinkHit, SinkTable};
 
@@ -25,20 +29,42 @@ pub struct BuiltinSink {
     pub fix_hint: &'static str,
     pub candidate_only: bool,
     pub candidate_reason: Option<&'static str>,
+    /// Only fire for `with` enter edges (e.g. `with Engine.begin()`).
+    pub with_only: bool,
 }
 
 impl BuiltinSink {
-    const fn finding(qualname: &'static str, rule: &'static str, fix_hint: &'static str) -> Self {
+    pub const fn finding(
+        qualname: &'static str,
+        rule: &'static str,
+        fix_hint: &'static str,
+    ) -> Self {
         Self {
             qualname,
             rule,
             fix_hint,
             candidate_only: false,
             candidate_reason: None,
+            with_only: false,
         }
     }
 
-    const fn candidate(
+    pub const fn finding_with_only(
+        qualname: &'static str,
+        rule: &'static str,
+        fix_hint: &'static str,
+    ) -> Self {
+        Self {
+            qualname,
+            rule,
+            fix_hint,
+            candidate_only: false,
+            candidate_reason: None,
+            with_only: true,
+        }
+    }
+
+    pub const fn candidate(
         qualname: &'static str,
         rule: &'static str,
         fix_hint: &'static str,
@@ -50,16 +76,18 @@ impl BuiltinSink {
             fix_hint,
             candidate_only: true,
             candidate_reason: Some(reason),
+            with_only: false,
         }
     }
 
-    fn hit(self) -> SinkHit {
+    pub fn hit(self) -> SinkHit {
         SinkHit {
             rule: self.rule,
             sink_qualname: self.qualname,
             fix_hint: self.fix_hint,
             candidate_only: self.candidate_only,
             candidate_reason: self.candidate_reason,
+            with_only: self.with_only,
         }
     }
 }

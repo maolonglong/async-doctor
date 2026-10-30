@@ -3,12 +3,13 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::graph::{
-    AnalyzeOptions, CalleeRef, ConditionTag, FunctionId, LiteralArg, ParamGuard, ProjectFacts,
-    is_non_production_entry_path,
+    AnalyzeOptions, CallKind, CalleeRef, ConditionTag, FunctionId, LiteralArg, ParamGuard,
+    ProjectFacts, is_non_production_entry_path,
 };
 use crate::id::{FindingIdParts, finding_id, fix_group_id};
 use crate::report::{
     Candidate, ChainStep, Entry, EntryLabel, Finding, Fix, Report, SCHEMA_VERSION,
+    UnresolvedPattern,
 };
 
 /// Rule metadata looked up for an external sink qualified name.
@@ -20,6 +21,8 @@ pub struct SinkHit {
     /// When true, emit a candidate instead of a finding (e.g. small metadata IO).
     pub candidate_only: bool,
     pub candidate_reason: Option<&'static str>,
+    /// When true, only fire for `with` / context-manager enter edges (e.g. Engine.begin).
+    pub with_only: bool,
 }
 
 /// Lookup sinks and optional async-twin hint text for a resolved external name.
@@ -32,12 +35,80 @@ pub fn analyze(facts: &ProjectFacts, sinks: &dyn SinkTable) -> Report {
     analyze_with_options(facts, sinks, AnalyzeOptions::default())
 }
 
+/// Link higher-order `ParamInvoke` edges using caller argument bindings, and
+/// promote inferred offload wrappers onto call sites.
+fn materialize_higher_order(facts: &ProjectFacts) -> ProjectFacts {
+    use crate::graph::{CallEdge, OffloadKind};
+
+    let mut out = facts.clone();
+
+    // Mark call edges to inferred offload wrappers as offload cuts.
+    for edge in &mut out.edges {
+        if let CalleeRef::Project(fid) = edge.callee
+            && out.functions[fid.index()].is_offload_wrapper
+        {
+            edge.is_offload_wrapper = true;
+            edge.callee = CalleeRef::Offload(OffloadKind::AsyncioToThread);
+        }
+    }
+
+    // Resolve ParamInvoke via caller's positional_callables.
+    let mut extras: Vec<CallEdge> = Vec::new();
+    let edge_snapshot = out.edges.clone();
+    for edge in &edge_snapshot {
+        if edge.is_offload_wrapper {
+            continue;
+        }
+        let CalleeRef::Project(callee_id) = edge.callee else {
+            continue;
+        };
+        for param_edge in &edge_snapshot {
+            if param_edge.caller != callee_id {
+                continue;
+            }
+            let CalleeRef::ParamInvoke { index } = param_edge.callee else {
+                continue;
+            };
+            let Some(Some(fid)) = edge.positional_callables.get(index as usize) else {
+                continue;
+            };
+            let already = out.edges.iter().any(|e| {
+                e.caller == callee_id
+                    && matches!(e.callee, CalleeRef::Project(id) if id == *fid)
+                    && e.line == param_edge.line
+            });
+            if already {
+                continue;
+            }
+            extras.push(CallEdge {
+                caller: callee_id,
+                callee: CalleeRef::Project(*fid),
+                file: param_edge.file.clone(),
+                line: param_edge.line,
+                text: param_edge.text.clone(),
+                kind: param_edge.kind,
+                conditions: param_edge.conditions.clone(),
+                occurrence: param_edge.occurrence,
+                is_offload_wrapper: false,
+                positional_literals: vec![],
+                positional_callables: vec![],
+                param_guard: param_edge.param_guard,
+            });
+        }
+    }
+    out.edges.extend(extras);
+    out
+}
+
 /// Analyze project facts against a sink table and produce a report.
 pub fn analyze_with_options(
     facts: &ProjectFacts,
     sinks: &dyn SinkTable,
     options: AnalyzeOptions,
 ) -> Report {
+    let owned = materialize_higher_order(facts);
+    let facts = &owned;
+
     let mut report = Report {
         schema_version: SCHEMA_VERSION,
         complete: facts.complete,
@@ -46,6 +117,7 @@ pub fn analyze_with_options(
         skipped: facts.skipped.clone(),
         omitted_non_production_entries: 0,
         hidden_unresolved_candidates: 0,
+        unresolved_summary: Vec::new(),
     };
 
     let mut reverse: HashMap<FunctionId, Vec<usize>> = HashMap::new();
@@ -77,6 +149,9 @@ pub fn analyze_with_options(
         match &edge.callee {
             CalleeRef::External { qualname } => {
                 if let Some(hit) = sinks.lookup(qualname) {
+                    if hit.with_only && !matches!(edge.kind, CallKind::WithEnter) {
+                        continue;
+                    }
                     seeds.push(Seed {
                         edge_idx: idx,
                         kind: SeedKind::Sink(hit),
@@ -91,9 +166,12 @@ pub fn analyze_with_options(
                     },
                 });
             }
-            CalleeRef::Project(_) | CalleeRef::Offload(_) => {}
+            CalleeRef::Project(_) | CalleeRef::Offload(_) | CalleeRef::ParamInvoke { .. } => {}
         }
     }
+
+    // For unresolved aggregation: pattern → (sites, entries).
+    let mut unresolved_agg: HashMap<String, (u32, HashSet<FunctionId>)> = HashMap::new();
 
     let mut emitted: HashSet<String> = HashSet::new();
     let mut omitted_entries: HashSet<FunctionId> = HashSet::new();
@@ -124,22 +202,22 @@ pub fn analyze_with_options(
 
             for &edge_idx in &path.edges {
                 let e = &facts.edges[edge_idx];
-                chain_steps.push(ChainStep {
-                    file: e.file.clone(),
-                    line: e.line,
-                    text: e.text.clone(),
-                });
+                let caller_fn = facts.function(e.caller);
+                chain_steps.push(chain_step_for(caller_fn, e.file.clone(), e.line, e.text.clone()));
                 if let CalleeRef::Project(fid) = e.callee {
-                    chain_qualnames.push(facts.function(fid).full_qualname());
+                    let callee_fn = facts.function(fid);
+                    chain_qualnames.push(callee_fn.full_qualname());
                 }
                 condition_tags.extend(e.conditions.iter().copied());
             }
 
-            chain_steps.push(ChainStep {
-                file: seed_edge.file.clone(),
-                line: seed_edge.line,
-                text: seed_edge.text.clone(),
-            });
+            let seed_caller_fn = facts.function(seed_caller);
+            chain_steps.push(chain_step_for(
+                seed_caller_fn,
+                seed_edge.file.clone(),
+                seed_edge.line,
+                seed_edge.text.clone(),
+            ));
             condition_tags.extend(seed_edge.conditions.iter().copied());
             if let Some(g) = seed_edge.param_guard {
                 param_guards.push((seed_caller, g));
@@ -216,6 +294,11 @@ pub fn analyze_with_options(
                     }
                 }
                 SeedKind::Unresolved { reason } => {
+                    let pattern = unresolved_pattern(reason, &seed_edge.text);
+                    let agg = unresolved_agg.entry(pattern.clone()).or_default();
+                    agg.0 += 1;
+                    agg.1.insert(entry_id);
+
                     if !options.show_unresolved {
                         report.hidden_unresolved_candidates += 1;
                         continue;
@@ -261,6 +344,24 @@ pub fn analyze_with_options(
     report.findings = merge_file_io_findings(raw_findings);
     report.candidates = raw_candidates;
 
+    if options.show_unresolved {
+        let mut summary: Vec<UnresolvedPattern> = unresolved_agg
+            .into_iter()
+            .map(|(pattern, (sites, entries))| UnresolvedPattern {
+                pattern,
+                entries_affected: entries.len() as u32,
+                sites,
+            })
+            .collect();
+        summary.sort_by(|a, b| {
+            b.entries_affected
+                .cmp(&a.entries_affected)
+                .then_with(|| b.sites.cmp(&a.sites))
+                .then_with(|| a.pattern.cmp(&b.pattern))
+        });
+        report.unresolved_summary = summary;
+    }
+
     report.findings.sort_by(|a, b| {
         (
             label_rank(a.entry.label),
@@ -295,6 +396,32 @@ fn label_rank(label: EntryLabel) -> u8 {
         EntryLabel::Task => 2,
         EntryLabel::Other => 3,
     }
+}
+
+fn chain_step_for(
+    caller: &crate::graph::FunctionFact,
+    file: String,
+    line: u32,
+    text: String,
+) -> ChainStep {
+    if caller.is_third_party {
+        ChainStep::third_party(file, line, text, caller.package_name.clone())
+    } else {
+        ChainStep::project(file, line, text)
+    }
+}
+
+/// Aggregate key for unresolved sites: prefer a stable callee-ish snippet.
+fn unresolved_pattern(reason: &str, text: &str) -> String {
+    let t = text.trim();
+    // Keep a short head of the call text (before `(`) when present.
+    if let Some(head) = t.split('(').next() {
+        let head = head.trim();
+        if !head.is_empty() && head.len() <= 80 {
+            return format!("{reason}:{head}");
+        }
+    }
+    reason.to_string()
 }
 
 /// Merge hop tags into a coherent list: never keep unconditional/all-paths
@@ -566,6 +693,7 @@ mod tests {
                     fix_hint: "use asyncio.sleep",
                     candidate_only: false,
                     candidate_reason: None,
+                    with_only: false,
                 }),
                 "builtins.open" => Some(SinkHit {
                     rule: "blocking-file",
@@ -573,6 +701,7 @@ mod tests {
                     fix_hint: "offload",
                     candidate_only: false,
                     candidate_reason: None,
+                    with_only: false,
                 }),
                 "io.TextIOWrapper.read" => Some(SinkHit {
                     rule: "blocking-file",
@@ -580,6 +709,7 @@ mod tests {
                     fix_hint: "offload",
                     candidate_only: false,
                     candidate_reason: None,
+                    with_only: false,
                 }),
                 "os.stat" => Some(SinkHit {
                     rule: "blocking-file",
@@ -587,6 +717,7 @@ mod tests {
                     fix_hint: "offload",
                     candidate_only: true,
                     candidate_reason: Some("metadata"),
+                    with_only: false,
                 }),
                 _ => None,
             }
@@ -606,6 +737,11 @@ mod tests {
             is_sync_route: false,
             async_twins: vec![],
             param_names: vec![],
+            is_third_party: false,
+            package_name: None,
+            package_version: None,
+            invokes_params: vec![],
+            is_offload_wrapper: false,
         }
     }
 
@@ -627,6 +763,7 @@ mod tests {
             occurrence: 0,
             is_offload_wrapper: false,
             positional_literals: vec![],
+            positional_callables: vec![],
             param_guard: None,
         }
     }
