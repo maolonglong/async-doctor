@@ -312,12 +312,7 @@ fn edge_to_cached(e: &CallEdge, id_to_external_key: &HashMap<FunctionId, String>
     let keyword_callable_quals = e
         .keyword_callables
         .iter()
-        .filter_map(|(k, fid)| {
-            id_to_external_key
-                .get(fid)
-                .cloned()
-                .map(|q| (k.clone(), q))
-        })
+        .filter_map(|(k, fid)| id_to_external_key.get(fid).cloned().map(|q| (k.clone(), q)))
         .collect();
     CachedEdge {
         callee_qualname,
