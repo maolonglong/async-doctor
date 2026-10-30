@@ -2,8 +2,10 @@
 //!
 //! Stdlib sinks (M1) plus third-party type-based rules (M2).
 
+mod docs;
 mod third_party;
 
+pub use docs::{DOCS_RULES_BASE, RULE_DOCS, RuleDoc, docs_anchor_for, docs_url_for, rule_doc};
 pub use third_party::{BuiltinSinkTable, THIRD_PARTY_SINKS, is_async_counterpart};
 
 use async_doctor_core::{SinkHit, SinkTable};

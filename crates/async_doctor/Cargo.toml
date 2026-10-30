@@ -15,6 +15,11 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true }
 async_doctor_core = { workspace = true }
+async_doctor_rules = { workspace = true }
 async_doctor_ty = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tempfile = "3"

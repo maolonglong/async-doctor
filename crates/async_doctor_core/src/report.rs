@@ -51,6 +51,10 @@ pub struct ChainStep {
     /// Distribution name when `third_party` (e.g. `urllib3`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package: Option<String>,
+    /// How this hop was resolved (typed callee, project call, third-party follow, sink).
+    /// Additive in schema v1 — for `why` evidence and agents.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub resolution: String,
 }
 
 impl ChainStep {
@@ -61,6 +65,7 @@ impl ChainStep {
             text,
             third_party: false,
             package: None,
+            resolution: String::new(),
         }
     }
 
@@ -71,7 +76,13 @@ impl ChainStep {
             text,
             third_party: true,
             package,
+            resolution: String::new(),
         }
+    }
+
+    pub fn with_resolution(mut self, resolution: impl Into<String>) -> Self {
+        self.resolution = resolution.into();
+        self
     }
 }
 
@@ -104,6 +115,7 @@ pub struct Fix {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Finding {
     pub id: String,
     pub rule: String,
@@ -111,10 +123,18 @@ pub struct Finding {
     pub chain: Vec<ChainStep>,
     pub conditions: Vec<String>,
     pub fix: Fix,
+    /// Runnable locator help: `async-doctor why file:line --path <scan-root>`.
     pub why: String,
+    /// Fragment into `docs/rules.md` (e.g. `#blocking-sleep`). Additive in schema v1.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub docs_anchor: String,
+    /// Absolute docs URL for installed binaries. Additive in schema v1.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub docs_url: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Candidate {
     pub id: String,
     pub rule: String,
@@ -124,6 +144,12 @@ pub struct Candidate {
     pub reason: String,
     pub fix: Fix,
     pub why: String,
+    /// Fragment into `docs/rules.md` (e.g. `#blocking-sleep`). Additive in schema v1.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub docs_anchor: String,
+    /// Absolute docs URL for installed binaries. Additive in schema v1.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub docs_url: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -196,7 +222,11 @@ mod tests {
                 hint: "x".into(),
                 fix_group_id: "g".into(),
             },
-            why: "async-doctor why a.py:1".into(),
+            why: "async-doctor why a.py:1 --path .".into(),
+            docs_anchor: "#blocking-sleep".into(),
+            docs_url:
+                "https://github.com/maolonglong/async-doctor/blob/main/docs/rules.md#blocking-sleep"
+                    .into(),
         });
         assert_eq!(report.exit_code(), EXIT_FINDINGS);
     }
