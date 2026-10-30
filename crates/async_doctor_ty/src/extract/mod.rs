@@ -17,7 +17,6 @@ use async_doctor_core::ProjectFacts;
 use ruff_db::system::{SystemPath, SystemPathBuf};
 
 use crate::db::AsyncDoctorDb;
-use crate::sitepkgs::clear_package_meta_memo;
 
 use files::extract_files;
 use follow::DEFAULT_FOLLOW_BUDGET;
@@ -48,7 +47,6 @@ pub(crate) fn extract_path_with_cache_budget(
     cache_dir: Option<&Path>,
     follow_budget: usize,
 ) -> anyhow::Result<ProjectFacts> {
-    clear_package_meta_memo();
     let path = absolute_utf8(path)?;
     if path.as_std_path().is_file() {
         if path.extension() != Some("py") {

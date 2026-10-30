@@ -7,7 +7,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tempfile::TempDir;
 
 use crate::scan::scan_path_with_cache_budget;
-use crate::sitepkgs::clear_package_meta_memo;
 use crate::{scan_path, scan_path_with_cache};
 
 pub(crate) fn fixtures_dir() -> PathBuf {
@@ -21,7 +20,6 @@ pub(crate) fn report_json(path: &Path) -> String {
 }
 
 pub(crate) fn report_json_with_cache(path: &Path, cache_dir: &Path) -> String {
-    clear_package_meta_memo();
     let report = scan_path_with_cache(path, Some(cache_dir)).unwrap();
     serde_json::to_string(&report).unwrap()
 }
@@ -32,7 +30,6 @@ pub(crate) fn report_json_with_cache_budget(
     cache_dir: &Path,
     follow_budget: usize,
 ) -> String {
-    clear_package_meta_memo();
     let report = scan_path_with_cache_budget(path, Some(cache_dir), follow_budget).unwrap();
     serde_json::to_string(&report).unwrap()
 }

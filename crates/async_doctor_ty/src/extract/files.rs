@@ -13,7 +13,7 @@ use ty_python_core::ProgramFile;
 use ty_python_semantic::SemanticModel;
 
 use crate::db::AsyncDoctorDb;
-use crate::sitepkgs::FollowTarget;
+use crate::sitepkgs::{FollowTarget, PackageMetaMemo};
 
 use super::collector::CallCollector;
 use super::constants::collect_module_constants;
@@ -32,6 +32,7 @@ pub(crate) fn extract_files(
         complete: true,
         ..ProjectFacts::default()
     };
+    let mut package_meta = PackageMetaMemo::new();
     let program = db.program();
 
     // Open + parse all first-party files first.
@@ -149,6 +150,7 @@ pub(crate) fn extract_files(
             property_defs: &property_defs,
             task_targets: &mut task_targets,
             follow_targets: &mut follow_targets,
+            package_meta: &mut package_meta,
             module_constants: &module_constants,
             current_fn: None,
             current_param_names: Vec::new(),
@@ -193,6 +195,7 @@ pub(crate) fn extract_files(
         &mut def_map,
         &mut qual_map,
         &mut follow_targets,
+        &mut package_meta,
         cache_dir,
         follow_budget,
     );
