@@ -8,15 +8,10 @@ use std::io::Write;
 
 use async_doctor_core::{Candidate, EntryLabel, Finding, Report};
 
+#[derive(Default)]
 pub struct TextOptions {
     /// When true, print every finding with its full chain (JSON-parity volume).
     pub expand: bool,
-}
-
-impl Default for TextOptions {
-    fn default() -> Self {
-        Self { expand: false }
-    }
 }
 
 pub fn write_report(report: &Report, opts: TextOptions) -> anyhow::Result<()> {
