@@ -29,7 +29,9 @@ use serde::{Deserialize, Serialize};
 /// recorded separately; search paths append after src_roots (skip root dupes).
 /// v8: outside editables are follow-only (not first-party entries); unresolved
 /// imports bounded to first-party head misses + one third-party aggregate.
-pub const CACHE_SCHEMA_VERSION: u32 = 8;
+/// v9: relative imports that exist on disk (esp. when scan root is the package)
+/// are not recorded as unresolved-import.
+pub const CACHE_SCHEMA_VERSION: u32 = 9;
 
 /// Tool version embedded in the cache path (from this crate's Cargo.toml).
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -413,7 +415,7 @@ mod tests {
 
     #[test]
     fn stale_schema_cache_is_not_reused() {
-        // v4–v7 must not load under v8.
+        // v4–v8 must not load under v9.
         let dir =
             std::env::temp_dir().join(format!("async-doctor-cache-stale-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -422,7 +424,7 @@ mod tests {
         let mut cache = PackageCache::new("demo", "1.0.0");
         assert_eq!(cache.schema_version, CACHE_SCHEMA_VERSION);
         assert!(cache.is_compatible());
-        for stale in [3u32, 4u32, 5u32, 6u32, 7u32] {
+        for stale in [3u32, 4u32, 5u32, 6u32, 7u32, 8u32] {
             cache.schema_version = stale;
             assert!(
                 !cache.is_compatible(),
@@ -434,7 +436,7 @@ mod tests {
         cache.schema_version = CACHE_SCHEMA_VERSION;
         save_package_cache(&root, &cache, "fpstale").unwrap();
         let path = package_cache_path(&root, "demo", "1.0.0", "fpstale");
-        for stale in [3u32, 4u32, 5u32, 6u32, 7u32] {
+        for stale in [3u32, 4u32, 5u32, 6u32, 7u32, 8u32] {
             let mut spoofed: serde_json::Value =
                 serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
             spoofed["schema_version"] = serde_json::json!(stale);
@@ -446,7 +448,7 @@ mod tests {
         }
 
         // Legacy directory layouts must also miss.
-        for stale in [3u32, 4u32, 5u32, 6u32, 7u32] {
+        for stale in [3u32, 4u32, 5u32, 6u32, 7u32, 8u32] {
             let stale_dir = root
                 .join(format!("v{stale}"))
                 .join(sanitize(TOOL_VERSION))
