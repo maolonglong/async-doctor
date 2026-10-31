@@ -152,6 +152,10 @@ pub struct CallEdge {
     /// Positional arguments that resolve to external qualnames (offload targets
     /// that are typed third-party/stdlib callables rather than project defs).
     pub positional_externals: Vec<Option<String>>,
+    /// For positional callable args: root constructed client class when known
+    /// (`openai.AzureOpenAI` for `client.chat.completions.create` on an Azure client).
+    /// Used so twin advice prefers `AsyncAzureOpenAI` over the shared resources path.
+    pub positional_constructed_receivers: Vec<Option<String>>,
     /// Keyword arguments that resolve to project functions (`fn=block`, including
     /// `partial` / bound methods). Cheap call-context for higher-order kwargs.
     pub keyword_callables: Vec<(String, FunctionId)>,
@@ -176,6 +180,9 @@ pub struct CallEdge {
     /// when the previous hop’s caller is this function (the call site that
     /// passed `block`). Cheap call-context sensitivity without cloning graphs.
     pub context_from_caller: Option<FunctionId>,
+    /// Root constructed client class for an attribute callee
+    /// (`AzureOpenAI` for `AzureOpenAI().chat.completions.create(...)`).
+    pub constructed_receiver: Option<String>,
 }
 
 /// Parameter-controlled branch guarding a call site.

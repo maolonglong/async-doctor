@@ -287,6 +287,95 @@ fn advice_azure_openai_suggests_async_azure() {
 }
 
 #[test]
+fn advice_azure_resources_path_uses_constructed_receiver() {
+    // Real AzureOpenAI clients resolve create() on shared openai.resources.*;
+    // twin advice must still name AsyncAzureOpenAI from the constructed class.
+    let dir = temp_project(&[(
+        "app.py",
+        concat!(
+            "import asyncio\n",
+            "from openai import AzureOpenAI\n",
+            "\n",
+            "client = AzureOpenAI()\n",
+            "\n",
+            "async def handler():\n",
+            "    await asyncio.to_thread(client.chat.completions.create, model='m', messages=[])\n",
+        ),
+    )]);
+    let sp = dir
+        .join(".venv")
+        .join("lib")
+        .join("python3.12")
+        .join("site-packages");
+    std::fs::create_dir_all(sp.join("openai").join("resources").join("chat")).unwrap();
+    std::fs::write(
+        dir.join(".venv").join("pyvenv.cfg"),
+        "home = /usr\ninclude-system-site-packages = false\nversion = 3.12.3\n",
+    )
+    .unwrap();
+    std::fs::write(
+        sp.join("openai").join("resources").join("chat").join("completions.py"),
+        "class Completions:\n    def create(self, *a, **k): pass\nclass AsyncCompletions:\n    async def create(self, *a, **k): pass\n",
+    )
+    .unwrap();
+    std::fs::write(
+        sp.join("openai")
+            .join("resources")
+            .join("chat")
+            .join("__init__.py"),
+        "from .completions import Completions, AsyncCompletions\n",
+    )
+    .unwrap();
+    std::fs::write(sp.join("openai").join("resources").join("__init__.py"), "").unwrap();
+    std::fs::write(
+        sp.join("openai").join("__init__.py"),
+        concat!(
+            "from .resources.chat.completions import Completions as _Completions\n",
+            "class AzureOpenAI:\n",
+            "    class chat:\n",
+            "        completions = _Completions()\n",
+            "class AsyncAzureOpenAI:\n",
+            "    class chat:\n",
+            "        completions = _Completions()\n",
+            "class OpenAI:\n",
+            "    class chat:\n",
+            "        completions = _Completions()\n",
+            "class AsyncOpenAI:\n",
+            "    class chat:\n",
+            "        completions = _Completions()\n",
+        ),
+    )
+    .unwrap();
+    std::fs::create_dir_all(sp.join("openai-1.30.0.dist-info")).unwrap();
+    std::fs::write(
+        sp.join("openai-1.30.0.dist-info").join("METADATA"),
+        "Name: openai\nVersion: 1.30.0\n",
+    )
+    .unwrap();
+    let report = scan_path(&dir).unwrap();
+    let hints: Vec<_> = report
+        .advice
+        .iter()
+        .map(|a| (&a.entry.name, &a.fix.hint))
+        .collect();
+    assert!(
+        report
+            .advice
+            .iter()
+            .any(|a| { a.entry.name == "handler" && a.fix.hint.contains("AsyncAzureOpenAI") }),
+        "resources path must still hint AsyncAzureOpenAI: {hints:?}"
+    );
+    assert!(
+        !report.advice.iter().any(|a| {
+            a.entry.name == "handler"
+                && a.fix.hint.contains("AsyncOpenAI")
+                && !a.fix.hint.contains("AsyncAzureOpenAI")
+        }),
+        "must not prefer bare AsyncOpenAI over AsyncAzureOpenAI: {hints:?}"
+    );
+}
+
+#[test]
 fn advice_twin_not_installed_skips() {
     let dir = clone_fixture("advice_twin_missing");
     let report = scan_path(&dir).unwrap();
@@ -415,6 +504,66 @@ fn nested_event_loop_guarded_dropped() {
             .iter()
             .all(|c| c.rule != "nested-event-loop"),
         "loop-state guarded nested run must not be a candidate: {:?}",
+        report.candidates
+    );
+}
+
+#[test]
+fn nested_event_loop_ternary_idle_helper_dropped() {
+    // litellm chat_stream_round_billing: ternary + idle-loop helper, then
+    // `if idle_reading_loop is not None: run_until_complete(...)`.
+    let dir = temp_project(&[(
+        "app.py",
+        concat!(
+            "import asyncio\n",
+            "\n",
+            "def is_event_loop_running() -> bool:\n",
+            "    try:\n",
+            "        asyncio.get_running_loop()\n",
+            "    except RuntimeError:\n",
+            "        return False\n",
+            "    return True\n",
+            "\n",
+            "class Billing:\n",
+            "    def __init__(self):\n",
+            "        self._reading_loop = asyncio.new_event_loop()\n",
+            "\n",
+            "    def _idle_reading_loop(self):\n",
+            "        loop = self._reading_loop\n",
+            "        return (\n",
+            "            loop\n",
+            "            if loop is not None and not loop.is_closed() and not loop.is_running()\n",
+            "            else None\n",
+            "        )\n",
+            "\n",
+            "    def _log_through_the_release(self, logged):\n",
+            "        idle_reading_loop = (\n",
+            "            None if is_event_loop_running() else self._idle_reading_loop()\n",
+            "        )\n",
+            "        if idle_reading_loop is not None:\n",
+            "            idle_reading_loop.run_until_complete(logged)\n",
+            "            return\n",
+            "        return None\n",
+            "\n",
+            "async def handler():\n",
+            "    Billing()._log_through_the_release(asyncio.sleep(0))\n",
+        ),
+    )]);
+    let report = scan_path(&dir).unwrap();
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|f| f.rule != "nested-event-loop"),
+        "ternary + idle-loop helper must drop nested-event-loop: {:?}",
+        report.findings
+    );
+    assert!(
+        report
+            .candidates
+            .iter()
+            .all(|c| c.rule != "nested-event-loop"),
+        "ternary + idle-loop helper must not be a candidate: {:?}",
         report.candidates
     );
 }

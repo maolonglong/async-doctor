@@ -4,6 +4,7 @@ use ruff_python_ast::visitor::{Visitor, walk_expr, walk_stmt};
 use ruff_python_ast::{Expr, Stmt};
 
 use super::CallCollector;
+use super::loop_guards::function_body_returns_idle_loop;
 use crate::extract::ctx::scope_qualname;
 
 impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
@@ -20,6 +21,11 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 let prev_params = std::mem::take(&mut self.current_param_names);
                 let prev_lambdas = std::mem::take(&mut self.local_lambdas);
                 let prev_genexprs = std::mem::take(&mut self.local_genexprs);
+                let prev_idle_locals = std::mem::take(&mut self.idle_loop_locals);
+                if function_body_returns_idle_loop(&func.body) {
+                    self.idle_loop_helpers
+                        .insert(func.name.as_str().to_string());
+                }
                 self.current_fn = fid;
                 self.current_param_names = fid
                     .map(|id| self.facts.function(id).param_names.clone())
@@ -31,6 +37,7 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 self.current_param_names = prev_params;
                 self.local_lambdas = prev_lambdas;
                 self.local_genexprs = prev_genexprs;
+                self.idle_loop_locals = prev_idle_locals;
             }
             Stmt::ClassDef(class) => {
                 self.class_stack.push(class.name.as_str().to_string());

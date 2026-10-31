@@ -97,6 +97,7 @@ pub(super) fn materialize_higher_order(facts: &ProjectFacts) -> ProjectFacts {
                 positional_literals: vec![],
                 positional_callables: vec![],
                 positional_externals: vec![],
+                positional_constructed_receivers: vec![],
                 keyword_callables: vec![],
                 param_guard: param_edge.param_guard,
                 is_awaited: param_edge.is_awaited,
@@ -104,6 +105,7 @@ pub(super) fn materialize_higher_order(facts: &ProjectFacts) -> ProjectFacts {
                 is_eager_offload_arg: param_edge.is_eager_offload_arg,
                 // Only valid when reverse-walk came from this call site.
                 context_from_caller: Some(out.edges[ei].caller),
+                constructed_receiver: None,
             });
         }
     }

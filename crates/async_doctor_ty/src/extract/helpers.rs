@@ -250,6 +250,23 @@ pub(crate) fn is_in_memory_buffer_type(ty: &str) -> bool {
 }
 
 /// Qualnames whose first argument is a path/file and may be an in-memory buffer instead.
+/// Normalize a typed client root used to override shared `*.resources.*` twin keys.
+///
+/// Real `AzureOpenAI().chat.completions.create` resolves to
+/// `openai.resources...Completions.create` (AsyncOpenAI twin); the constructed
+/// class lets advice prefer `AsyncAzureOpenAI` instead.
+pub(crate) fn twin_relevant_client_root(ty: &str) -> Option<String> {
+    if ty.contains("Async") {
+        return None;
+    }
+    match ty.rsplit('.').next().unwrap_or(ty) {
+        "AzureOpenAI" => Some("openai.AzureOpenAI".to_string()),
+        "OpenAI" => Some("openai.OpenAI".to_string()),
+        "Anthropic" => Some("anthropic.Anthropic".to_string()),
+        _ => None,
+    }
+}
+
 pub(crate) fn is_path_or_file_open_qual(q: &str) -> bool {
     matches!(
         q,

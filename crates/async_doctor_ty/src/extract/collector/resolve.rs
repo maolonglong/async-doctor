@@ -94,12 +94,16 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             positional_literals: std::mem::take(&mut self.pending_literals),
             positional_callables: std::mem::take(&mut self.pending_callables),
             positional_externals: std::mem::take(&mut self.pending_externals),
+            positional_constructed_receivers: std::mem::take(
+                &mut self.pending_constructed_receivers,
+            ),
             keyword_callables: std::mem::take(&mut self.pending_keyword_callables),
             param_guard: self.active_param_guard,
             is_awaited: self.pending_is_awaited,
             callee_is_coroutine,
             is_eager_offload_arg: self.in_eager_offload_arg,
             context_from_caller: None,
+            constructed_receiver: self.pending_constructed_receiver.take(),
         });
         self.pending_is_awaited = false;
     }
