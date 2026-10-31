@@ -14,7 +14,7 @@ use async_doctor_core::{AnalyzeOptions, Report};
 use serde::{Deserialize, Serialize};
 
 use crate::cache::{
-    BUILD_ID, CACHE_SCHEMA_VERSION, TOOL_VERSION, package_content_fingerprint, sanitize_component,
+    CACHE_SCHEMA_VERSION, TOOL_VERSION, build_id, package_content_fingerprint, sanitize_component,
 };
 
 /// On-disk envelope so stale schema/tool versions never deserialize as a hit.
@@ -93,7 +93,8 @@ pub fn scan_input_fingerprint(
     let mut blob = String::with_capacity(64 * 1024);
     blob.push_str("scan-cache-v4\n");
     blob.push_str(&format!(
-        "schema:{CACHE_SCHEMA_VERSION}\ntool:{TOOL_VERSION}\nbuild:{BUILD_ID}\n"
+        "schema:{CACHE_SCHEMA_VERSION}\ntool:{TOOL_VERSION}\nbuild:{}\n",
+        build_id()
     ));
     blob.push_str(&format!(
         "include_non_production:{}\nshow_unresolved:{}\nfollow_budget:{follow_budget}\n",
