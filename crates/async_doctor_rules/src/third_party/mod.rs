@@ -8,8 +8,9 @@ mod sinks;
 #[cfg(test)]
 mod tests;
 
-use async_doctor_core::{SinkHit, SinkTable};
+use async_doctor_core::{AsyncTwinHit, SinkHit, SinkTable};
 
+use crate::async_twin::async_twin_for_sink;
 use crate::{BuiltinSink, StdlibSinkTable};
 
 use families::{is_redis_pipeline_buffering, match_family};
@@ -39,6 +40,10 @@ impl SinkTable for BuiltinSinkTable {
             return Some(hit);
         }
         self.stdlib.lookup(qualname)
+    }
+
+    fn async_twin(&self, qualname: &str) -> Option<AsyncTwinHit> {
+        async_twin_for_sink(qualname)
     }
 }
 

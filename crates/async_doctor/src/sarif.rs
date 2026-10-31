@@ -60,6 +60,35 @@ pub fn report_to_sarif(report: &Report, scan_root: &Path, src_root: &Path) -> Va
             }));
         }
     }
+    for a in &report.advice {
+        if seen_rules.insert(a.rule.clone()) {
+            let (name, short) = rule_display(&a.rule);
+            let help_uri = if a.docs_url.is_empty() {
+                format!(
+                    "https://github.com/maolonglong/async-doctor/blob/main/docs/rules.md{}",
+                    a.docs_anchor
+                )
+            } else {
+                a.docs_url.clone()
+            };
+            rules.push(json!({
+                "id": a.rule,
+                "name": name,
+                "shortDescription": { "text": short },
+                "fullDescription": {
+                    "text": a.fix.hint,
+                },
+                "helpUri": help_uri,
+                "help": {
+                    "text": format!(
+                        "{}\n\nExplain: async-doctor explain {}\n{}",
+                        a.fix.hint, a.rule, a.why
+                    )
+                },
+                "defaultConfiguration": { "level": "note" },
+            }));
+        }
+    }
 
     let mut results = Vec::new();
     for f in &report.findings {
@@ -112,6 +141,65 @@ pub fn report_to_sarif(report: &Report, scan_root: &Path, src_root: &Path) -> Va
             "locations": [physical_location(&prim_loc, prim_line, &f.fix.hint)],
             "partialFingerprints": {
                 "asyncDoctor/findingId": f.id,
+            },
+            "codeFlows": [{
+                "threadFlows": [{
+                    "locations": thread_locations,
+                }]
+            }],
+        }));
+    }
+
+    for a in &report.advice {
+        let entry_loc = in_repo_location(&a.entry.file, false, &scan_root, &src_root, &site_roots);
+        let (prim_file, prim_line, prim_third) = a
+            .chain
+            .first()
+            .map(|s| (s.file.as_str(), s.line, s.third_party))
+            .unwrap_or((a.entry.file.as_str(), a.entry.line, false));
+        let Some(prim_loc) =
+            in_repo_location(prim_file, prim_third, &scan_root, &src_root, &site_roots)
+        else {
+            continue;
+        };
+
+        let mut thread_locations = Vec::new();
+        if let Some(entry_loc) = entry_loc {
+            thread_locations.push(json!({
+                "location": physical_location(
+                    &entry_loc,
+                    a.entry.line,
+                    &format!(
+                        "async entry `{}` ({})",
+                        a.entry.name,
+                        a.entry.label.as_str()
+                    ),
+                )
+            }));
+        }
+        for step in &a.chain {
+            if let Some(loc) = step_location(step, &scan_root, &src_root, &site_roots) {
+                thread_locations.push(json!({
+                    "location": physical_location(&loc, step.line, &step.text)
+                }));
+            }
+        }
+
+        results.push(json!({
+            "ruleId": a.rule,
+            "level": "note",
+            "message": {
+                "text": format!(
+                    "[advice:{}] ({}) reachable from {} — {}",
+                    a.rule,
+                    a.category.as_str(),
+                    a.entry.name,
+                    a.fix.hint
+                )
+            },
+            "locations": [physical_location(&prim_loc, prim_line, &a.fix.hint)],
+            "partialFingerprints": {
+                "asyncDoctor/findingId": a.id,
             },
             "codeFlows": [{
                 "threadFlows": [{

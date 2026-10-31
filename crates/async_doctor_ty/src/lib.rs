@@ -8,6 +8,7 @@ mod scan_cache;
 mod search_paths;
 mod sitepkgs;
 mod timing;
+mod twin_resolve;
 
 pub use db::AsyncDoctorDb;
 pub use extract::{discover_python_files, extract_path, extract_path_with_cache};

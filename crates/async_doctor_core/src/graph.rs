@@ -77,6 +77,8 @@ pub enum OffloadKind {
     AnyioToThread,
     StarletteThreadpool,
     ThreadPoolExecutor,
+    /// `asgiref.sync.sync_to_async` — Django/ASGI sync→async offload boundary.
+    AsgirefSyncToAsync,
 }
 
 impl OffloadKind {
@@ -87,6 +89,18 @@ impl OffloadKind {
             Self::AnyioToThread => "anyio.to_thread.run_sync",
             Self::StarletteThreadpool => "starlette.concurrency.run_in_threadpool",
             Self::ThreadPoolExecutor => "concurrent.futures.ThreadPoolExecutor",
+            Self::AsgirefSyncToAsync => "asgiref.sync.sync_to_async",
+        }
+    }
+
+    /// Positional argument index of the offloaded callable.
+    ///
+    /// `run_in_executor(executor, func, …)` takes `func` at index 1; every other
+    /// built-in offload takes it at index 0.
+    pub fn callable_arg_index(self) -> usize {
+        match self {
+            Self::RunInExecutor => 1,
+            _ => 0,
         }
     }
 }
@@ -127,6 +141,9 @@ pub struct CallEdge {
     pub positional_literals: Vec<Option<LiteralArg>>,
     /// Positional arguments that resolve to project/followed functions (higher-order).
     pub positional_callables: Vec<Option<FunctionId>>,
+    /// Positional arguments that resolve to external qualnames (offload targets
+    /// that are typed third-party/stdlib callables rather than project defs).
+    pub positional_externals: Vec<Option<String>>,
     /// Keyword arguments that resolve to project functions (`fn=block`, including
     /// `partial` / bound methods). Cheap call-context for higher-order kwargs.
     pub keyword_callables: Vec<(String, FunctionId)>,
@@ -251,6 +268,10 @@ pub struct ProjectFacts {
     /// Unique top-level third-party module names that failed to import
     /// (sorted). Surfaced as a single aggregated note, never per-import.
     pub unresolved_third_party_modules: Vec<String>,
+    /// Twin / dependency symbols that resolve in the scanned venv (populated
+    /// during extract). Used by advice rules that require the async twin (and
+    /// its `needs`) to be installed.
+    pub resolved_symbols: std::collections::BTreeSet<String>,
 }
 
 impl ProjectFacts {

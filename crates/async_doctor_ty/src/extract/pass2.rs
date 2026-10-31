@@ -202,6 +202,7 @@ fn extract_one_file(
         occurrence_counter: HashMap::new(),
         pending_literals: Vec::new(),
         pending_callables: Vec::new(),
+        pending_externals: Vec::new(),
         pending_keyword_callables: Vec::new(),
         narrowed_locals: HashMap::new(),
         local_lambdas: HashMap::new(),

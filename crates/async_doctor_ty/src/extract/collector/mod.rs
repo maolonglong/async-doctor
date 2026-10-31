@@ -73,6 +73,8 @@ pub(crate) struct CallCollector<'a, 'db> {
     pub(super) pending_literals: Vec<Option<LiteralArg>>,
     /// Positional callables for the call currently being recorded.
     pub(super) pending_callables: Vec<Option<FunctionId>>,
+    /// Positional external qualnames for the call currently being recorded.
+    pub(super) pending_externals: Vec<Option<String>>,
     /// Keyword callables for the call currently being recorded.
     pub(super) pending_keyword_callables: Vec<(String, FunctionId)>,
     /// Cheap type narrowing from `isinstance` / `is not None` in the current branch.

@@ -1,7 +1,9 @@
 //! Blocking propagation: mark sinks, BFS reverse call graph, grade findings.
 
+mod advice;
 mod grade;
 mod higher_order;
+mod special;
 #[cfg(test)]
 mod tests;
 
@@ -16,12 +18,14 @@ use crate::report::{
     Candidate, ChainStep, Entry, Finding, Fix, Report, SCHEMA_VERSION, UnresolvedPattern,
 };
 
+use advice::collect_offload_twin_advice;
 use grade::{
     ParamVerdict, async_twin_hint, chain_step_for, evaluate_param_guards, label_rank,
     merge_file_io_findings, reconcile_conditions, resolution_for_edge,
     shortest_paths_to_async_entries, unresolved_pattern,
 };
 use higher_order::materialize_higher_order;
+use special::{collect_offload_coroutine_findings, nested_event_loop_hit};
 
 #[derive(Debug, Clone, Copy)]
 pub struct SinkHit {
@@ -38,9 +42,30 @@ pub struct SinkHit {
     pub consume_only: bool,
 }
 
-/// Lookup sinks and optional async-twin hint text for a resolved external name.
+/// Confidence for a structured async-twin table entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TwinConfidence {
+    High,
+}
+
+/// High-confidence async twin for a sync sink (advice tier).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AsyncTwinHit {
+    pub symbol: &'static str,
+    pub same_package: bool,
+    pub needs: &'static [&'static str],
+    pub confidence: TwinConfidence,
+}
+
+/// Lookup sinks and optional structured async twins for a resolved external name.
 pub trait SinkTable {
     fn lookup(&self, qualname: &str) -> Option<SinkHit>;
+
+    /// Structured high-confidence twin for `offload-has-async-twin` advice.
+    /// Default: none (tests / minimal tables).
+    fn async_twin(&self, _qualname: &str) -> Option<AsyncTwinHit> {
+        None
+    }
 }
 
 /// Analyze with default options (skip non-production entries; hide unresolved).
@@ -62,6 +87,7 @@ pub fn analyze_with_options(
         complete: facts.complete,
         findings: Vec::new(),
         candidates: Vec::new(),
+        advice: Vec::new(),
         skipped: facts.skipped.clone(),
         omitted_non_production_entries: 0,
         hidden_unresolved_candidates: 0,
@@ -116,6 +142,16 @@ pub fn analyze_with_options(
                 // even when its External qualname looks like a sync sink family
                 // (subclass / wrapper of AsyncClient, etc.).
                 if edge.callee_is_coroutine == Some(true) {
+                    continue;
+                }
+                // Nested event-loop APIs are correctness errors when reachable
+                // from async without an offload cut (reverse BFS already skips
+                // offload edges, so behind-offload sites stay silent).
+                if let Some(hit) = nested_event_loop_hit(qualname) {
+                    seeds.push(Seed {
+                        edge_idx: idx,
+                        kind: SeedKind::Sink(hit),
+                    });
                     continue;
                 }
                 // Name-based async-counterpart rules are only a fallback when
@@ -498,7 +534,20 @@ pub fn analyze_with_options(
 
     report.omitted_non_production_entries = omitted_entries.len() as u32;
     report.findings = merge_file_io_findings(raw_findings);
+    // offload-coroutine findings (error) — additive; never suppresses existing rules.
+    report.findings.extend(collect_offload_coroutine_findings(
+        facts,
+        &reverse,
+        options.include_non_production,
+        &mut emitted,
+    ));
     report.candidates = raw_candidates;
+    report.advice = collect_offload_twin_advice(
+        facts,
+        sinks,
+        &reverse,
+        options.include_non_production,
+    );
 
     if options.show_unresolved {
         let mut summary: Vec<UnresolvedPattern> = unresolved_agg
@@ -540,6 +589,20 @@ pub fn analyze_with_options(
             b.entry.line,
             b.id.as_str(),
         ))
+    });
+    report.advice.sort_by(|a, b| {
+        (
+            a.fix.fix_group_id.as_str(),
+            a.entry.file.as_str(),
+            a.entry.line,
+            a.id.as_str(),
+        )
+            .cmp(&(
+                b.fix.fix_group_id.as_str(),
+                b.entry.file.as_str(),
+                b.entry.line,
+                b.id.as_str(),
+            ))
     });
 
     report.refresh_sink_sites();
