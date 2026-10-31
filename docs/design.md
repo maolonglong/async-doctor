@@ -249,7 +249,7 @@ langgraph, home-assistant core, plus small fixtures per rule/pattern.
   Sync `with Engine.begin()` records the context `Call` as `WithEnter`.
   Consume-only sinks (`redis.PubSub.listen`) fire only when iterated.
 - **Per-`(package, version, content-fingerprint)` disk cache** under the user
-  cache dir (`v5/{tool}/{pkg}/{version}-{fingerprint}.json`), keyed by
+  cache dir (`v6/{tool}/{pkg}/{version}-{fingerprint}.json`), keyed by
   External qualname. Package meta lookups are memoized in a **per-scan**
   `PackageMetaMemo` (no process-global state). Callers (and tests) may inject
   the cache root explicitly — do not rely on mutating process-wide

@@ -1,0 +1,9 @@
+[project]
+name = "m3c-nested-pkg-editable"
+version = "0.0.0"
+
+[tool.ruff]
+src = ["libcore"]
+
+[tool.ty.environment]
+extra-paths = ["libcore"]
