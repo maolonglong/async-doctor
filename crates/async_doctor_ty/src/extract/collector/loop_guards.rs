@@ -32,6 +32,98 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             _ => false,
         }
     }
+
+    /// Running-loop test, excluding caller-supplied params named like `is_async`.
+    pub(super) fn is_running_loop_test_ctx(&self, test: &Expr) -> bool {
+        if let Expr::Name(n) = test
+            && is_async_flag_name(n.id.as_str())
+        {
+            return !self
+                .current_param_names
+                .iter()
+                .any(|p| p.as_str() == n.id.as_str());
+        }
+        is_running_loop_call(test)
+    }
+
+    pub(super) fn is_no_running_loop_test_ctx(&self, test: &Expr) -> bool {
+        match test {
+            Expr::UnaryOp(u) if matches!(u.op, ast::UnaryOp::Not) => {
+                self.is_running_loop_test_ctx(u.operand.as_ref())
+            }
+            Expr::Compare(cmp) if cmp.ops.len() == 1 && cmp.operands.len() == 2 => {
+                // `if main_loop is None:` on a caller-supplied param is not a
+                // proven "no running event loop" guard (fixture n2 / n7).
+                if compare_is_none_of_param(cmp, &self.current_param_names) {
+                    return false;
+                }
+                is_no_running_loop_test(test)
+            }
+            _ => is_no_running_loop_test(test),
+        }
+    }
+}
+
+fn compare_is_none_of_param(cmp: &ast::ExprCompare, params: &[String]) -> bool {
+    let op = cmp.ops[0];
+    if !matches!(op, ast::CmpOp::Is | ast::CmpOp::Eq) {
+        return false;
+    }
+    let left = &cmp.operands[0];
+    let right = &cmp.operands[1];
+    let name = match (left, right) {
+        (Expr::Name(n), Expr::NoneLiteral(_)) | (Expr::NoneLiteral(_), Expr::Name(n)) => {
+            n.id.as_str()
+        }
+        _ => return false,
+    };
+    params.iter().any(|p| p.as_str() == name)
+}
+
+/// Pre-scan a suite so helpers defined later in the same class/module still
+/// count when assigned earlier (`_log` before `_idle_reading_loop`).
+pub(crate) fn collect_idle_loop_helpers(body: &[Stmt], out: &mut HashSet<String>) {
+    for stmt in body {
+        match stmt {
+            Stmt::FunctionDef(func) => {
+                if function_body_returns_idle_loop(&func.body) {
+                    out.insert(func.name.as_str().to_string());
+                }
+                collect_idle_loop_helpers(&func.body, out);
+            }
+            Stmt::ClassDef(class) => collect_idle_loop_helpers(&class.body, out),
+            Stmt::If(if_stmt) => {
+                collect_idle_loop_helpers(&if_stmt.body, out);
+                for clause in &if_stmt.elif_else_clauses {
+                    collect_idle_loop_helpers(&clause.body, out);
+                }
+            }
+            Stmt::With(w) => collect_idle_loop_helpers(&w.body, out),
+            Stmt::For(f) => {
+                collect_idle_loop_helpers(&f.body, out);
+                collect_idle_loop_helpers(&f.orelse, out);
+            }
+            Stmt::While(w) => {
+                collect_idle_loop_helpers(&w.body, out);
+                collect_idle_loop_helpers(&w.orelse, out);
+            }
+            Stmt::Try(t) => {
+                collect_idle_loop_helpers(&t.body, out);
+                for h in &t.handlers {
+                    let ast::ExceptHandler::ExceptHandler(eh) = h;
+                    collect_idle_loop_helpers(&eh.body, out);
+                }
+                collect_idle_loop_helpers(&t.orelse, out);
+                collect_idle_loop_helpers(&t.finalbody, out);
+            }
+            Stmt::Match(m) => {
+                for case in &m.cases {
+                    collect_idle_loop_helpers(&case.body, out);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// `if loop is None` / `not loop.is_running()` / `not is_event_loop_running()` / …
@@ -127,9 +219,9 @@ pub(crate) fn value_is_idle_loop_binding(
 fn idle_loop_ternary(ifexp: &ast::ExprIf, idle_loop_helpers: &HashSet<String>) -> bool {
     let body_none = matches!(ifexp.body.as_ref(), Expr::NoneLiteral(_));
     let orelse_none = matches!(ifexp.orelse.as_ref(), Expr::NoneLiteral(_));
-    let body_idle = is_idle_loop_obtainer(ifexp.body.as_ref(), idle_loop_helpers);
-    let orelse_idle = is_idle_loop_obtainer(ifexp.orelse.as_ref(), idle_loop_helpers);
-    // `None if is_event_loop_running() else <idle_loop>`
+    let body_idle = is_idle_loop_obtainer_in_ternary(ifexp.body.as_ref(), idle_loop_helpers);
+    let orelse_idle = is_idle_loop_obtainer_in_ternary(ifexp.orelse.as_ref(), idle_loop_helpers);
+    // `None if is_event_loop_running() else <idle_loop | new_event_loop()>`
     if is_running_loop_test(ifexp.test.as_ref()) && body_none && orelse_idle {
         return true;
     }
@@ -141,13 +233,43 @@ fn idle_loop_ternary(ifexp: &ast::ExprIf, idle_loop_helpers: &HashSet<String>) -
 }
 
 fn is_idle_loop_obtainer(expr: &Expr, idle_loop_helpers: &HashSet<String>) -> bool {
+    // Bare `loop = asyncio.new_event_loop()` is not a loop-state guard by itself
+    // (fixture n / n4). `new_event_loop` only counts inside a loop-state ternary.
     match expr {
         Expr::Call(call) => {
             let Some(name) = callee_attr_or_name(call.func.as_ref()) else {
                 return false;
             };
-            idle_loop_helper_name(name) || idle_loop_helpers.contains(name)
+            // Project helpers: require a body that actually returns an idle/new
+            // loop — a name like `create_idle_loop` alone is not enough.
+            idle_loop_helpers.contains(name)
         }
+        _ => false,
+    }
+}
+
+fn is_idle_loop_obtainer_in_ternary(expr: &Expr, idle_loop_helpers: &HashSet<String>) -> bool {
+    if is_new_event_loop_call(expr) {
+        return true;
+    }
+    match expr {
+        Expr::Call(call) => {
+            let Some(name) = callee_attr_or_name(call.func.as_ref()) else {
+                return false;
+            };
+            idle_loop_helpers.contains(name)
+        }
+        _ => false,
+    }
+}
+
+fn is_new_event_loop_call(expr: &Expr) -> bool {
+    let Expr::Call(call) = expr else {
+        return false;
+    };
+    match call.func.as_ref() {
+        Expr::Name(n) => n.id.as_str() == "new_event_loop",
+        Expr::Attribute(attr) => attr.attr.as_str() == "new_event_loop",
         _ => false,
     }
 }
@@ -160,21 +282,13 @@ fn callee_attr_or_name(func: &Expr) -> Option<&str> {
     }
 }
 
-fn idle_loop_helper_name(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    (lower.contains("idle") && lower.contains("loop"))
-        || lower.contains("non_running_loop")
-        || lower.contains("get_idle_loop")
-        || (lower.ends_with("_loop") && lower.contains("idle"))
-}
-
-/// Heuristic: function body returns a loop only when `not loop.is_running()` (etc.).
+/// Heuristic: function body returns a loop only when idle / not running / new.
 pub(crate) fn function_body_returns_idle_loop(body: &[Stmt]) -> bool {
     for stmt in body {
         match stmt {
             Stmt::Return(ret) => {
                 if let Some(value) = ret.value.as_ref()
-                    && expr_filters_idle_loop(value)
+                    && (is_new_event_loop_call(value) || expr_filters_idle_loop(value))
                 {
                     return true;
                 }
@@ -226,6 +340,10 @@ fn expr_filters_idle_loop(expr: &Expr) -> bool {
             let orelse_none = matches!(ifexp.orelse.as_ref(), Expr::NoneLiteral(_));
             if !orelse_none {
                 return false;
+            }
+            if is_new_event_loop_call(ifexp.body.as_ref()) {
+                return is_no_running_loop_test(ifexp.test.as_ref())
+                    || test_requires_loop_not_running(ifexp.test.as_ref());
             }
             test_requires_loop_not_running(ifexp.test.as_ref())
                 || (looks_like_loop_name(ifexp.body.as_ref())

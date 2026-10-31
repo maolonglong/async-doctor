@@ -3,7 +3,7 @@
 mod calls;
 mod control_flow;
 mod imports;
-mod loop_guards;
+pub(crate) mod loop_guards;
 mod redis_mro;
 mod resolve;
 mod visit;

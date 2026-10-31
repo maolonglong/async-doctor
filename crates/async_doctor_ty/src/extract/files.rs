@@ -341,6 +341,10 @@ fn run_pass2_batched(
                 idle_loop_locals: HashSet::new(),
                 idle_loop_helpers: HashSet::new(),
             };
+            super::collector::loop_guards::collect_idle_loop_helpers(
+                parsed.suite(),
+                &mut visitor.idle_loop_helpers,
+            );
             for stmt in parsed.suite() {
                 visitor.visit_stmt(stmt);
             }

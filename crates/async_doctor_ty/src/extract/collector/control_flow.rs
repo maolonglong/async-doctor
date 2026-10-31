@@ -9,7 +9,7 @@ use ty_python_core::definition::DefinitionKind;
 use ty_python_semantic::{ImportAliasResolution, definitions_for_name};
 
 use super::CallCollector;
-use super::loop_guards::{except_is_runtime_error, is_no_running_loop_test, is_running_loop_test};
+use super::loop_guards::except_is_runtime_error;
 use crate::extract::constants::{
     EarlyExitKind, ModuleConst, body_always_exits, is_cache_hit_test, is_cache_miss_test,
     param_guard_from_test,
@@ -204,9 +204,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         let always = self.is_always_truthy(&if_stmt.test);
         let cache_miss = !dead && is_cache_miss_test(&if_stmt.test);
         let no_loop = !dead
-            && (is_no_running_loop_test(&if_stmt.test)
+            && (self.is_no_running_loop_test_ctx(&if_stmt.test)
                 || self.is_idle_loop_local_guard(&if_stmt.test));
-        let mut saw_running_loop_test = !dead && is_running_loop_test(&if_stmt.test);
+        let mut saw_running_loop_test = !dead && self.is_running_loop_test_ctx(&if_stmt.test);
         let param_guard = if dead {
             None
         } else {
@@ -277,10 +277,10 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 // a no-loop guard (that branch still has a loop).
                 saw_running_loop_test
             } else if let Some(t) = clause.test.as_ref() {
-                if is_running_loop_test(t) {
+                if self.is_running_loop_test_ctx(t) {
                     saw_running_loop_test = true;
                 }
-                is_no_running_loop_test(t) || self.is_idle_loop_local_guard(t)
+                self.is_no_running_loop_test_ctx(t) || self.is_idle_loop_local_guard(t)
             } else {
                 false
             };
