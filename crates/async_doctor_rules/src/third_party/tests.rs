@@ -95,3 +95,14 @@ fn module_path_async_client_is_counterpart() {
     assert!(!crate::is_async_counterpart("httpx.Client.get"));
     assert!(!crate::is_async_counterpart("httpx._client.Client.get"));
 }
+
+#[test]
+fn azure_openai_is_blocking_sink() {
+    let t = BuiltinSinkTable::new();
+    let hit = t.lookup("openai.lib.azure.AzureOpenAI.complete");
+    assert!(hit.is_some(), "azure method must be a sink");
+    let twin = t
+        .async_twin("openai.lib.azure.AzureOpenAI.complete")
+        .unwrap();
+    assert_eq!(twin.symbol, "openai.AsyncAzureOpenAI");
+}

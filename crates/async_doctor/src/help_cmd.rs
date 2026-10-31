@@ -9,7 +9,7 @@ use async_doctor_core::{AnalyzeOptions, EXIT_FINDINGS, EXIT_OK, Report};
 use async_doctor_rules::rule_doc;
 
 use crate::paths::{normalize_path, paths_equal};
-use crate::text::{write_candidate, write_finding};
+use crate::text::{write_advice, write_candidate, write_finding};
 
 pub fn run_explain(rule: &str) -> anyhow::Result<ExitCode> {
     let Some(doc) = rule_doc(rule) else {
@@ -41,10 +41,10 @@ pub fn run_why(
 
     let matches = findings_at(&report, &file, line);
     let mut out = std::io::stdout().lock();
-    if matches.findings.is_empty() && matches.candidates.is_empty() {
+    if matches.findings.is_empty() && matches.candidates.is_empty() && matches.advice.is_empty() {
         writeln!(
             out,
-            "No findings or candidates touch {file}:{line} under {}.",
+            "No findings, candidates, or advice touch {file}:{line} under {}.",
             path.display()
         )?;
         writeln!(
@@ -56,9 +56,10 @@ pub fn run_why(
 
     writeln!(
         out,
-        "Evidence for {file}:{line} ({} finding(s), {} candidate(s)):\n",
+        "Evidence for {file}:{line} ({} finding(s), {} candidate(s), {} advice):\n",
         matches.findings.len(),
-        matches.candidates.len()
+        matches.candidates.len(),
+        matches.advice.len()
     )?;
     for f in &matches.findings {
         write_finding(&mut out, f)?;
@@ -92,6 +93,22 @@ pub fn run_why(
             writeln!(out, "{}", doc.explain_text())?;
         }
     }
+    for a in &matches.advice {
+        write_advice(&mut out, a)?;
+        writeln!(out, "Hop resolution:")?;
+        for (i, step) in a.chain.iter().enumerate() {
+            let res = if step.resolution.is_empty() {
+                "(unspecified)"
+            } else {
+                step.resolution.as_str()
+            };
+            writeln!(out, "  {}. {}:{} — {res}", i + 1, step.file, step.line)?;
+        }
+        writeln!(out)?;
+        if let Some(doc) = rule_doc(&a.rule) {
+            writeln!(out, "{}", doc.explain_text())?;
+        }
+    }
 
     let code = if matches.findings.is_empty() {
         EXIT_OK
@@ -104,6 +121,7 @@ pub fn run_why(
 struct SiteMatches {
     findings: Vec<async_doctor_core::Finding>,
     candidates: Vec<async_doctor_core::Candidate>,
+    advice: Vec<async_doctor_core::Advice>,
 }
 
 fn findings_at(report: &Report, file: &str, line: u32) -> SiteMatches {
@@ -130,9 +148,20 @@ fn findings_at(report: &Report, file: &str, line: u32) -> SiteMatches {
         })
         .cloned()
         .collect();
+    let advice = report
+        .advice
+        .iter()
+        .filter(|a| {
+            touch(&a.entry.file, a.entry.line)
+                || a.chain.iter().any(|s| touch(&s.file, s.line))
+                || why_matches(&a.why, &file_norm, line)
+        })
+        .cloned()
+        .collect();
     SiteMatches {
         findings,
         candidates,
+        advice,
     }
 }
 

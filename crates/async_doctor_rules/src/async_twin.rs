@@ -11,7 +11,6 @@ use async_doctor_core::{AsyncTwinHit, TwinConfidence};
 pub struct AsyncTwinEntry {
     /// Human/symbol form, e.g. `httpx.AsyncClient`.
     pub symbol: &'static str,
-    pub same_package: bool,
     /// Extra modules that must resolve in the scanned venv (e.g. `aiohttp`).
     pub needs: &'static [&'static str],
     pub confidence: TwinConfidence,
@@ -31,14 +30,23 @@ enum TwinMatcher {
 pub static ASYNC_TWINS: &[AsyncTwinEntry] = &[
     AsyncTwinEntry {
         symbol: "httpx.AsyncClient",
-        same_package: true,
         needs: &[],
         confidence: TwinConfidence::High,
-        matchers: &[TwinMatcher::Prefix("httpx.Client.")],
+        matchers: &[
+            TwinMatcher::Prefix("httpx.Client."),
+            TwinMatcher::Exact("httpx.get"),
+            TwinMatcher::Exact("httpx.post"),
+            TwinMatcher::Exact("httpx.put"),
+            TwinMatcher::Exact("httpx.patch"),
+            TwinMatcher::Exact("httpx.delete"),
+            TwinMatcher::Exact("httpx.head"),
+            TwinMatcher::Exact("httpx.options"),
+            TwinMatcher::Exact("httpx.request"),
+            TwinMatcher::Exact("httpx.stream"),
+        ],
     },
     AsyncTwinEntry {
         symbol: "redis.asyncio",
-        same_package: true,
         needs: &[],
         confidence: TwinConfidence::High,
         matchers: &[
@@ -52,9 +60,20 @@ pub static ASYNC_TWINS: &[AsyncTwinEntry] = &[
             TwinMatcher::Prefix("redis.client.Pipeline.execute"),
         ],
     },
+    // Prefer Azure twin before the generic OpenAI resources prefix.
+    AsyncTwinEntry {
+        symbol: "openai.AsyncAzureOpenAI",
+        needs: &[],
+        confidence: TwinConfidence::High,
+        matchers: &[
+            TwinMatcher::Prefix("openai.AzureOpenAI."),
+            TwinMatcher::Exact("openai.AzureOpenAI"),
+            TwinMatcher::Prefix("openai.lib.azure.AzureOpenAI."),
+            TwinMatcher::Exact("openai.lib.azure.AzureOpenAI"),
+        ],
+    },
     AsyncTwinEntry {
         symbol: "openai.AsyncOpenAI",
-        same_package: true,
         needs: &[],
         confidence: TwinConfidence::High,
         matchers: &[
@@ -65,7 +84,6 @@ pub static ASYNC_TWINS: &[AsyncTwinEntry] = &[
     },
     AsyncTwinEntry {
         symbol: "anthropic.AsyncAnthropic",
-        same_package: true,
         needs: &[],
         confidence: TwinConfidence::High,
         matchers: &[
@@ -76,7 +94,6 @@ pub static ASYNC_TWINS: &[AsyncTwinEntry] = &[
     },
     AsyncTwinEntry {
         symbol: "elasticsearch.AsyncElasticsearch",
-        same_package: true,
         needs: &["aiohttp"],
         confidence: TwinConfidence::High,
         matchers: &[
@@ -86,7 +103,6 @@ pub static ASYNC_TWINS: &[AsyncTwinEntry] = &[
     },
     AsyncTwinEntry {
         symbol: "psycopg.AsyncConnection",
-        same_package: true,
         needs: &[],
         confidence: TwinConfidence::High,
         matchers: &[
@@ -120,17 +136,17 @@ pub fn async_twin_for_sink(qualname: &str) -> Option<AsyncTwinHit> {
         return None;
     }
     for twin in ASYNC_TWINS {
-        if twin.confidence != TwinConfidence::High || !twin.same_package {
+        if twin.confidence != TwinConfidence::High {
             continue;
         }
         if twin.matchers.iter().any(|m| m.matches(qualname)) {
-            // openai.resources may include Async* paths — skip those.
+            // openai.resources / anthropic.resources may include Async* paths.
             if qualname.contains("Async") {
                 return None;
             }
             return Some(AsyncTwinHit {
                 symbol: twin.symbol,
-                same_package: twin.same_package,
+                same_package: true,
                 needs: twin.needs,
                 confidence: twin.confidence,
             });
@@ -223,6 +239,18 @@ mod tests {
         let t = async_twin_for_sink("httpx.Client.get").unwrap();
         assert_eq!(t.symbol, "httpx.AsyncClient");
         assert!(t.needs.is_empty());
+    }
+
+    #[test]
+    fn httpx_module_get_maps_to_async_client() {
+        let t = async_twin_for_sink("httpx.get").unwrap();
+        assert_eq!(t.symbol, "httpx.AsyncClient");
+    }
+
+    #[test]
+    fn azure_openai_maps_to_async_azure() {
+        let t = async_twin_for_sink("openai.AzureOpenAI.chat.completions.create").unwrap();
+        assert_eq!(t.symbol, "openai.AsyncAzureOpenAI");
     }
 
     #[test]

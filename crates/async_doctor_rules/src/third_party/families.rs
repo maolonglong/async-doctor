@@ -212,6 +212,15 @@ pub(super) fn match_family(q: &str) -> Option<SinkHit> {
     // `openai.lib._parsing._completions.*`, private `_Stream` helpers, or
     // anything that merely contains the substring "completions".
     if !q.contains("Async")
+        && (q.starts_with("openai.AzureOpenAI.") || q.starts_with("openai.lib.azure.AzureOpenAI."))
+    {
+        return Some(hit(&BuiltinSink::finding(
+            "openai.AzureOpenAI",
+            RULE_BLOCKING_HTTP,
+            "Use `openai.AsyncAzureOpenAI` instead of sync `AzureOpenAI`.",
+        )));
+    }
+    if !q.contains("Async")
         && (q.starts_with("openai.OpenAI.")
             || (q.starts_with("openai.resources.")
                 && !q.split('.').any(|seg| seg.starts_with('_'))))

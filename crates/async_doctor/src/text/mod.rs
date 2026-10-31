@@ -172,19 +172,9 @@ fn write_advice_section(out: &mut impl Write, report: &Report, expand: bool) -> 
     writeln!(out)?;
     if expand || total <= TOP_ADVICE_SHOWN {
         writeln!(out, "Advice ({total}) — does not fail the run:\n")?;
-        // Group by fix_group_id (offload site + twin).
-        let mut groups: std::collections::BTreeMap<&str, Vec<&Advice>> =
-            std::collections::BTreeMap::new();
+        // Already sorted by offload site file/line in the report.
         for a in &report.advice {
-            groups
-                .entry(a.fix.fix_group_id.as_str())
-                .or_default()
-                .push(a);
-        }
-        for (_gid, items) in groups {
-            for a in items {
-                write_advice(out, a)?;
-            }
+            write_advice(out, a)?;
         }
     } else {
         writeln!(
