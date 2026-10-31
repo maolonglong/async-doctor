@@ -631,12 +631,14 @@ pub(crate) fn materialize_cached_functions(
                 // First-party offload externals are not stored in the package
                 // cache; third-party offload targets are rare for advice.
                 positional_externals: vec![],
+                positional_constructed_receivers: vec![],
                 keyword_callables,
                 param_guard,
                 is_awaited: edge.is_awaited,
                 callee_is_coroutine: edge.callee_is_coroutine,
                 is_eager_offload_arg: false,
                 context_from_caller: None,
+                constructed_receiver: None,
             });
         }
     }

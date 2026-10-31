@@ -90,12 +90,14 @@ fn edge(
         positional_literals: vec![],
         positional_callables: vec![],
         positional_externals: vec![],
+        positional_constructed_receivers: vec![],
         keyword_callables: vec![],
         param_guard: None,
         is_awaited: false,
         callee_is_coroutine: None,
         is_eager_offload_arg: false,
         context_from_caller: None,
+        constructed_receiver: None,
     }
 }
 

@@ -3,6 +3,7 @@
 mod calls;
 mod control_flow;
 mod imports;
+mod loop_guards;
 mod redis_mro;
 mod resolve;
 mod visit;
@@ -79,6 +80,10 @@ pub(crate) struct CallCollector<'a, 'db> {
     pub(super) pending_callables: Vec<Option<FunctionId>>,
     /// Positional external qualnames for the call currently being recorded.
     pub(super) pending_externals: Vec<Option<String>>,
+    /// Positional constructed client roots for the call currently being recorded.
+    pub(super) pending_constructed_receivers: Vec<Option<String>>,
+    /// Constructed client root for the callee attribute chain (when recording).
+    pub(super) pending_constructed_receiver: Option<String>,
     /// Keyword callables for the call currently being recorded.
     pub(super) pending_keyword_callables: Vec<(String, FunctionId)>,
     /// Cheap type narrowing from `isinstance` / `is not None` in the current branch.
@@ -87,6 +92,11 @@ pub(crate) struct CallCollector<'a, 'db> {
     pub(super) local_lambdas: HashMap<String, &'a ast::ExprLambda>,
     /// Local name → generator expression assigned in the current function.
     pub(super) local_genexprs: HashMap<String, &'a ast::ExprGenerator>,
+    /// Locals bound only when no event loop is running (ternary / idle-loop helper).
+    /// `if name is not None:` (or truthy `if name:`) is a [`ConditionTag::NoRunningLoopGuard`].
+    pub(super) idle_loop_locals: HashSet<String>,
+    /// Function/method names whose body returns a loop only when it is not running.
+    pub(super) idle_loop_helpers: HashSet<String>,
 }
 
 impl<'a, 'db> CallCollector<'a, 'db> {

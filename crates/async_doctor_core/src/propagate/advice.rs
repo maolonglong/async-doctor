@@ -152,7 +152,7 @@ pub(super) fn collect_offload_twin_advice(
 
             let target_desc = match &target {
                 OffloadTarget::Project(fid) => facts.function(*fid).full_qualname(),
-                OffloadTarget::External(q) => q.clone(),
+                OffloadTarget::External { qualname, .. } => qualname.clone(),
             };
             let hint = format!(
                 "Offloaded work reaches sync APIs with async twins (`{twin_label}`). \
@@ -207,7 +207,13 @@ pub(super) fn collect_offload_twin_advice(
 #[derive(Debug, Clone)]
 enum OffloadTarget {
     Project(FunctionId),
-    External(String),
+    External {
+        qualname: String,
+        /// Root constructed client (`openai.AzureOpenAI`) when the offloaded
+        /// callable is a bound method on a typed client — overrides shared
+        /// `openai.resources.*` → AsyncOpenAI twin selection.
+        constructed_receiver: Option<String>,
+    },
 }
 
 fn resolve_offload_target(
@@ -224,7 +230,14 @@ fn resolve_offload_target(
         return Some(OffloadTarget::Project(fid));
     }
     if let Some(Some(q)) = edge.positional_externals.get(idx) {
-        return Some(OffloadTarget::External(q.clone()));
+        let constructed_receiver = edge
+            .positional_constructed_receivers
+            .get(idx)
+            .and_then(|r| r.clone());
+        return Some(OffloadTarget::External {
+            qualname: q.clone(),
+            constructed_receiver,
+        });
     }
     None
 }
@@ -354,12 +367,15 @@ fn unconditional_sinks_from_target(
     let mut seen_sinks = HashSet::new();
 
     match target {
-        OffloadTarget::External(q) => {
+        OffloadTarget::External {
+            qualname: q,
+            constructed_receiver,
+        } => {
             // Direct offload of a typed external callable — that callable is the sink.
             if sinks.lookup(q).is_none() {
                 return Some(vec![]);
             }
-            let twin_key = twin_lookup_key(sinks, q)?;
+            let twin_key = twin_lookup_key(sinks, q, constructed_receiver.as_deref())?;
             sink_quals.push(twin_key);
             return Some(sink_quals);
         }
@@ -410,7 +426,11 @@ fn unconditional_sinks_from_target(
                             {
                                 continue;
                             }
-                            let twin_key = twin_lookup_key(sinks, qualname)?;
+                            let twin_key = twin_lookup_key(
+                                sinks,
+                                qualname,
+                                edge.constructed_receiver.as_deref(),
+                            )?;
                             if seen_sinks.insert(twin_key.clone()) {
                                 sink_quals.push(twin_key);
                             }
@@ -431,7 +451,20 @@ fn unconditional_sinks_from_target(
 
 /// Qualname to use for twin lookup: prefer the concrete call site, else the
 /// canonical sink qualname from the sink table.
-fn twin_lookup_key(sinks: &dyn SinkTable, qualname: &str) -> Option<String> {
+///
+/// When `constructed_receiver` is a known sync client (e.g. `openai.AzureOpenAI`),
+/// prefer that over a shared `openai.resources.*` key so the hint names the
+/// matching async client (`AsyncAzureOpenAI`).
+fn twin_lookup_key(
+    sinks: &dyn SinkTable,
+    qualname: &str,
+    constructed_receiver: Option<&str>,
+) -> Option<String> {
+    if let Some(recv) = constructed_receiver
+        && sinks.async_twin(recv).is_some()
+    {
+        return Some(recv.to_string());
+    }
     if sinks.async_twin(qualname).is_some() {
         return Some(qualname.to_string());
     }

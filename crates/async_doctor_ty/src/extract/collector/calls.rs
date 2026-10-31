@@ -13,7 +13,7 @@ use crate::extract::ctx::DefKey;
 use crate::extract::helpers::{
     is_asyncio_redis_type, is_callable_ref, is_getattr_call, is_in_memory_buffer_type,
     is_partial_call, is_path_or_file_open_qual, is_task_spawn_callee, normalize_asyncio_redis_type,
-    qualname_from_definition, route_handler_arg,
+    qualname_from_definition, route_handler_arg, twin_relevant_client_root,
 };
 
 impl<'a, 'db> CallCollector<'a, 'db> {
@@ -222,6 +222,12 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         self.pending_literals = call.arguments.args.iter().map(literal_arg).collect();
         self.pending_callables = self.resolve_positional_callables(call.arguments.args.as_ref());
         self.pending_externals = self.resolve_positional_externals(call.arguments.args.as_ref());
+        self.pending_constructed_receivers =
+            self.resolve_positional_constructed_receivers(call.arguments.args.as_ref());
+        self.pending_constructed_receiver = match call.func.as_ref() {
+            Expr::Attribute(_) => self.constructed_root_receiver(call.func.as_ref()),
+            _ => None,
+        };
         self.pending_keyword_callables = self.resolve_keyword_callables(call);
 
         // In-memory buffer args to open/Image.open: not blocking file IO — skip
@@ -230,10 +236,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             && is_path_or_file_open_qual(&q)
             && self.first_arg_is_in_memory_buffer(call)
         {
-            self.pending_literals.clear();
-            self.pending_callables.clear();
-            self.pending_externals.clear();
-            self.pending_keyword_callables.clear();
+            self.clear_pending_call_args();
             self.pending_is_awaited = false;
             return;
         }
@@ -265,10 +268,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 true,
                 target_coro,
             );
-            self.pending_literals.clear();
-            self.pending_callables.clear();
-            self.pending_externals.clear();
-            self.pending_keyword_callables.clear();
+            self.clear_pending_call_args();
             return;
         }
 
@@ -284,10 +284,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 false,
                 None,
             );
-            self.pending_literals.clear();
-            self.pending_callables.clear();
-            self.pending_externals.clear();
-            self.pending_keyword_callables.clear();
+            self.clear_pending_call_args();
             return;
         }
 
@@ -308,9 +305,15 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             let is_coro = self.resolve_callee_is_coroutine(&call.func);
             self.push_edge(caller, callee, call.range(), kind, false, is_coro);
         }
+        self.clear_pending_call_args();
+    }
+
+    fn clear_pending_call_args(&mut self) {
         self.pending_literals.clear();
         self.pending_callables.clear();
         self.pending_externals.clear();
+        self.pending_constructed_receivers.clear();
+        self.pending_constructed_receiver = None;
         self.pending_keyword_callables.clear();
     }
 
@@ -394,13 +397,20 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         match value {
             Expr::Lambda(lam) => {
                 self.local_lambdas.insert(name.to_string(), lam);
+                self.idle_loop_locals.remove(name);
             }
             Expr::Generator(gexpr) => {
                 self.local_genexprs.insert(name.to_string(), gexpr);
+                self.idle_loop_locals.remove(name);
             }
-            _ => {
+            other => {
                 self.local_lambdas.remove(name);
                 self.local_genexprs.remove(name);
+                if super::loop_guards::value_is_idle_loop_binding(other, &self.idle_loop_helpers) {
+                    self.idle_loop_locals.insert(name.to_string());
+                } else {
+                    self.idle_loop_locals.remove(name);
+                }
             }
         }
     }
@@ -441,9 +451,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         if !is_prop {
             return;
         }
-        self.pending_literals.clear();
-        self.pending_callables.clear();
-        self.pending_keyword_callables.clear();
+        self.clear_pending_call_args();
         self.push_edge(
             caller,
             CalleeRef::Project(fid),
@@ -531,6 +539,41 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             out.push(self.external_qualname(target));
         }
         out
+    }
+
+    /// Root constructed client class for positional callable args (Azure vs OpenAI).
+    pub(crate) fn resolve_positional_constructed_receivers(
+        &mut self,
+        args: &'a [Expr],
+    ) -> Vec<Option<String>> {
+        let mut out = Vec::with_capacity(args.len());
+        for arg in args {
+            let target = match arg {
+                Expr::Call(c) if is_partial_call(c) => c.arguments.args.first(),
+                Expr::Lambda(_) => {
+                    out.push(None);
+                    continue;
+                }
+                other => Some(other),
+            };
+            let Some(target) = target else {
+                out.push(None);
+                continue;
+            };
+            out.push(self.constructed_root_receiver(target));
+        }
+        out
+    }
+
+    /// Walk an attribute chain to the root expression and name its constructed type
+    /// when it is a known sync client that affects async-twin selection.
+    pub(crate) fn constructed_root_receiver(&mut self, expr: &Expr) -> Option<String> {
+        let mut cur = expr;
+        while let Expr::Attribute(attr) = cur {
+            cur = attr.value.as_ref();
+        }
+        let ty = self.type_instance_qualname(cur)?;
+        twin_relevant_client_root(&ty)
     }
 
     pub(crate) fn ensure_lambda_fact(&mut self, lam: &'a ast::ExprLambda) -> FunctionId {

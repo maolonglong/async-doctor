@@ -332,10 +332,14 @@ fn run_pass2_batched(
                 pending_literals: Vec::new(),
                 pending_callables: Vec::new(),
                 pending_externals: Vec::new(),
+                pending_constructed_receivers: Vec::new(),
+                pending_constructed_receiver: None,
                 pending_keyword_callables: Vec::new(),
                 narrowed_locals: HashMap::new(),
                 local_lambdas: HashMap::new(),
                 local_genexprs: HashMap::new(),
+                idle_loop_locals: HashSet::new(),
+                idle_loop_helpers: HashSet::new(),
             };
             for stmt in parsed.suite() {
                 visitor.visit_stmt(stmt);
