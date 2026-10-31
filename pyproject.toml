@@ -33,6 +33,8 @@ manifest-path = "crates/async_doctor/Cargo.toml"
 module-name = "async_doctor"
 # Console script name matches [[bin]] name = "async-doctor" in the crate.
 strip = true
+# rust-toolchain.toml is required so sdist builds pin the same toolchain.
+include = [{ path = "rust-toolchain.toml", format = "sdist" }]
 exclude = [
     "fixtures/**",
     "target/**",
