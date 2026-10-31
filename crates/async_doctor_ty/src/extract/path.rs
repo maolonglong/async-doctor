@@ -19,6 +19,19 @@ pub(crate) fn absolute_utf8(path: &Path) -> anyhow::Result<SystemPathBuf> {
 /// Shared by extraction and CLI suppressions so ignored trees are never
 /// walked twice with divergent rules.
 pub fn discover_python_files(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    discover_first_party_files(root, &["py"])
+}
+
+/// Discover first-party `.pyi` stub files under `root` with the same ignore
+/// rules as [`discover_python_files`].
+///
+/// Used by the whole-scan fingerprint so stub add/edit/delete invalidates
+/// warm hits (ty resolves against stubs even when extract walks only `.py`).
+pub fn discover_python_stub_files(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    discover_first_party_files(root, &["pyi"])
+}
+
+fn discover_first_party_files(root: &Path, extensions: &[&str]) -> anyhow::Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
     let walker = WalkBuilder::new(root)
         .hidden(false)
@@ -33,7 +46,8 @@ pub fn discover_python_files(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
             continue;
         }
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("py") {
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if !extensions.contains(&ext) {
             continue;
         }
         if path.components().any(|c| {

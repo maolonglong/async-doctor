@@ -11,7 +11,8 @@ use async_doctor_rules::BuiltinSinkTable;
 
 use crate::cache::effective_cache_root;
 use crate::extract::{
-    DEFAULT_FOLLOW_BUDGET, absolute_utf8, discover_python_files, extract_path_with_cache_budget,
+    DEFAULT_FOLLOW_BUDGET, absolute_utf8, discover_python_files, discover_python_stub_files,
+    extract_path_with_cache_budget,
 };
 use crate::scan_cache::{load_scan_report, save_scan_report, scan_input_fingerprint};
 use crate::timing::PhaseTiming;
@@ -67,7 +68,7 @@ fn scan_path_with_options_cache_budget(
 
     let t_disc = Instant::now();
     let abs = absolute_utf8(path)?;
-    let (fingerprint_root, files) = if abs.as_std_path().is_file() {
+    let (fingerprint_root, fingerprint_files) = if abs.as_std_path().is_file() {
         let parent = abs
             .parent()
             .map(|p| p.as_std_path().to_path_buf())
@@ -75,13 +76,23 @@ fn scan_path_with_options_cache_budget(
         (parent, vec![abs.as_std_path().to_path_buf()])
     } else {
         let root = abs.as_std_path().to_path_buf();
-        let files = discover_python_files(&root)?;
+        // Fingerprint .py and .pyi (same ignore rules). Extract still walks
+        // only .py; stubs affect ty resolution via the filesystem.
+        let mut files = discover_python_files(&root)?;
+        files.extend(discover_python_stub_files(&root)?);
+        files.sort();
+        files.dedup();
         (root, files)
     };
     timing.span("discovery", t_disc);
 
     let t_fp = Instant::now();
-    let fingerprint = scan_input_fingerprint(&fingerprint_root, &files, options, follow_budget);
+    let fingerprint = scan_input_fingerprint(
+        &fingerprint_root,
+        &fingerprint_files,
+        options,
+        follow_budget,
+    );
     timing.span("fingerprint", t_fp);
 
     let t_load = Instant::now();

@@ -3,7 +3,7 @@
 use std::fs;
 use std::time::Instant;
 
-use super::helpers::{clone_fixture, fresh_cache_dir, report_json_with_cache};
+use super::helpers::{clone_fixture, fresh_cache_dir, report_json_with_cache, temp_project};
 
 #[test]
 fn scan_cache_warm_is_much_faster_when_unchanged() {
@@ -75,4 +75,83 @@ fn scan_cache_invalidates_when_source_changes() {
         after, after2,
         "after invalidation, warm must match the new cold"
     );
+}
+
+#[test]
+fn scan_cache_invalidates_on_pyi_add_and_edit() {
+    // First-party .pyi stubs affect ty resolution but are not extract inputs;
+    // the whole-scan fingerprint must still include them.
+    let dir = temp_project(&[
+        ("pkg/__init__.py", ""),
+        (
+            "pkg/util.py",
+            concat!(
+                "class Client:\n",
+                "    def block(self):\n",
+                "        import time\n",
+                "        time.sleep(1)\n",
+                "\n",
+                "def get_client():\n",
+                "    return Client()\n",
+            ),
+        ),
+        (
+            "app.py",
+            "from pkg.util import get_client\n\nasync def handler():\n    get_client().block()\n",
+        ),
+    ]);
+    let cache = fresh_cache_dir("scan-pyi");
+
+    let cold0 = report_json_with_cache(&dir, &cache);
+    let warm0 = report_json_with_cache(&dir, &cache);
+    assert_eq!(cold0, warm0);
+    let cold0_r: async_doctor_core::Report = serde_json::from_str(&cold0).unwrap();
+    assert!(
+        cold0_r
+            .findings
+            .iter()
+            .any(|f| f.rule == "blocking-sleep" && f.entry.name == "handler"),
+        "baseline should report blocking-sleep: {:?}",
+        cold0_r
+            .findings
+            .iter()
+            .map(|f| (&f.rule, &f.entry.name))
+            .collect::<Vec<_>>()
+    );
+
+    // Add a stub that types get_client() as object so .block() no longer
+    // resolves to Client.block → cold findings change; warm must miss.
+    fs::write(
+        dir.join("pkg/util.pyi"),
+        "def get_client() -> object: ...\n",
+    )
+    .unwrap();
+
+    let after_add = report_json_with_cache(&dir, &cache);
+    assert_ne!(
+        after_add, cold0,
+        "adding util.pyi must change graded output (else warm could falsely hit)"
+    );
+    let cache_cold = fresh_cache_dir("scan-pyi-cold-add");
+    let fresh_cold_add = report_json_with_cache(&dir, &cache_cold);
+    assert_eq!(
+        after_add, fresh_cold_add,
+        "after adding .pyi, cached scan must equal a fresh cold"
+    );
+    let _ = fs::remove_dir_all(&cache_cold);
+
+    // Edit the stub again — must miss and match cold.
+    fs::write(
+        dir.join("pkg/util.pyi"),
+        "from typing import Any\ndef get_client() -> Any: ...\n",
+    )
+    .unwrap();
+    let after_edit = report_json_with_cache(&dir, &cache);
+    let cache_cold2 = fresh_cache_dir("scan-pyi-cold-edit");
+    let fresh_cold_edit = report_json_with_cache(&dir, &cache_cold2);
+    assert_eq!(
+        after_edit, fresh_cold_edit,
+        "after editing .pyi, cached scan must equal a fresh cold"
+    );
+    let _ = fs::remove_dir_all(&cache_cold2);
 }

@@ -78,11 +78,12 @@ pub fn save_scan_report(root: &Path, fingerprint: &str, report: &Report) -> std:
 /// Fingerprint everything that can change graded output for a scan root.
 ///
 /// Includes schema/tool versions, analyze options, follow budget, every
-/// first-party `.py` `(rel, content-hash)`, the active venv identity, and
-/// each installed dist-info content fingerprint.
+/// first-party `.py` / `.pyi` `(rel, content-hash)`, the active venv identity,
+/// and each installed dist-info content fingerprint.
 ///
 /// Content hashes (not whole-second mtime+size) so same-second same-size edits
-/// still invalidate the whole-scan cache.
+/// still invalidate the whole-scan cache. Callers must pass stub paths as well
+/// as `.py` sources — ty resolves against first-party `.pyi` files.
 pub fn scan_input_fingerprint(
     scan_root: &Path,
     first_party_files: &[PathBuf],
@@ -90,7 +91,7 @@ pub fn scan_input_fingerprint(
     follow_budget: usize,
 ) -> String {
     let mut blob = String::with_capacity(64 * 1024);
-    blob.push_str("scan-cache-v2\n");
+    blob.push_str("scan-cache-v3\n");
     blob.push_str(&format!(
         "schema:{CACHE_SCHEMA_VERSION}\ntool:{TOOL_VERSION}\n"
     ));
@@ -116,7 +117,9 @@ pub fn scan_input_fingerprint(
     }
     files.sort();
     for (rel, fp) in &files {
-        blob.push_str(&format!("py:{rel}:{fp}\n"));
+        // Tag by extension so .py vs .pyi with the same stem cannot collide.
+        let tag = if rel.ends_with(".pyi") { "pyi" } else { "py" };
+        blob.push_str(&format!("{tag}:{rel}:{fp}\n"));
     }
 
     // Config files that affect search-path discovery (extraPaths / editables).
@@ -328,6 +331,18 @@ mod tests {
             fp_a, fp_b,
             "same-size edit must change content-hash fingerprint"
         );
+
+        // First-party .pyi stubs must participate in the fingerprint.
+        let stub = project.join("a.pyi");
+        fs::write(&py, "async def h():\n    pass\n").unwrap();
+        let fp_no_stub = scan_input_fingerprint(&project, &files, AnalyzeOptions::default(), 256);
+        fs::write(&stub, "def h() -> None: ...\n").unwrap();
+        let with_stub = vec![py.clone(), stub.clone()];
+        let fp_stub = scan_input_fingerprint(&project, &with_stub, AnalyzeOptions::default(), 256);
+        assert_ne!(fp_no_stub, fp_stub, "adding .pyi must change fingerprint");
+        fs::write(&stub, "def h() -> int: ...\n").unwrap();
+        let fp_stub2 = scan_input_fingerprint(&project, &with_stub, AnalyzeOptions::default(), 256);
+        assert_ne!(fp_stub, fp_stub2, "editing .pyi must change fingerprint");
 
         let _ = fs::remove_dir_all(&dir);
     }
