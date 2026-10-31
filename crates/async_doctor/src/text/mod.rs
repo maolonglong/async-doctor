@@ -1,9 +1,10 @@
 //! Compact human-readable report output.
 //!
-//! Default view groups by fix group (rule + sink) with counts and one
-//! representative chain. Pass `--expand` to list every finding.
+//! Default view groups by fix group with sink sites ranked by entry count.
+//! Pass `--expand` to list every finding.
 
-use std::collections::{BTreeMap, BTreeSet};
+mod grouped;
+
 use std::io::Write;
 
 use async_doctor_core::{Candidate, EntryLabel, Finding, Report};
@@ -45,7 +46,7 @@ pub fn write_report(report: &Report, opts: TextOptions) -> anyhow::Result<()> {
             write_finding(&mut out, finding)?;
         }
     } else {
-        write_grouped(&mut out, &report.findings)?;
+        grouped::write_grouped(&mut out, &report.findings)?;
     }
 
     if !report.candidates.is_empty() {
@@ -114,91 +115,7 @@ pub fn write_report(report: &Report, opts: TextOptions) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn write_grouped(out: &mut impl Write, findings: &[Finding]) -> anyhow::Result<()> {
-    let mut groups: BTreeMap<&str, Vec<&Finding>> = BTreeMap::new();
-    let mut entries: BTreeSet<(&str, &str)> = BTreeSet::new();
-    let mut sinks: BTreeSet<&str> = BTreeSet::new();
-    for f in findings {
-        groups
-            .entry(f.fix.fix_group_id.as_str())
-            .or_default()
-            .push(f);
-        entries.insert((f.entry.file.as_str(), f.entry.name.as_str()));
-        if let Some(sink) = sink_label(f) {
-            sinks.insert(sink);
-        }
-    }
-
-    writeln!(
-        out,
-        "Found {} finding(s) · {} entries · {} sinks · {} fix groups\n",
-        findings.len(),
-        entries.len(),
-        sinks.len(),
-        groups.len()
-    )?;
-    writeln!(
-        out,
-        "(grouped by fix; pass --expand to list every finding)\n"
-    )?;
-
-    // Largest groups first for signal.
-    let mut ordered: Vec<_> = groups.into_iter().collect();
-    ordered.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(b.0)));
-
-    for (_gid, group) in ordered {
-        let rep = group[0];
-        let mut group_entries: BTreeSet<&str> = BTreeSet::new();
-        let mut group_sinks: BTreeSet<&str> = BTreeSet::new();
-        for f in &group {
-            group_entries.insert(f.entry.name.as_str());
-            if let Some(s) = sink_label(f) {
-                group_sinks.insert(s);
-            }
-        }
-        let sink_summary = group_sinks.iter().copied().take(3).collect::<Vec<_>>();
-        let sink_extra = group_sinks.len().saturating_sub(sink_summary.len());
-        let sink_text = if sink_extra > 0 {
-            format!("{} (+{sink_extra} more)", sink_summary.join(", "))
-        } else {
-            sink_summary.join(", ")
-        };
-
-        writeln!(
-            out,
-            "[{}] {} — {} finding(s), {} entr{}",
-            rep.rule,
-            if sink_text.is_empty() {
-                "sink".to_string()
-            } else {
-                sink_text
-            },
-            group.len(),
-            group_entries.len(),
-            if group_entries.len() == 1 { "y" } else { "ies" }
-        )?;
-        writeln!(out, "  fix: {}", rep.fix.hint)?;
-        if !rep.docs_url.is_empty() {
-            writeln!(out, "  docs: {}", rep.docs_url)?;
-        } else if !rep.docs_anchor.is_empty() {
-            writeln!(out, "  explain: async-doctor explain {}", rep.rule)?;
-        }
-        writeln!(out, "  example:")?;
-        write_finding_indented(out, rep, "    ")?;
-        if group.len() > 1 {
-            writeln!(
-                out,
-                "  (+{} more; pass --expand to list all)\n",
-                group.len() - 1
-            )?;
-        } else {
-            writeln!(out)?;
-        }
-    }
-    Ok(())
-}
-
-fn sink_label(f: &Finding) -> Option<&str> {
+pub(crate) fn sink_label(f: &Finding) -> Option<&str> {
     f.chain.last().map(|s| {
         let t = s.text.trim();
         t.split('(').next().unwrap_or(t).trim()
@@ -232,7 +149,7 @@ pub fn write_finding(out: &mut impl Write, finding: &Finding) -> anyhow::Result<
     Ok(())
 }
 
-fn write_finding_indented(
+pub(crate) fn write_finding_indented(
     out: &mut impl Write,
     finding: &Finding,
     indent: &str,

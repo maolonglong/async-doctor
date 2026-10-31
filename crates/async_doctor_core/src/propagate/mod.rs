@@ -67,6 +67,7 @@ pub fn analyze_with_options(
         hidden_unresolved_candidates: 0,
         unresolved_summary: Vec::new(),
         unused_suppressions: Vec::new(),
+        sink_sites: Vec::new(),
     };
 
     // BTreeMap + sorted preds so reverse-graph walk order is stable across
@@ -448,5 +449,6 @@ pub fn analyze_with_options(
         ))
     });
 
+    report.refresh_sink_sites();
     report
 }
