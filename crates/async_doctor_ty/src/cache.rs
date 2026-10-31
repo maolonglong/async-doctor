@@ -39,10 +39,17 @@ use serde::{Deserialize, Serialize};
 /// resolution (`resolved_symbols`); offload positional externals /
 /// coroutine-target facts for nested-event-loop / offload-coroutine /
 /// offload-has-async-twin.
-pub const CACHE_SCHEMA_VERSION: u32 = 12;
+/// v13: `no_running_loop_guard` condition tag; advice ignores offload-site
+/// try/if/loop gates; lambda body edges graded relative to the lambda;
+/// httpx module + Azure OpenAI twin matchers.
+pub const CACHE_SCHEMA_VERSION: u32 = 13;
 
 /// Tool version embedded in the cache path (from this crate's Cargo.toml).
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Build identity from `build.rs` (git sha or stable fallback). Used so two
+/// binaries with the same package version do not share whole-scan reports.
+pub const BUILD_ID: &str = env!("ASYNC_DOCTOR_BUILD_ID");
 
 /// One cached edge from a third-party function body (full summary).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
