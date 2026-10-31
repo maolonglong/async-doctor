@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, bail};
-use async_doctor_core::{Candidate, Finding, Report};
+use async_doctor_core::{Advice, Candidate, Finding, Report};
 
 use crate::paths::normalize_path;
 
@@ -109,6 +109,9 @@ pub fn filter_report(
         .candidates
         .retain(|c| candidate_touches(c, changed, scan_root, repo_root));
     report
+        .advice
+        .retain(|a| advice_touches(a, changed, scan_root, repo_root));
+    report
 }
 
 fn finding_touches(
@@ -131,6 +134,18 @@ fn candidate_touches(
 ) -> bool {
     path_in_changed(&c.entry.file, changed, scan_root, repo_root)
         || c.chain
+            .iter()
+            .any(|s| path_in_changed(&s.file, changed, scan_root, repo_root))
+}
+
+fn advice_touches(
+    a: &Advice,
+    changed: &HashSet<String>,
+    scan_root: &Path,
+    repo_root: &Path,
+) -> bool {
+    path_in_changed(&a.entry.file, changed, scan_root, repo_root)
+        || a.chain
             .iter()
             .any(|s| path_in_changed(&s.file, changed, scan_root, repo_root))
 }

@@ -25,6 +25,15 @@ pub(super) fn materialize_higher_order(facts: &ProjectFacts) -> ProjectFacts {
         {
             edge.is_offload_wrapper = true;
             edge.callee = CalleeRef::Offload(OffloadKind::AsyncioToThread);
+            // The wrapper itself is often `async def`; coroutine-ness for
+            // `offload-coroutine` must refer to the *callable argument*, not
+            // the wrapper. Recompute from positional callables (index 0).
+            edge.callee_is_coroutine = edge
+                .positional_callables
+                .first()
+                .copied()
+                .flatten()
+                .map(|id| out.functions[id.index()].is_async);
         }
     }
 
@@ -87,6 +96,7 @@ pub(super) fn materialize_higher_order(facts: &ProjectFacts) -> ProjectFacts {
                 is_offload_wrapper: false,
                 positional_literals: vec![],
                 positional_callables: vec![],
+                positional_externals: vec![],
                 keyword_callables: vec![],
                 param_guard: param_edge.param_guard,
                 is_awaited: param_edge.is_awaited,

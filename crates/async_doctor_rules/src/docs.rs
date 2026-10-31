@@ -141,6 +141,46 @@ by themselves.",
 - Inspect the call; add types or simplify indirection so the sink is visible.\n\
 - If it is truly sync IO, await an async API or offload with `to_thread`.",
     },
+    RuleDoc {
+        id: "offload-has-async-twin",
+        title: "Offload has an async twin (advice)",
+        summary: "Offloaded sync client work has a same-package async twin available.",
+        body: "\
+The call is already behind an offload cut, so it does not block the loop. When\n\
+every unconditionally reached sink has a high-confidence same-package async twin\n\
+installed in the scanned venv, prefer the async API to avoid the thread hop and\n\
+keep cancellation on the loop. This is advice only — it never fails the exit code.\n\
+Explicit exception to design decision #2 (twins as fix hints only): advice fires\n\
+at cut offload sites so nothing is double-reported with blocking findings.",
+        fix: "\
+- Replace the sync client with its async twin (`httpx.AsyncClient`,\n\
+  `redis.asyncio`, `AsyncOpenAI`, `AsyncAnthropic`, `AsyncElasticsearch`,\n\
+  `psycopg.AsyncConnection`) and await it directly.\n\
+- Keep the offload if the function must also run from sync-only callers.",
+    },
+    RuleDoc {
+        id: "nested-event-loop",
+        title: "Nested event loop",
+        summary: "`asyncio.run` / `run_until_complete` / `anyio.run` / `trio.run` inside async code.",
+        body: "\
+These APIs expect to own the event loop. Calling them from a running loop raises\n\
+`RuntimeError` at runtime. Offloaded (thread) calls are not reported.",
+        fix: "\
+- Await the coroutine directly instead of nesting a runner.\n\
+- Or confine a sync nested-run helper to `asyncio.to_thread` if you must.",
+    },
+    RuleDoc {
+        id: "offload-coroutine",
+        title: "Offload of async def",
+        summary: "Offload target is an `async def` — the coroutine never runs.",
+        body: "\
+`to_thread` / `run_in_executor` / similar APIs invoke a sync callable in a worker.\n\
+Passing an `async def` creates a coroutine object that is never awaited, so the\n\
+work does not execute.",
+        fix: "\
+- Await the coroutine directly from async code.\n\
+- Or pass a sync function into the offload.",
+    },
 ];
 
 /// Look up a rule by id (`blocking-sleep`) or docs anchor (`#blocking-sleep`).
@@ -174,6 +214,7 @@ mod tests {
         use crate::{
             RULE_BLOCKING_DB, RULE_BLOCKING_FILE, RULE_BLOCKING_HTTP, RULE_BLOCKING_LOCK,
             RULE_BLOCKING_SLEEP, RULE_BLOCKING_SOCKET, RULE_BLOCKING_SUBPROCESS,
+            RULE_NESTED_EVENT_LOOP, RULE_OFFLOAD_COROUTINE, RULE_OFFLOAD_HAS_ASYNC_TWIN,
         };
         for id in [
             RULE_BLOCKING_SLEEP,
@@ -183,6 +224,9 @@ mod tests {
             RULE_BLOCKING_FILE,
             RULE_BLOCKING_LOCK,
             RULE_BLOCKING_DB,
+            RULE_OFFLOAD_HAS_ASYNC_TWIN,
+            RULE_NESTED_EVENT_LOOP,
+            RULE_OFFLOAD_COROUTINE,
         ] {
             assert!(rule_doc(id).is_some(), "missing RuleDoc for {id}");
         }

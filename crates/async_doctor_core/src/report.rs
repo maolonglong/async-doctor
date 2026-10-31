@@ -155,6 +155,46 @@ pub struct Candidate {
     pub docs_url: String,
 }
 
+/// Non-blocking diagnostic tier (schemaVersion 1 additive).
+///
+/// Advice never affects [`Report::exit_code`] — same contract as candidates, but
+/// for high-confidence performance suggestions (e.g. replace an offload with an
+/// async twin) rather than uncertain findings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Advice {
+    pub id: String,
+    pub rule: String,
+    pub category: AdviceCategory,
+    pub entry: Entry,
+    pub chain: Vec<ChainStep>,
+    pub fix: Fix,
+    pub why: String,
+    /// Fragment into `docs/rules.md` (e.g. `#offload-has-async-twin`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub docs_anchor: String,
+    /// Absolute docs URL for installed binaries.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub docs_url: String,
+}
+
+/// Advice category — informational only; does not affect grading severity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdviceCategory {
+    Performance,
+    Correctness,
+}
+
+impl AdviceCategory {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Performance => "performance",
+            Self::Correctness => "correctness",
+        }
+    }
+}
+
 /// An `# async-doctor: ignore[...]` comment that matched no finding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -205,6 +245,9 @@ pub struct Report {
     pub complete: bool,
     pub findings: Vec<Finding>,
     pub candidates: Vec<Candidate>,
+    /// Non-blocking suggestions (never affect exit code). Additive in schema v1.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub advice: Vec<Advice>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<String>,
     /// Async entries omitted because they live under tests/docs/examples/… (zero-config).
@@ -239,6 +282,7 @@ impl Report {
             complete: true,
             findings: Vec::new(),
             candidates: Vec::new(),
+            advice: Vec::new(),
             skipped: Vec::new(),
             omitted_non_production_entries: 0,
             hidden_unresolved_candidates: 0,
@@ -253,7 +297,7 @@ impl Report {
         self.sink_sites = crate::sink_sites::summarize(&self.findings);
     }
 
-    /// Exit 1 when findings or unused suppressions remain; candidates ignored.
+    /// Exit 1 when findings or unused suppressions remain; candidates and advice ignored.
     pub fn exit_code(&self) -> i32 {
         if self.findings.is_empty() && self.unused_suppressions.is_empty() {
             EXIT_OK
@@ -293,5 +337,30 @@ mod tests {
                     .into(),
         });
         assert_eq!(report.exit_code(), EXIT_FINDINGS);
+    }
+
+    #[test]
+    fn exit_code_ignores_advice() {
+        let mut report = Report::empty_complete();
+        report.advice.push(Advice {
+            id: "a".into(),
+            rule: "offload-has-async-twin".into(),
+            category: AdviceCategory::Performance,
+            entry: Entry {
+                file: "a.py".into(),
+                line: 1,
+                name: "f".into(),
+                label: EntryLabel::Other,
+            },
+            chain: vec![],
+            fix: Fix {
+                hint: "use AsyncClient".into(),
+                fix_group_id: "g".into(),
+            },
+            why: "async-doctor why a.py:2 --path .".into(),
+            docs_anchor: "#offload-has-async-twin".into(),
+            docs_url: String::new(),
+        });
+        assert_eq!(report.exit_code(), EXIT_OK);
     }
 }

@@ -89,6 +89,7 @@ fn edge(
         is_offload_wrapper: false,
         positional_literals: vec![],
         positional_callables: vec![],
+        positional_externals: vec![],
         keyword_callables: vec![],
         param_guard: None,
         is_awaited: false,
@@ -159,9 +160,7 @@ fn param_guard_unknown_becomes_candidate() {
             },
         ],
         complete: true,
-        skipped: vec![],
-        unresolved_imports: vec![],
-        unresolved_third_party_modules: vec![],
+        ..Default::default()
     };
     let report = analyze(&facts, &TestSinks);
     assert!(report.findings.is_empty(), "{:?}", report.findings);
@@ -193,9 +192,7 @@ fn entry_local_param_guard_stays_finding() {
             e
         }],
         complete: true,
-        skipped: vec![],
-        unresolved_imports: vec![],
-        unresolved_third_party_modules: vec![],
+        ..Default::default()
     };
     let report = analyze(&facts, &TestSinks);
     assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
@@ -244,9 +241,7 @@ fn param_guard_false_literal_skipped() {
             },
         ],
         complete: true,
-        skipped: vec![],
-        unresolved_imports: vec![],
-        unresolved_third_party_modules: vec![],
+        ..Default::default()
     };
     let report = analyze(&facts, &TestSinks);
     assert!(report.findings.is_empty());
@@ -267,9 +262,7 @@ fn skips_test_entries_by_default() {
             vec![ConditionTag::Unconditional, ConditionTag::AllPaths],
         )],
         complete: true,
-        skipped: vec![],
-        unresolved_imports: vec![],
-        unresolved_third_party_modules: vec![],
+        ..Default::default()
     };
     let report = analyze(&facts, &TestSinks);
     assert!(report.findings.is_empty());
@@ -300,9 +293,7 @@ fn hides_unresolved_by_default() {
             vec![ConditionTag::Unconditional],
         )],
         complete: true,
-        skipped: vec![],
-        unresolved_imports: vec![],
-        unresolved_third_party_modules: vec![],
+        ..Default::default()
     };
     let report = analyze(&facts, &TestSinks);
     assert!(report.candidates.is_empty());
@@ -344,9 +335,7 @@ fn merges_open_and_read() {
             ),
         ],
         complete: true,
-        skipped: vec![],
-        unresolved_imports: vec![],
-        unresolved_third_party_modules: vec![],
+        ..Default::default()
     };
     let report = analyze(&facts, &TestSinks);
     assert_eq!(report.findings.len(), 1, "{:?}", report.findings);

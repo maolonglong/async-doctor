@@ -10,5 +10,6 @@ mod m2;
 mod m3a;
 mod m3a_precision;
 mod m3c;
+mod advice;
 mod offload;
 mod scan_cache;

@@ -190,4 +190,7 @@ pub(crate) fn rewrite_why_commands(report: &mut Report, scan_path: &Path) {
     for c in &mut report.candidates {
         rewrite(&mut c.why);
     }
+    for a in &mut report.advice {
+        rewrite(&mut a.why);
+    }
 }

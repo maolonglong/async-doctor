@@ -237,6 +237,8 @@ pub(crate) fn extract_files(
         follow_budget,
     );
 
+    facts.resolved_symbols =
+        crate::twin_resolve::collect_resolved_twin_symbols(project_root.as_std_path());
     stabilize_facts(&mut facts);
     Ok(facts)
 }
@@ -327,6 +329,7 @@ fn run_pass2_batched(
                 occurrence_counter: HashMap::new(),
                 pending_literals: Vec::new(),
                 pending_callables: Vec::new(),
+                pending_externals: Vec::new(),
                 pending_keyword_callables: Vec::new(),
                 narrowed_locals: HashMap::new(),
                 local_lambdas: HashMap::new(),

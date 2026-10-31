@@ -76,6 +76,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             is_offload_wrapper,
             positional_literals: std::mem::take(&mut self.pending_literals),
             positional_callables: std::mem::take(&mut self.pending_callables),
+            positional_externals: std::mem::take(&mut self.pending_externals),
             keyword_callables: std::mem::take(&mut self.pending_keyword_callables),
             param_guard: self.active_param_guard,
             is_awaited: self.pending_is_awaited,
@@ -138,6 +139,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             "asyncio.to_thread" | "asyncio.threads.to_thread" => Some(OffloadKind::AsyncioToThread),
             "anyio.to_thread.run_sync" => Some(OffloadKind::AnyioToThread),
             "starlette.concurrency.run_in_threadpool" => Some(OffloadKind::StarletteThreadpool),
+            "asgiref.sync.sync_to_async" => Some(OffloadKind::AsgirefSyncToAsync),
             "concurrent.futures.Executor.submit"
             | "concurrent.futures.Executor.map"
             | "concurrent.futures.ThreadPoolExecutor.submit"

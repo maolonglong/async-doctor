@@ -627,6 +627,9 @@ pub(crate) fn materialize_cached_functions(
                 is_offload_wrapper: edge.is_offload_wrapper,
                 positional_literals,
                 positional_callables,
+                // First-party offload externals are not stored in the package
+                // cache; third-party offload targets are rare for advice.
+                positional_externals: vec![],
                 keyword_callables,
                 param_guard,
                 is_awaited: edge.is_awaited,
@@ -649,6 +652,7 @@ fn cached_callee_to_ref(edge: &CachedEdge, qual_to_id: &BTreeMap<String, Functio
                 Some("anyio.to_thread.run_sync") => OffloadKind::AnyioToThread,
                 Some("starlette.concurrency.run_in_threadpool") => OffloadKind::StarletteThreadpool,
                 Some("concurrent.futures.ThreadPoolExecutor") => OffloadKind::ThreadPoolExecutor,
+                Some("asgiref.sync.sync_to_async") => OffloadKind::AsgirefSyncToAsync,
                 _ => OffloadKind::AsyncioToThread,
             };
             CalleeRef::Offload(kind)

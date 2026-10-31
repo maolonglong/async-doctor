@@ -221,6 +221,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
 
         self.pending_literals = call.arguments.args.iter().map(literal_arg).collect();
         self.pending_callables = self.resolve_positional_callables(call.arguments.args.as_ref());
+        self.pending_externals = self.resolve_positional_externals(call.arguments.args.as_ref());
         self.pending_keyword_callables = self.resolve_keyword_callables(call);
 
         // In-memory buffer args to open/Image.open: not blocking file IO — skip
@@ -231,6 +232,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         {
             self.pending_literals.clear();
             self.pending_callables.clear();
+            self.pending_externals.clear();
             self.pending_keyword_callables.clear();
             self.pending_is_awaited = false;
             return;
@@ -238,22 +240,36 @@ impl<'a, 'db> CallCollector<'a, 'db> {
 
         if let Some(kind) = self.is_offload_callee(&call.func) {
             // Passing a callable param into a real offload → this function is a wrapper.
-            if let Some(arg) = call.arguments.args.first()
+            let callable_idx = kind.callable_arg_index();
+            if let Some(arg) = call.arguments.args.get(callable_idx)
                 && let Expr::Name(n) = arg
                 && self.current_param_names.iter().any(|p| p == n.id.as_str())
             {
                 self.facts.functions[caller.index()].is_offload_wrapper = true;
             }
+            // Prefer structural coroutine-ness of the offloaded target when known.
+            let target_coro = call
+                .arguments
+                .args
+                .get(callable_idx)
+                .and_then(|arg| match arg {
+                    Expr::Call(inner) if is_partial_call(inner) => {
+                        inner.arguments.args.first()
+                    }
+                    other => Some(other),
+                })
+                .and_then(|target| self.resolve_callee_is_coroutine(target));
             self.push_edge(
                 caller,
                 CalleeRef::Offload(kind),
                 call.range(),
                 CallKind::Call,
                 true,
-                None,
+                target_coro,
             );
             self.pending_literals.clear();
             self.pending_callables.clear();
+            self.pending_externals.clear();
             self.pending_keyword_callables.clear();
             return;
         }
@@ -272,6 +288,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             );
             self.pending_literals.clear();
             self.pending_callables.clear();
+            self.pending_externals.clear();
             self.pending_keyword_callables.clear();
             return;
         }
@@ -295,6 +312,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
         self.pending_literals.clear();
         self.pending_callables.clear();
+        self.pending_externals.clear();
         self.pending_keyword_callables.clear();
     }
 
@@ -485,6 +503,32 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 _ => None,
             };
             out.push(fid);
+        }
+        out
+    }
+
+    /// External qualnames for positional args (offload of typed third-party methods).
+    pub(crate) fn resolve_positional_externals(&mut self, args: &'a [Expr]) -> Vec<Option<String>> {
+        let mut out = Vec::with_capacity(args.len());
+        for arg in args {
+            // Prefer project FunctionId when both resolve — externals are a fallback.
+            if matches!(arg, Expr::Lambda(_)) {
+                out.push(None);
+                continue;
+            }
+            let target = match arg {
+                Expr::Call(c) if is_partial_call(c) => c.arguments.args.first(),
+                other => Some(other),
+            };
+            let Some(target) = target else {
+                out.push(None);
+                continue;
+            };
+            if self.resolve_project_function(target).is_some() {
+                out.push(None);
+                continue;
+            }
+            out.push(self.external_qualname(target));
         }
         out
     }

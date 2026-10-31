@@ -36,15 +36,24 @@ These override the draft:
 1. **Name:** `async-doctor`; repo `maolonglong/async-doctor` (private); **MIT**.
 2. **Async twin:** implement only as a hint inside the `fix` field — never a
    separate finding.
+   **Exception (owner-approved):** rule `offload-has-async-twin` emits a
+   non-blocking `advice[]` item at offload sites that are already cut (so
+   nothing is double-reported with `blocking-*` findings). Structured
+   high-confidence same-package twins live in an `async_twin` table on sink
+   families; the twin symbol and its `needs` must resolve in the scanned venv.
+   Advice never changes the exit code.
 3. **JSON fields:** adopt the draft as-is (`schemaVersion`, `complete`,
    `findings[]` / `candidates[]`, `id`, `rule`, `entry`, `chain[]`,
-   `conditions[]`, `fix` (+ `fixGroupId`), `why`).
+   `conditions[]`, `fix` (+ `fixGroupId`), `why`), plus additive
+   `advice[]` (schemaVersion stays 1) with `category`
+   (`performance` | `correctness`).
 4. **Exit codes:**
    - `0` — no findings
    - `1` — findings present (even if analysis is incomplete)
    - `2` — tool error only
    Incomplete analysis is reported via `complete=false` + `skipped` in JSON and
-   a stderr warning, **not** via exit code. Candidates never affect exit code.
+   a stderr warning, **not** via exit code. Candidates and advice never affect
+   exit code.
 5. **Entry labels:** `route` (HTTP/WebSocket handlers), `lifecycle`
    (lifespan/startup/shutdown), `task` (`create_task` / TaskGroup / background),
    plus fallback `other`. All auto-inferred. Labels affect ordering/presentation
@@ -97,8 +106,9 @@ Blocking propagation is reachability, not taint: mark sinks, push up the reverse
 call graph, report at call sites inside `async def`, BFS for the shortest chain.
 
 **Offload boundaries:** `asyncio.to_thread`, `loop.run_in_executor`,
-`anyio.to_thread.run_sync`, `starlette.concurrency.run_in_threadpool`. Watch for
-eager evaluation: `to_thread(f())` still runs `f` on the event loop.
+`anyio.to_thread.run_sync`, `starlette.concurrency.run_in_threadpool`,
+`asgiref.sync.sync_to_async`, plus inferred wrappers. Watch for eager
+evaluation: `to_thread(f())` still runs `f` on the event loop.
 
 **Condition tags:** `unconditional`, `all-paths`, `loop`, `async-branch`,
 `cache_miss_dependent`, `sync_entry`. Literal-constant conditions prune dead
@@ -127,7 +137,7 @@ FastAPI sync `def` routes already run in a thread pool — do not report them.
 | --- | --- |
 | `schemaVersion` | integer; bump on breaking changes |
 | `complete` | false on timeout / parse failure; attach `skipped` |
-| `findings[]` / `candidates[]` | separate arrays; candidates always have `reason` |
+| `findings[]` / `candidates[]` / `advice[]` | separate arrays; candidates always have `reason`; advice is non-blocking (SARIF `note`) |
 | `id` | stable hash of rule + entry + sink (baseline-friendly) |
 | `rule` | e.g. `blocking-sleep`, `blocking-http` |
 | `entry` | async def location + label (`route` / `lifecycle` / `task` / `other`) |
@@ -222,7 +232,9 @@ langgraph, home-assistant core, plus small fixtures per rule/pattern.
 - Merge `open(...)` + same-entry `f.read()`/`f.write()` into one finding.
 - Stable `id`: hash(rule + entry qualname + sink qualname + chain qualnames
   + occurrence). **Not** line/column.
-- Async-twin names only in `fix.hint`.
+- Async-twin names in `fix.hint` for findings; additionally,
+  `offload-has-async-twin` advice at cut offload sites (see decision #2
+  exception).
 
 ## M2 delivered here
 

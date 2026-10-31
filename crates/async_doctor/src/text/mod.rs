@@ -7,7 +7,10 @@ mod grouped;
 
 use std::io::Write;
 
-use async_doctor_core::{Candidate, EntryLabel, Finding, Report};
+use async_doctor_core::{Advice, Candidate, EntryLabel, Finding, Report};
+
+/// Default number of advice items shown before `--expand`.
+const TOP_ADVICE_SHOWN: usize = 10;
 
 #[derive(Default)]
 pub struct TextOptions {
@@ -48,6 +51,8 @@ pub fn write_report(report: &Report, opts: TextOptions) -> anyhow::Result<()> {
     } else {
         grouped::write_grouped(&mut out, &report.findings)?;
     }
+
+    write_advice_section(&mut out, report, opts.expand)?;
 
     if !report.candidates.is_empty() {
         writeln!(
@@ -156,6 +161,65 @@ pub(crate) fn write_finding_indented(
 ) -> anyhow::Result<()> {
     writeln!(out, "{indent}{}", entry_headline(finding))?;
     write_chain(out, &finding.chain, indent, false)?;
+    Ok(())
+}
+
+fn write_advice_section(
+    out: &mut impl Write,
+    report: &Report,
+    expand: bool,
+) -> anyhow::Result<()> {
+    if report.advice.is_empty() {
+        return Ok(());
+    }
+    let total = report.advice.len();
+    writeln!(out)?;
+    if expand || total <= TOP_ADVICE_SHOWN {
+        writeln!(
+            out,
+            "Advice ({total}) — does not fail the run:\n"
+        )?;
+        // Group by fix_group_id (offload site + twin).
+        let mut groups: std::collections::BTreeMap<&str, Vec<&Advice>> =
+            std::collections::BTreeMap::new();
+        for a in &report.advice {
+            groups.entry(a.fix.fix_group_id.as_str()).or_default().push(a);
+        }
+        for (_gid, items) in groups {
+            for a in items {
+                write_advice(out, a)?;
+            }
+        }
+    } else {
+        writeln!(
+            out,
+            "Advice ({total}) — showing top {TOP_ADVICE_SHOWN} (pass --expand for all); does not fail the run:\n"
+        )?;
+        for a in report.advice.iter().take(TOP_ADVICE_SHOWN) {
+            write_advice(out, a)?;
+        }
+    }
+    Ok(())
+}
+
+pub fn write_advice(out: &mut impl Write, advice: &Advice) -> anyhow::Result<()> {
+    writeln!(
+        out,
+        "[advice:{}] ({})  async def {}  {}:{}",
+        advice.rule,
+        advice.category.as_str(),
+        advice.entry.name,
+        advice.entry.file,
+        advice.entry.line
+    )?;
+    write_chain(out, &advice.chain, "  ", true)?;
+    writeln!(out, "  fix: {}", advice.fix.hint)?;
+    if !advice.docs_url.is_empty() {
+        writeln!(out, "  docs: {}", advice.docs_url)?;
+    }
+    writeln!(out, "  explain: async-doctor explain {}", advice.rule)?;
+    writeln!(out, "  why: {}", advice.why)?;
+    writeln!(out)?;
     Ok(())
 }
 

@@ -84,6 +84,16 @@ pub fn apply(mut report: Report, root: &Path) -> anyhow::Result<SuppressOutcome>
         }
         candidates.push(c);
     }
+    let mut advice = Vec::new();
+    for a in std::mem::take(&mut report.advice) {
+        if let Some(sup) =
+            matching_suppression(&a.rule, &a.entry.file, a.entry.line, &a.chain, &by_file)
+        {
+            used.insert((sup.file.clone(), sup.line, sup.rule.clone()));
+            continue;
+        }
+        advice.push(a);
+    }
 
     let mut unused = Vec::new();
     for sups in by_file.values() {
@@ -103,6 +113,7 @@ pub fn apply(mut report: Report, root: &Path) -> anyhow::Result<SuppressOutcome>
 
     report.findings = findings;
     report.candidates = candidates;
+    report.advice = advice;
     report.unused_suppressions = unused;
     Ok(SuppressOutcome {
         report,

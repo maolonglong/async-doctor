@@ -49,3 +49,41 @@ Sync database drivers and sync cloud/AI SDKs (SQLAlchemy Session, redis, boto3, 
 
 Dynamic dispatch that could not be proven. Candidates only — never fails the
 exit code by itself. Inspect, add types, or offload if the call is sync IO.
+
+## offload-has-async-twin
+
+**Advice (performance)** — never fails the exit code.
+
+An offload boundary (`asyncio.to_thread`, `run_in_executor`,
+`anyio.to_thread.run_sync`, `starlette.concurrency.run_in_threadpool`,
+`asgiref.sync.sync_to_async`, inferred wrappers) cuts a sync call that only
+reaches sinks with a high-confidence same-package async twin
+(`httpx.AsyncClient`, `redis.asyncio`, `openai.AsyncOpenAI`,
+`anthropic.AsyncAnthropic`, `elasticsearch.AsyncElasticsearch` needing
+`aiohttp`, `psycopg.AsyncConnection`). The twin and its `needs` must resolve
+in the scanned venv. Skipped when the offloaded function is also called from
+sync-only code, or when any reached sink is excluded (pymongo, requests,
+boto3, file IO, subprocess, CPU work).
+
+**Why:** the offload already avoids blocking the loop, but the async twin
+removes the thread hop and keeps cancellation/context on the event loop.
+
+**Fix:** call the async client/API directly from `async def` instead of
+offloading the sync client.
+
+## nested-event-loop
+
+Calling `asyncio.run`, `asyncio.Runner.run`, `loop.run_until_complete` /
+`run_forever`, `anyio.run`, or `trio.run` from async code without an offload
+raises `RuntimeError` at runtime (loop already running). Behind an offload
+boundary this is not reported.
+
+**Fix:** await the coroutine directly; do not nest event-loop runners.
+
+## offload-coroutine
+
+An offload target resolves to an `async def`. Offload APIs expect a sync
+callable; passing a coroutine function builds a coroutine object that is never
+awaited, so the work never runs.
+
+**Fix:** await the coroutine directly, or pass a sync function to the offload.

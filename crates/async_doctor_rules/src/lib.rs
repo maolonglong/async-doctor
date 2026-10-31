@@ -2,11 +2,19 @@
 //!
 //! Stdlib sinks (M1) plus third-party type-based rules (M2).
 
+mod async_twin;
 mod docs;
 mod third_party;
 
+pub use async_twin::{
+    ASYNC_TWINS, async_twin_for_sink, is_excluded_from_twin_advice, twin_resolution_symbols,
+};
 pub use docs::{DOCS_RULES_BASE, RULE_DOCS, RuleDoc, docs_anchor_for, docs_url_for, rule_doc};
 pub use third_party::{BuiltinSinkTable, THIRD_PARTY_SINKS, is_async_counterpart};
+
+pub const RULE_OFFLOAD_HAS_ASYNC_TWIN: &str = "offload-has-async-twin";
+pub const RULE_NESTED_EVENT_LOOP: &str = "nested-event-loop";
+pub const RULE_OFFLOAD_COROUTINE: &str = "offload-coroutine";
 
 use async_doctor_core::{SinkHit, SinkTable};
 
