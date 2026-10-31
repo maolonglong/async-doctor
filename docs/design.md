@@ -249,13 +249,18 @@ langgraph, home-assistant core, plus small fixtures per rule/pattern.
   Sync `with Engine.begin()` records the context `Call` as `WithEnter`.
   Consume-only sinks (`redis.PubSub.listen`) fire only when iterated.
 - **Per-`(package, version, content-fingerprint)` disk cache** under the user
-  cache dir (`v9/{tool}/{pkg}/{version}-{fingerprint}.json`), keyed by
+  cache dir (`v10/{tool}/{pkg}/{version}-{fingerprint}.json`), keyed by
   External qualname. Package meta lookups are memoized in a **per-scan**
   `PackageMetaMemo` (no process-global state). Callers (and tests) may inject
   the cache root explicitly — do not rely on mutating process-wide
   `XDG_CACHE_HOME` under parallel tests. Cached `follow_targets` only retain
   callees that were actually analyzed (cold == warm == warm). Full edge
   summaries; atomic batched writes.
+- **Whole-scan report cache** at `v10/{tool}/scan/{input-fingerprint}.json`:
+  when first-party sources, venv dist-info fingerprints, analyze options, and
+  follow budget are unchanged, a warm run reloads the prior report and skips
+  ty extract/analyze (cold == warm JSON). Schema bumps invalidate both package
+  and scan caches.
 
   **Content fingerprint (coarse):** prefer hashing wheel `RECORD` bytes mixed
   with the dist-info directory mtime; else `METADATA` len+mtime; else a
