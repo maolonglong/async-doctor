@@ -1,6 +1,6 @@
 //! Advice tier + nested-event-loop / offload-coroutine integration tests.
 
-use super::helpers::{clone_fixture, temp_project};
+use super::helpers::{attach_real_openai_venv, clone_fixture, temp_project};
 use crate::scan_path;
 
 fn rules(report: &async_doctor_core::Report) -> Vec<(&str, &str)> {
@@ -308,13 +308,17 @@ fn advice_azure_resources_path_uses_constructed_receiver() {
         .join("python3.12")
         .join("site-packages");
     std::fs::create_dir_all(sp.join("openai").join("resources").join("chat")).unwrap();
+    std::fs::create_dir_all(sp.join("openai").join("lib")).unwrap();
     std::fs::write(
         dir.join(".venv").join("pyvenv.cfg"),
         "home = /usr\ninclude-system-site-packages = false\nversion = 3.12.3\n",
     )
     .unwrap();
     std::fs::write(
-        sp.join("openai").join("resources").join("chat").join("completions.py"),
+        sp.join("openai")
+            .join("resources")
+            .join("chat")
+            .join("completions.py"),
         "class Completions:\n    def create(self, *a, **k): pass\nclass AsyncCompletions:\n    async def create(self, *a, **k): pass\n",
     )
     .unwrap();
@@ -327,16 +331,26 @@ fn advice_azure_resources_path_uses_constructed_receiver() {
     )
     .unwrap();
     std::fs::write(sp.join("openai").join("resources").join("__init__.py"), "").unwrap();
+    std::fs::write(sp.join("openai").join("lib").join("__init__.py"), "").unwrap();
     std::fs::write(
-        sp.join("openai").join("__init__.py"),
+        sp.join("openai").join("lib").join("azure.py"),
         concat!(
-            "from .resources.chat.completions import Completions as _Completions\n",
+            "from ..resources.chat.completions import Completions as _Completions\n",
             "class AzureOpenAI:\n",
             "    class chat:\n",
             "        completions = _Completions()\n",
             "class AsyncAzureOpenAI:\n",
             "    class chat:\n",
             "        completions = _Completions()\n",
+        ),
+    )
+    .unwrap();
+    // Mirror real openai: `X as X` re-export (multi-name) — twin_resolve must follow it.
+    std::fs::write(
+        sp.join("openai").join("__init__.py"),
+        concat!(
+            "from .lib.azure import AzureOpenAI as AzureOpenAI, AsyncAzureOpenAI as AsyncAzureOpenAI\n",
+            "from .resources.chat.completions import Completions as _Completions\n",
             "class OpenAI:\n",
             "    class chat:\n",
             "        completions = _Completions()\n",
@@ -642,4 +656,77 @@ fn advice_sorted_by_site_file_line() {
     let mut sorted = sites.clone();
     sorted.sort();
     assert_eq!(sites, sorted, "advice must be sorted by site file/line");
+}
+
+#[test]
+fn advice_fixture_az_real_openai_resources_path() {
+    // Real openai re-exports Azure via `X as X`; advice must fire for z1–z4.
+    let dir = clone_fixture("az");
+    if !attach_real_openai_venv(&dir) {
+        eprintln!("skipping: no real openai venv (set ASYNC_DOCTOR_TEST_OPENAI_VENV)");
+        return;
+    }
+    let report = scan_path(&dir).unwrap();
+    let advice = advice_entries(&report);
+    for expected in ["z1", "z2", "z3", "z4"] {
+        assert!(
+            advice.contains(&expected),
+            "missing advice for {expected}: {advice:?} hints={:?}",
+            report
+                .advice
+                .iter()
+                .map(|a| (&a.entry.name, &a.fix.hint))
+                .collect::<Vec<_>>()
+        );
+    }
+    for azure in ["z1", "z2", "z3"] {
+        assert!(
+            report
+                .advice
+                .iter()
+                .any(|a| { a.entry.name == *azure && a.fix.hint.contains("AsyncAzureOpenAI") }),
+            "{azure} must hint AsyncAzureOpenAI: {:?}",
+            report
+                .advice
+                .iter()
+                .map(|a| (&a.entry.name, &a.fix.hint))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn nested_fixture_n_false_positives_and_new_event_loop_guard() {
+    let dir = clone_fixture("n");
+    let report = scan_path(&dir).unwrap();
+    let finding_rules = rules(&report);
+    for expected in ["e_n1", "e_n2", "e_n3", "e_n4"] {
+        assert!(
+            finding_rules
+                .iter()
+                .any(|(r, e)| *r == "nested-event-loop" && *e == expected),
+            "non-loop guards must stay findings ({expected}): {finding_rules:?}"
+        );
+    }
+    assert!(
+        finding_rules
+            .iter()
+            .all(|(r, e)| !(*r == "nested-event-loop" && *e == "e_g1")),
+        "None if is_event_loop_running() else new_event_loop() must drop: {finding_rules:?}"
+    );
+}
+
+#[test]
+fn nested_fixture_n2_name_only_idle_helper_stays_finding() {
+    let dir = clone_fixture("n2");
+    let report = scan_path(&dir).unwrap();
+    let finding_rules = rules(&report);
+    for expected in ["e5", "e6", "e7"] {
+        assert!(
+            finding_rules
+                .iter()
+                .any(|(r, e)| *r == "nested-event-loop" && *e == expected),
+            "name-only idle helper / is_async param must stay findings ({expected}): {finding_rules:?}"
+        );
+    }
 }
