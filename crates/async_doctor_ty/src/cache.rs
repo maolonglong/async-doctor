@@ -47,7 +47,10 @@ use serde::{Deserialize, Serialize};
 /// `positional_externals` / constructed-receiver / advice-tier edge facts.
 /// v15: deps_fp search roots match ty (`src/`, config extras); gzip slots;
 /// omit per-file follow_targets / tp heads (project meta + live follow).
-pub const CACHE_SCHEMA_VERSION: u32 = 15;
+/// v16: lean edge/fn serde (skip empty defaults); project `_fp_index.json.gz`
+/// so wide-miss fallback decides without loading full slots; skip persist on
+/// wide miss.
+pub const CACHE_SCHEMA_VERSION: u32 = 16;
 
 /// Tool version embedded in the cache path (from this crate's Cargo.toml).
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");

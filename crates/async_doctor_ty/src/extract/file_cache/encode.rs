@@ -241,7 +241,12 @@ pub fn file_facts_from_project_with_indexes(
                 param_invoke_index,
                 is_offload_wrapper: e.is_offload_wrapper,
                 kind: call_kind_to_str(e.kind).to_string(),
-                file: e.file.clone(),
+                // Omit when equal to the slot rel (restored on merge).
+                file: if e.file == rel {
+                    String::new()
+                } else {
+                    e.file.clone()
+                },
                 line: e.line,
                 text: e.text.clone(),
                 conditions: e

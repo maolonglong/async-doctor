@@ -24,8 +24,9 @@ use super::file_cache::orchestrate::{FileRef, extract_with_optional_cache_hits};
 use super::file_cache::{
     CachedFileFacts, DepCatalogEntry, build_content_fps_parallel, build_deps_and_fps_parallel,
     build_module_to_rel, cached_project_callees_resolvable, content_venv_stub_match,
-    file_cache_slot_exists, live_deps_fp, live_deps_fps_parallel, load_file_facts_unchecked,
-    load_project_meta, merge_cached_files, project_env_fingerprints, wide_miss_fallback,
+    file_cache_slot_exists, index_content_venv_stub_match, live_deps_fp, live_deps_fps_parallel,
+    load_file_facts_unchecked, load_fp_index, load_project_meta, merge_cached_files,
+    project_env_fingerprints, wide_miss_fallback,
 };
 use super::follow::follow_third_party;
 use super::path::{module_name_from_relative, relative_display};
@@ -84,8 +85,8 @@ pub(crate) fn extract_files(
             })
             .collect();
 
-        // Cheap preflight: content fingerprints only. If content misses alone
-        // are already wide, skip deps scrape + incremental bookkeeping.
+        // Cheap preflight: content fingerprints only. Prefer the lean
+        // `_fp_index` so we never gunzip full slots just to count misses.
         let content_only = build_content_fps_parallel(&dep_catalog);
         live_content_fps = content_only;
         for f in &mut catalog {
@@ -93,22 +94,32 @@ pub(crate) fn extract_files(
                 f.content_fp = Some(fp.clone());
             }
         }
+        let fp_index = load_fp_index(&cache_root, project_std);
         let mut content_misses = 0usize;
         for f in &catalog {
-            if !file_cache_slot_exists(&cache_root, project_std, &f.rel) {
-                content_misses += 1;
-                continue;
-            }
-            let Some(cached) = load_file_facts_unchecked(&cache_root, project_std, &f.rel) else {
-                content_misses += 1;
-                continue;
-            };
             let Some(fp) = f.content_fp.as_deref() else {
                 content_misses += 1;
+                if wide_miss_fallback(content_misses, catalog.len()) {
+                    break;
+                }
                 continue;
             };
-            if !content_venv_stub_match(&cached, fp, &venv_fp, &stub_fp) {
+            let content_hit = if let Some(index) = fp_index.as_ref() {
+                index
+                    .entries
+                    .get(&f.rel)
+                    .is_some_and(|e| index_content_venv_stub_match(e, fp, &venv_fp, &stub_fp))
+            } else if file_cache_slot_exists(&cache_root, project_std, &f.rel) {
+                load_file_facts_unchecked(&cache_root, project_std, &f.rel)
+                    .is_some_and(|c| content_venv_stub_match(&c, fp, &venv_fp, &stub_fp))
+            } else {
+                false
+            };
+            if !content_hit {
                 content_misses += 1;
+                if wide_miss_fallback(content_misses, catalog.len()) {
+                    break;
+                }
             }
         }
         if wide_miss_fallback(content_misses, catalog.len()) {
@@ -126,40 +137,66 @@ pub(crate) fn extract_files(
                 }
             }
 
-            let slot_rels: Vec<String> = catalog
-                .iter()
-                .filter(|f| file_cache_slot_exists(&cache_root, project_std, &f.rel))
-                .map(|f| f.rel.clone())
-                .collect();
+            let classify_rels: Vec<String> = catalog.iter().map(|f| f.rel.clone()).collect();
             let live_deps_by_rel =
-                live_deps_fps_parallel(&slot_rels, &direct, &absents_by_rel, &live_content_fps);
+                live_deps_fps_parallel(&classify_rels, &direct, &absents_by_rel, &live_content_fps);
 
             for (i, f) in catalog.iter().enumerate() {
-                if !file_cache_slot_exists(&cache_root, project_std, &f.rel) {
-                    misses.push(i);
-                    continue;
-                }
-                let Some(cached) = load_file_facts_unchecked(&cache_root, project_std, &f.rel)
-                else {
-                    misses.push(i);
-                    continue;
-                };
                 let Some(fp) = f.content_fp.as_deref() else {
                     complete = false;
                     skipped.push(format!("{}: cannot read for fingerprint", f.rel));
                     misses.push(i);
+                    if wide_miss_fallback(misses.len(), catalog.len()) {
+                        break;
+                    }
                     continue;
                 };
                 let live_deps = live_deps_by_rel.get(&f.rel).cloned().unwrap_or_else(|| {
                     live_deps_fp(&f.rel, &direct, &absents_by_rel, &live_content_fps)
                 });
-                if content_venv_stub_match(&cached, fp, &venv_fp, &stub_fp)
-                    && !cached.deps_fp.is_empty()
-                    && cached.deps_fp == live_deps
-                {
-                    cached_by_rel.insert(f.rel.clone(), cached);
+                let index_hit = fp_index.as_ref().and_then(|idx| {
+                    let e = idx.entries.get(&f.rel)?;
+                    if index_content_venv_stub_match(e, fp, &venv_fp, &stub_fp)
+                        && !e.deps_fp.is_empty()
+                        && e.deps_fp == live_deps
+                    {
+                        Some(())
+                    } else {
+                        None
+                    }
+                });
+                if index_hit.is_some() {
+                    // Load full slot only for confirmed hits.
+                    if let Some(cached) =
+                        load_file_facts_unchecked(&cache_root, project_std, &f.rel)
+                    {
+                        cached_by_rel.insert(f.rel.clone(), cached);
+                    } else {
+                        misses.push(i);
+                    }
+                } else if fp_index.is_none() {
+                    // Legacy path without index: load slot to compare.
+                    if !file_cache_slot_exists(&cache_root, project_std, &f.rel) {
+                        misses.push(i);
+                    } else if let Some(cached) =
+                        load_file_facts_unchecked(&cache_root, project_std, &f.rel)
+                    {
+                        if content_venv_stub_match(&cached, fp, &venv_fp, &stub_fp)
+                            && !cached.deps_fp.is_empty()
+                            && cached.deps_fp == live_deps
+                        {
+                            cached_by_rel.insert(f.rel.clone(), cached);
+                        } else {
+                            misses.push(i);
+                        }
+                    } else {
+                        misses.push(i);
+                    }
                 } else {
                     misses.push(i);
+                }
+                if wide_miss_fallback(misses.len(), catalog.len()) {
+                    break;
                 }
             }
 

@@ -1,6 +1,6 @@
 # Per-file incremental fact cache (design)
 
-Schema **v15**. Complements the whole-scan report cache (exe-hash `build_id()`):
+Schema **v16**. Complements the whole-scan report cache (exe-hash `build_id()`):
 when some first-party files change, reuse extracted facts for the rest without
 a full ty pass-2. Round-trips `advice[]` edge facts (`positional_externals`,
 constructed receivers, `no_running_loop_guard`) so incremental reports match
@@ -26,11 +26,14 @@ more than main cold.
 ## Layout
 
 ```
-{cache_root}/v15/{tool}/files/{project_hash}/{rel_hash}.json.gz
-{cache_root}/v15/{tool}/files/{project_hash}/_project_meta.json
+{cache_root}/v16/{tool}/files/{project_hash}/{rel_hash}.json.gz
+{cache_root}/v16/{tool}/files/{project_hash}/_fp_index.json.gz
+{cache_root}/v16/{tool}/files/{project_hash}/_project_meta.json
 ```
 
 Slots are scoped by project root hash so fixture trees cannot collide.
+`_fp_index.json.gz` stores only content/deps/venv/stub fingerprints so hit
+classification (and wide-miss fallback) never gunzips full slots.
 
 ## Hit condition
 
@@ -50,7 +53,7 @@ Cross-module inference in the review scenarios flows through imports
 (factory→impl→bases, mid2→bases, re-exports, …). Each slot stores:
 
 ```
-deps_fp(F) = FNV("deps-fp-v1\n" + sorted lines "{rel}\t{content_fp_or_?}\n")
+deps_fp(F) = FNV("deps-fp-v2\n" + sorted lines "{rel}\t{content_fp_or_?}\n")
 ```
 
 over:
@@ -60,7 +63,8 @@ over:
   bodies; exact catalog match + package-root aliases only — **no** parent
   fallback), and
 - synthetic **absent probes** (`rel.py` / `rel/__init__.py` with `"?"`) for
-  unresolved / missing import heads (`add` / `addtop` / `newpkg`).
+  unresolved / missing import heads (`add` / `addtop` / `newpkg`), placed
+  under each ty search root (`src/`, configured extras, …).
 
 The direct-import graph is built **once** in parallel over the catalog
 (rayon). Hit checks recompute `deps_fp` from the live graph + live content
@@ -93,20 +97,21 @@ cross-module inference and O(files × facts) to recompute.
 ## Wide-edit fallback
 
 If the miss count exceeds **50% of the catalog** or an absolute cap (**500**),
-fall back to a full cold extract (no cache hits). New slots are still written
-at the end.
+fall back to a full cold extract (no cache hits) and **skip slot persist** so
+the edit is not slower than main. Classification uses `_fp_index` (or aborts
+early while counting) before pass-1/pass-2.
 
 ## Orchestration
 
 1. If whole-scan fingerprint hits → return cached report (unchanged).
-2. Else, if any per-file slots exist: parallel-fingerprint the catalog; build
-   the direct-import graph once; classify hits via content/venv/stub +
-   `deps_fp`; optionally wide-miss fallback.
+2. Else, if any per-file slots exist: parallel-fingerprint the catalog; classify
+   via `_fp_index` (content/venv/stub + `deps_fp`); optionally wide-miss
+   fallback before loading full slots.
 3. Pass-1/pass-2 only on misses (parallel pass-2 default; shared DB clones,
    no per-file `fresh_empty`).
 4. Merge hits + miss extract; follow third-party; stabilize.
 5. Encode+save miss slots in parallel (`EncodeIndexes` built once) with
-   `deps_fp` from the shared direct graph + content map.
+   `deps_fp` from the shared direct graph + content map; upsert `_fp_index`.
 6. Save whole-scan report under the new fingerprint.
 
 ## Edge remapping
@@ -116,6 +121,7 @@ accept a DefKey hit **only if** live `module`+`qualname` match; else fall back
 to `(module, qualname)`; else treat the file as a miss via
 `cached_project_callees_resolvable` (never emit a synthetic
 `project:…` Unresolved that would poison `hiddenUnresolvedCandidates`).
+Edge `file` is omitted when equal to the slot `rel`.
 
 ## `.pyi`
 
@@ -131,3 +137,5 @@ all file slots when the stub set changes.
 - Cold with no slots: skip fingerprinting until save; then fingerprint once
   for `deps_fp` encode.
 - One-pass encode indexes; parallel save; Arc share + overlays in pass-2.
+- Slots are gzip'd JSON with empty/default fields omitted; files-cache on
+  litellm targets well under the pre-gzip ~192 MB figure.

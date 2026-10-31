@@ -124,7 +124,11 @@ fn edge_from_cached(
     Some(CallEdge {
         caller,
         callee,
-        file: e.file.clone(),
+        file: if e.file.is_empty() {
+            cf.rel.clone()
+        } else {
+            e.file.clone()
+        },
         line: e.line,
         text: e.text.clone(),
         kind: parse_call_kind(&e.kind),

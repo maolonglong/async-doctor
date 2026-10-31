@@ -336,6 +336,7 @@ pub(crate) fn extract_with_optional_cache_hits(
             venv_fp,
             &miss_specs,
         );
+        super::upsert_fp_index_for_misses(cache_root, project_std, venv_fp, &miss_specs);
         let mut tp = facts.unresolved_third_party_modules.clone();
         tp.sort();
         tp.dedup();
