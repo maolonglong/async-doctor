@@ -91,10 +91,24 @@ impl AsyncDoctorDb {
             src_roots.push(src_layout);
         }
 
+        // Scanning a package directory itself (`pkg/` with `__init__.py`): add
+        // the parent so `import pkg.…` self-imports resolve.
+        let pkg_init = project_root.join("__init__.py");
+        if db.system.is_file(&pkg_init)
+            && let Some(parent) = project_root.parent()
+        {
+            let parent_buf = parent.to_path_buf();
+            if !src_roots.iter().any(|r| r == &parent_buf) {
+                src_roots.push(parent_buf);
+            }
+        }
+
         // Nested packages (`pkg/pkg/`) + editable finders: pull IDE/tool search
         // roots and setuptools `__editable__*_finder.py` MAPPING parents.
         // Append after existing src_roots (never as front-loaded extra_paths)
         // and skip duplicates of roots already present (e.g. ruff `src = ["."]`).
+        // Outside-scan-root paths stay on the search path for resolution/follow
+        // but are never walked as first-party entry sources.
         let discovered =
             crate::search_paths::discover_extra_paths(project_root, &site_packages, &src_roots);
         db.extra_src_roots = discovered.clone();
@@ -128,9 +142,20 @@ impl AsyncDoctorDb {
     }
 
     /// Extra search roots from config / editable finders (may be outside the
-    /// scan root). Used to extract editable packages installed elsewhere.
+    /// scan root). On the module path for resolution; outside roots are
+    /// follow-only (never first-party entries).
     pub fn extra_src_roots(&self) -> &[SystemPathBuf] {
         &self.extra_src_roots
+    }
+
+    /// Extra roots that lie outside the scan root — followable like site-packages.
+    pub fn followable_extra_roots(&self) -> Vec<SystemPathBuf> {
+        let project = std::path::Path::new(self.project_root.as_str());
+        self.extra_src_roots
+            .iter()
+            .filter(|r| !std::path::Path::new(r.as_str()).starts_with(project))
+            .cloned()
+            .collect()
     }
 }
 

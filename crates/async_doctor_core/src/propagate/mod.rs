@@ -255,9 +255,11 @@ pub fn analyze_with_options(
                 continue;
             }
             let mut force_conditional = param_verdict == ParamVerdict::Unknown;
-            // Third-party sinks under a param/branch guard (e.g. PIL `if is_path(fp):
-            // open(...)`) are not provable for arbitrary caller args → candidates.
-            if seed_caller_fn.is_third_party
+            // Installed third-party sinks under a param/branch guard (e.g. PIL
+            // `if is_path(fp): open(...)`) are not provable for arbitrary caller
+            // args → candidates. Outside-editable follow-only code keeps
+            // first-party grading (still never an entry).
+            if seed_caller_fn.is_installed_third_party()
                 && seed_edge
                     .conditions
                     .iter()
@@ -403,7 +405,7 @@ pub fn analyze_with_options(
         }
     }
 
-    // Failed imports: once per import site (never per call).
+    // Failed first-party imports: once per (file, module) — already deduped.
     for imp in &facts.unresolved_imports {
         let pattern = format!("unresolved-import:{}", imp.module);
         let agg = unresolved_agg.entry(pattern.clone()).or_default();
@@ -449,6 +451,49 @@ pub fn analyze_with_options(
             docs_anchor: "#unresolved-call".into(),
             docs_url: "https://github.com/maolonglong/async-doctor/blob/main/docs/rules.md#unresolved-call".into(),
         });
+    }
+
+    // Missing third-party packages: one aggregated note (never per-import).
+    let n_tp = facts.unresolved_third_party_modules.len();
+    if n_tp > 0 {
+        let pattern = format!("{n_tp} third-party modules not installed; run in the project venv");
+        let agg = unresolved_agg.entry(pattern.clone()).or_default();
+        agg.0 = n_tp as u32;
+        if !options.show_unresolved {
+            report.hidden_unresolved_candidates += 1;
+        } else {
+            let sink_key = "unresolved-import:third-party-not-installed";
+            let id = finding_id(FindingIdParts {
+                rule: "unresolved-import",
+                entry_qualname: "third-party-not-installed",
+                sink_qualname: sink_key,
+                chain_qualnames: &[sink_key],
+                occurrence: 0,
+            });
+            if emitted.insert(id.clone()) {
+                raw_candidates.push(Candidate {
+                    id,
+                    rule: "unresolved-import".to_string(),
+                    entry: Entry {
+                        file: String::new(),
+                        line: 0,
+                        name: "third-party-not-installed".into(),
+                        label: crate::report::EntryLabel::Other,
+                    },
+                    chain: Vec::new(),
+                    conditions: Vec::new(),
+                    reason: pattern,
+                    fix: Fix {
+                        hint: "Install project dependencies into the active venv, then re-scan."
+                            .to_string(),
+                        fix_group_id: fix_group_id("unresolved-import", sink_key),
+                    },
+                    why: "async-doctor --show-unresolved".into(),
+                    docs_anchor: "#unresolved-call".into(),
+                    docs_url: "https://github.com/maolonglong/async-doctor/blob/main/docs/rules.md#unresolved-call".into(),
+                });
+            }
+        }
     }
 
     report.omitted_non_production_entries = omitted_entries.len() as u32;

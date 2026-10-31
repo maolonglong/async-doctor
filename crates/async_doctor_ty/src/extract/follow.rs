@@ -76,6 +76,7 @@ pub(crate) fn follow_third_party(
     qual_map: &mut HashMap<(String, String), FunctionId>,
     follow_targets: &mut HashMap<String, FollowTarget>,
     package_meta: &mut PackageMetaMemo,
+    followable_extra_roots: &[std::path::PathBuf],
     cache_dir: Option<&Path>,
     follow_budget: usize,
 ) {
@@ -194,6 +195,7 @@ pub(crate) fn follow_third_party(
                 qual_map,
                 follow_targets,
                 package_meta,
+                followable_extra_roots,
                 &target,
             ) {
                 qual_to_id.insert(q.clone(), id);
@@ -235,6 +237,7 @@ pub(crate) fn follow_third_party(
             qual_map,
             follow_targets,
             package_meta,
+            followable_extra_roots,
             &target,
         ) {
             qual_to_id.insert(q.clone(), id);
@@ -359,6 +362,7 @@ pub(crate) fn follow_third_party(
                 qual_map,
                 follow_targets,
                 package_meta,
+                followable_extra_roots,
                 &target,
             ) {
                 qual_to_id.insert(qualname.clone(), id);
@@ -400,6 +404,7 @@ pub(crate) fn follow_third_party(
                 qual_map,
                 follow_targets,
                 package_meta,
+                followable_extra_roots,
                 &target,
             ) {
                 qual_to_id.insert(q.clone(), id);
@@ -449,6 +454,7 @@ pub(crate) fn extract_third_party_function(
     qual_map: &mut HashMap<(String, String), FunctionId>,
     follow_targets: &mut HashMap<String, FollowTarget>,
     package_meta: &mut PackageMetaMemo,
+    followable_extra_roots: &[std::path::PathBuf],
     target: &FollowTarget,
 ) -> Option<FunctionId> {
     let file = system_path_to_file(db, &target.path).ok()?;
@@ -461,19 +467,33 @@ pub(crate) fn extract_third_party_function(
     let source = source_text(db, file);
     let index = line_index(db, file);
     let abs = target.path.as_str().replace('\\', "/");
+    let editable_rel = followable_extra_roots.iter().find_map(|r| {
+        let rs = r.to_string_lossy().replace('\\', "/");
+        let prefix = if rs.ends_with('/') {
+            rs.clone()
+        } else {
+            format!("{rs}/")
+        };
+        abs.strip_prefix(&prefix).map(|s| s.to_string())
+    });
     let module = third_party_module_path(&abs)
         .map(module_name_from_relative)
+        .or_else(|| editable_rel.as_deref().map(module_name_from_relative))
         .unwrap_or_default();
     // Stable path so cold extract and cache materialization emit identical JSON.
     // Prefer the real site-/dist-packages-relative path so packages that live
     // at `acmecache/__init__.py` are not displayed as `acmecache.py`.
-    // System dist-packages use the `dist-packages/` prefix (same third-party policy).
+    // Outside editable roots use an `editable/` prefix (follow-only, never entries).
     let tree = if abs.contains("/dist-packages/") {
         "dist-packages"
+    } else if editable_rel.is_some() {
+        "editable"
     } else {
         "site-packages"
     };
     let rel = if let Some(rest) = third_party_module_path(&abs) {
+        format!("{tree}/{rest}")
+    } else if let Some(rest) = &editable_rel {
         format!("{tree}/{rest}")
     } else if !module.is_empty() {
         format!("{tree}/{}.py", module.replace('.', "/"))
@@ -607,6 +627,8 @@ pub(crate) fn extract_third_party_function(
         task_targets: &mut task_targets,
         follow_targets,
         package_meta,
+        followable_extra_roots,
+        record_unresolved_imports: false,
         module_constants: &module_constants,
         current_fn: Some(id),
         current_param_names: param_names_for_visit,

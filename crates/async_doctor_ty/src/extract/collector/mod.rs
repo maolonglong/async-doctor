@@ -7,6 +7,7 @@ mod resolve;
 mod visit;
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 use async_doctor_core::{FunctionId, LiteralArg, ParamGuard, ProjectFacts};
 use ruff_python_ast::{self as ast};
@@ -29,6 +30,10 @@ pub(crate) struct CallCollector<'a, 'db> {
     pub(super) task_targets: &'a mut TaskTargets,
     pub(super) follow_targets: &'a mut HashMap<String, FollowTarget>,
     pub(super) package_meta: &'a mut PackageMetaMemo,
+    /// Outside-scan-root editable roots — followable like site-packages.
+    pub(super) followable_extra_roots: &'a [PathBuf],
+    /// When false (third-party follow), skip unresolved-import recording.
+    pub(super) record_unresolved_imports: bool,
     pub(super) module_constants: &'a HashMap<String, ModuleConst>,
     pub(super) current_fn: Option<FunctionId>,
     pub(super) current_param_names: Vec<String>,

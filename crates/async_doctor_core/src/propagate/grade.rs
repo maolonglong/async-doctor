@@ -299,9 +299,11 @@ pub(super) fn shortest_paths_to_async_entries(
             }
             via.insert(pred_state, ((node, required), edge_idx));
             let pred_fn = facts.function(pred);
-            // Never treat third-party async as an entry, and do not walk *through*
-            // it toward first-party callers (stops FPs via awaited library internals).
-            if pred_fn.is_third_party && pred_fn.is_async {
+            // Never treat installed third-party async as an entry, and do not walk
+            // *through* it toward first-party callers (stops FPs via awaited
+            // library internals). Outside-editable follow-only async may be
+            // traversed so scan-root callers still surface.
+            if pred_fn.is_installed_third_party() && pred_fn.is_async {
                 continue;
             }
             if pred_fn.is_async && !pred_fn.is_sync_route {

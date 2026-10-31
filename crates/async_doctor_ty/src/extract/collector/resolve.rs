@@ -16,6 +16,11 @@ use ty_python_semantic::{
 
 use crate::sitepkgs::{FollowTarget, is_followable_site_packages_py};
 
+fn is_under_followable_extra(path: &str, roots: &[std::path::PathBuf]) -> bool {
+    let p = std::path::Path::new(path);
+    roots.iter().any(|r| p.starts_with(r))
+}
+
 use super::CallCollector;
 use crate::extract::ctx::DefKey;
 use crate::extract::helpers::{
@@ -346,7 +351,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             let FilePath::System(sys) = file.path(self.model.db()) else {
                 continue;
             };
-            if !is_followable_site_packages_py(sys.as_str()) {
+            if !is_followable_site_packages_py(sys.as_str())
+                && !is_under_followable_extra(sys.as_str(), self.followable_extra_roots)
+            {
                 continue;
             }
             let kind = def.kind(self.model.db());

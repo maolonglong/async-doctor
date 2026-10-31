@@ -195,6 +195,14 @@ pub struct FunctionFact {
 }
 
 impl FunctionFact {
+    /// Installed site-/dist-packages follow — not outside-editable follow-only.
+    ///
+    /// Outside editables are `is_third_party` (never entries) but keep first-party
+    /// grading for branch sinks: chains into them from the scan root still find.
+    pub fn is_installed_third_party(&self) -> bool {
+        self.is_third_party && !self.file.replace('\\', "/").starts_with("editable/")
+    }
+
     /// `module:qualname` when module is non-empty, else just `qualname`.
     pub fn full_qualname(&self) -> String {
         if self.module.is_empty() {
@@ -217,6 +225,9 @@ pub struct AnalyzeOptions {
 }
 
 /// A first-party import that ty could not resolve (one site, never per-call).
+///
+/// Deduped per `(file, module)` — same missing module imported twice in one
+/// file counts once.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnresolvedImport {
     pub file: String,
@@ -233,9 +244,13 @@ pub struct ProjectFacts {
     pub edges: Vec<CallEdge>,
     pub complete: bool,
     pub skipped: Vec<String>,
-    /// Failed `import` / `from … import` sites (deduped). Surfaced as
-    /// unresolved candidates / summary — not silent drops.
+    /// Failed first-party `import` / `from … import` sites (deduped by
+    /// file+module). Only when the head module exists under the scan root /
+    /// extra roots yet still fails to resolve.
     pub unresolved_imports: Vec<UnresolvedImport>,
+    /// Unique top-level third-party module names that failed to import
+    /// (sorted). Surfaced as a single aggregated note, never per-import.
+    pub unresolved_third_party_modules: Vec<String>,
 }
 
 impl ProjectFacts {
