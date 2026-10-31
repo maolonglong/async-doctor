@@ -25,6 +25,10 @@ pub enum ConditionTag {
     AsyncBranch,
     /// Call sits behind a module/global cache miss check (`if _cache is None`).
     CacheMissDependent,
+    /// Call sits under a "no running event loop" guard (`if loop is None`,
+    /// `except RuntimeError` after `get_running_loop`, `not loop.is_running()`, …).
+    /// Nested-event-loop seeds with this tag are dropped (runtime-safe when async).
+    NoRunningLoopGuard,
     /// FastAPI/Starlette sync `def` route (threadpool) — presentation only.
     SyncEntry,
 }
@@ -37,12 +41,16 @@ impl ConditionTag {
             Self::Loop => "loop",
             Self::AsyncBranch => "async-branch",
             Self::CacheMissDependent => "cache_miss_dependent",
+            Self::NoRunningLoopGuard => "no_running_loop_guard",
             Self::SyncEntry => "sync_entry",
         }
     }
 
     pub fn is_branch_like(self) -> bool {
-        matches!(self, Self::AsyncBranch | Self::CacheMissDependent)
+        matches!(
+            self,
+            Self::AsyncBranch | Self::CacheMissDependent | Self::NoRunningLoopGuard
+        )
     }
 }
 
