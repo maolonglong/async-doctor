@@ -40,8 +40,12 @@ pub struct SuppressOutcome {
 }
 
 /// Parse suppressions under `root`, apply them to `report`, and collect unused.
+///
+/// Only reads first-party project files (same discovery as extraction: honors
+/// `.gitignore` / excludes) plus any paths named in the report. Never walks
+/// gitignored trees.
 pub fn apply(mut report: Report, root: &Path) -> anyhow::Result<SuppressOutcome> {
-    let files = files_to_scan(&report, root);
+    let files = files_to_scan(&report, root)?;
     let mut by_file: HashMap<String, Vec<Suppression>> = HashMap::new();
     let mut missing_reason = Vec::new();
     for file in files {
@@ -300,7 +304,7 @@ fn parse_ignore_comment(comment: &str) -> IgnoreParse {
     }
 }
 
-fn files_to_scan(report: &Report, root: &Path) -> Vec<PathBuf> {
+fn files_to_scan(report: &Report, root: &Path) -> anyhow::Result<Vec<PathBuf>> {
     let mut paths = HashSet::new();
     let add = |paths: &mut HashSet<PathBuf>, rel: &str| {
         let p = root.join(rel);
@@ -308,6 +312,7 @@ fn files_to_scan(report: &Report, root: &Path) -> Vec<PathBuf> {
             paths.insert(p);
         }
     };
+    // Finding / candidate locations (entry + chain hops) — suppressions apply there.
     for f in &report.findings {
         add(&mut paths, &f.entry.file);
         for s in &f.chain {
@@ -320,34 +325,12 @@ fn files_to_scan(report: &Report, root: &Path) -> Vec<PathBuf> {
             add(&mut paths, &s.file);
         }
     }
-    walk_py(root, &mut paths);
-    paths.into_iter().collect()
-}
-
-fn walk_py(dir: &Path, into: &mut HashSet<PathBuf>) {
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        if name.starts_with('.')
-            || name == "node_modules"
-            || name == "target"
-            || name == ".venv"
-            || name == "venv"
-            || name == "__pycache__"
-            || name == "site-packages"
-        {
-            continue;
-        }
-        if path.is_dir() {
-            walk_py(&path, into);
-        } else if path.extension().and_then(|s| s.to_str()) == Some("py") {
-            into.insert(path);
-        }
+    // Same first-party set extraction uses — required so unused suppressions in
+    // clean files are still reported, without re-walking gitignored trees.
+    for p in async_doctor_ty::discover_python_files(root)? {
+        paths.insert(p);
     }
+    Ok(paths.into_iter().collect())
 }
 
 fn relativize(root: &Path, file: &Path) -> String {
@@ -359,6 +342,10 @@ fn relativize(root: &Path, file: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::process::Command;
+
+    use async_doctor_core::Report;
 
     #[test]
     fn parse_requires_reason() {
@@ -386,5 +373,39 @@ mod tests {
     fn hash_inside_single_quotes_ignored() {
         let src = "x = '# async-doctor: ignore[blocking-sleep]: fake'\n";
         assert!(parse_file("a.py", src).suppressions.is_empty());
+    }
+
+    #[test]
+    fn files_to_scan_skips_gitignored_py() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        let git = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args(args)
+                    .current_dir(root)
+                    .env("GIT_AUTHOR_NAME", "t")
+                    .env("GIT_AUTHOR_EMAIL", "t@t")
+                    .env("GIT_COMMITTER_NAME", "t")
+                    .env("GIT_COMMITTER_EMAIL", "t@t")
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        git(&["init", "-b", "main"]);
+        fs::write(root.join(".gitignore"), "ignored/\n").unwrap();
+        fs::write(root.join("app.py"), "async def h():\n    return 1\n").unwrap();
+        fs::create_dir_all(root.join("ignored")).unwrap();
+        fs::write(root.join("ignored/x.py"), "x = 1\n").unwrap();
+        git(&["add", ".gitignore", "app.py"]);
+        git(&["commit", "-m", "init"]);
+
+        let paths = files_to_scan(&Report::empty_complete(), root).unwrap();
+        assert_eq!(paths.len(), 1, "{paths:?}");
+        assert!(
+            paths[0].ends_with("app.py"),
+            "expected only app.py, got {paths:?}"
+        );
     }
 }

@@ -13,7 +13,12 @@ pub(crate) fn absolute_utf8(path: &Path) -> anyhow::Result<SystemPathBuf> {
         .map_err(|p| anyhow::anyhow!("`{}` is not valid UTF-8", p.display()))
 }
 
-pub(crate) fn discover_python_files(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+/// Discover first-party `.py` files under `root`, honoring `.gitignore` /
+/// git excludes and skipping venv / cache / VCS trees.
+///
+/// Shared by extraction and CLI suppressions so ignored trees are never
+/// walked twice with divergent rules.
+pub fn discover_python_files(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
     let walker = WalkBuilder::new(root)
         .hidden(false)

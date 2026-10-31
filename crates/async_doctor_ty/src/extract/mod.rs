@@ -20,7 +20,9 @@ use crate::db::AsyncDoctorDb;
 
 use files::extract_files;
 use follow::DEFAULT_FOLLOW_BUDGET;
-use path::{absolute_utf8, discover_python_files};
+use path::absolute_utf8;
+
+pub use path::discover_python_files;
 
 /// Default third-party follow budget (test seam — not public API).
 #[cfg(test)]
