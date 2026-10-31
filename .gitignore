@@ -16,3 +16,5 @@ dist/
 .mypy_cache/
 *.whl
 .DS_Store
+# Public benchmark clones + local measurement artifacts (never commit)
+bench/.repos/

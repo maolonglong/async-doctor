@@ -5,90 +5,75 @@
 Zero-config static analysis for Python: finds sync/blocking IO reachable from
 `async def` code, and reports evidence an agent can act on.
 
-> Status: **M3** — agent-facing explain/why, `--changed` / `--baseline`, inline
-> suppressions, SARIF 2.1.0, and integrations. Analysis core remains M2. See
-> [docs/design.md](docs/design.md).
+## Install
+
+```bash
+# Once published to PyPI:
+uvx async-doctor .
+pipx run async-doctor .
+pip install async-doctor && async-doctor .
+
+# From this repo (wheel):
+maturin build --release
+uvx --from ./target/wheels/async_doctor-*.whl async-doctor --version
+
+# From source (Rust toolchain required):
+cargo install --git https://github.com/maolonglong/async-doctor async_doctor
+```
 
 ## Quick start
 
 ```bash
-# Install a release wheel (maturin), then run:
-maturin build --release
-uv pip install ./target/wheels/async_doctor-*.whl
 async-doctor .
+async-doctor --format json .
+async-doctor --format sarif . > async-doctor.sarif
 
-# Or during development:
-cargo run -p async_doctor -- .
-cargo run -p async_doctor -- --format json .
-cargo run -p async_doctor -- --format sarif . > async-doctor.sarif
-
-# Long-form rule help / site evidence:
-cargo run -p async_doctor -- explain blocking-sleep
-cargo run -p async_doctor -- why helpers.py:5 --path fixtures/m1_multihop
+async-doctor explain blocking-sleep
+async-doctor why helpers.py:5 --path fixtures/m1_multihop
 
 # CI / agent loops (full analysis; filtered reporting):
-cargo run -p async_doctor -- --changed .
-cargo run -p async_doctor -- --changed=origin/main .
-cargo run -p async_doctor -- --write-baseline baseline.json .
-cargo run -p async_doctor -- --baseline baseline.json .
+async-doctor --changed .
+async-doctor --changed=origin/main .
+async-doctor --write-baseline baseline.json .
+async-doctor --baseline baseline.json .
 ```
 
 Every finding includes the full call chain (`file:line` per hop), a concrete fix
 hint, a stable rule id, a `docsAnchor` into [docs/rules.md](docs/rules.md), and
 a runnable `why` command. No config file — flags and inline comments only.
 
-Inline suppressions (reason required):
-
 ```python
 time.sleep(1)  # async-doctor: ignore[blocking-sleep]: brief sync boundary in CLI wrapper
 ```
 
-Unused ignores fail the run.
-
-### Exit codes
-
-| Code | Meaning |
-|------|---------|
-| 0 | Clean — no findings (or no *new* findings vs `--baseline`), and no unused suppressions |
-| 1 | Findings present (or unused suppressions) |
-| 2 | Tool error |
-
-Incomplete analysis sets `complete=false` in JSON (and warns on stderr); it
-does **not** use exit code 2. Candidates never affect the exit code. Baseline
-fingerprints use stable finding ids (rule + symbol path + sink), not line numbers.
+Unused ignores fail the run. Exit `0` = clean, `1` = findings (or unused
+suppressions), `2` = tool error. Incomplete analysis sets `complete=false` and
+does **not** use exit 2. Candidates never affect the exit code.
 
 By default, entries under `tests/` / `docs/` / `examples/` / `scripts/` /
 hidden dirs are skipped (`--include-non-production` to include).
 `reason=unresolved` candidates are hidden unless `--show-unresolved`.
 
+## What it detects
+
+- Sync/blocking IO reachable from `async def` (sleep, socket, file, subprocess,
+  locks) with prove-only conditions and entry labels
+- Site-packages follow down to stdlib sinks; third-party hops marked in JSON
+- Third-party rules: `requests`, sync `httpx`, redis, SQLAlchemy, psycopg,
+  boto3, sync OpenAI/Anthropic, and more — async twins never fire
+- Higher-order / offload: `asyncio.to_thread`, executors, inferred wrappers
+
+## Benchmark
+
+Public cold/warm numbers on pinned asyncio corpora:
+[docs/benchmark.md](docs/benchmark.md). Reproduce with `./bench/run.sh`.
+
 ## Agent integrations
 
-Ship-ready snippets under [`integrations/`](integrations/):
-
-- [`integrations/skill/SKILL.md`](integrations/skill/SKILL.md) — teach coding
-  agents when/how to run async-doctor and fix findings
+- [`integrations/skill/SKILL.md`](integrations/skill/SKILL.md) — teach agents
+  when/how to run async-doctor
 - [`integrations/stop-hook/`](integrations/stop-hook/) — Claude Code / Cursor
-  stop-hook examples that run `async-doctor --changed` and block completion on
-  new findings
-
-## What it detects (M2 analysis)
-
-- **Site-packages follow** down to stdlib sinks; third-party hops marked in JSON
-- **Third-party rules:** `requests`, sync `httpx`, redis, SQLAlchemy, psycopg,
-  boto3, sync OpenAI/Anthropic, and more — async twins never fire
-- **Higher-order / offload:** `asyncio.to_thread`, executors, inferred wrappers
-- Stdlib sinks (sleep, socket, file, subprocess, locks), prove-only conditions,
-  entry labels, stable finding ids
-
-## Packaging
-
-Wheels are built with [maturin](https://www.maturin.rs/) (`bindings = "bin"`):
-
-```bash
-maturin build --release
-uv pip install ./target/wheels/async_doctor-*.whl
-async-doctor --help
-```
+  stop-hooks that run `async-doctor --changed`
 
 ## License
 
