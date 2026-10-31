@@ -1,0 +1,39 @@
+# Pinned public async Python corpora for the async-doctor benchmark.
+# Commits are full SHAs. Clones live under bench/.repos/ (gitignored).
+
+[[repo]]
+name = "litellm"
+url = "https://github.com/BerriAI/litellm.git"
+commit = "5029d027a1b60d917e5fa11befe0d982bd11fe39"
+# Package root (proxy + library); matches prior M2 notes.
+scan = "litellm"
+# Prefer the published package metadata over the monorepo's heavy extras.
+install = ["pip", "install", "-e", "."]
+
+[[repo]]
+name = "open-webui"
+url = "https://github.com/open-webui/open-webui.git"
+commit = "f7ac7ee10962ddec0017f5c29b6740d9b9c5faca"
+scan = "backend"
+install = ["pip", "install", "-r", "backend/requirements.txt"]
+
+[[repo]]
+name = "httpx"
+url = "https://github.com/encode/httpx.git"
+commit = "b5addb64f0161ff6bfe94c124ef76f6a1fba5254"
+scan = "httpx"
+install = ["pip", "install", "-e", "."]
+
+[[repo]]
+name = "starlette"
+url = "https://github.com/encode/starlette.git"
+commit = "2745bbc5afa2f8ce900d290bedca2bc5d3f3cfe8"
+scan = "starlette"
+install = ["pip", "install", "-e", "."]
+
+[[repo]]
+name = "fastapi"
+url = "https://github.com/fastapi/fastapi.git"
+commit = "79cab5bed28b24d92c185d236feb33f5783dfeb3"
+scan = "fastapi"
+install = ["pip", "install", "-e", "."]

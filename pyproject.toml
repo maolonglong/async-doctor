@@ -11,13 +11,17 @@ classifiers = [
     "Environment :: Console",
     "Framework :: AsyncIO",
     "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
     "Programming Language :: Rust",
     "Topic :: Software Development :: Quality Assurance",
 ]
 dynamic = ["version"]
 
 [project.urls]
+Homepage = "https://github.com/maolonglong/async-doctor"
 Repository = "https://github.com/maolonglong/async-doctor"
+Issues = "https://github.com/maolonglong/async-doctor/issues"
+Changelog = "https://github.com/maolonglong/async-doctor/releases"
 
 [build-system]
 requires = ["maturin>=1.9,<2"]
@@ -27,5 +31,34 @@ build-backend = "maturin"
 bindings = "bin"
 manifest-path = "crates/async_doctor/Cargo.toml"
 module-name = "async_doctor"
+# Console script name matches [[bin]] name = "async-doctor" in the crate.
 strip = true
-exclude = ["fixtures/**", "target/**", "docs/**"]
+exclude = [
+    "fixtures/**",
+    "target/**",
+    "docs/**",
+    "bench/**",
+    "integrations/**",
+    ".github/**",
+]
+
+# Defaults for `maturin generate-ci github` (Release workflow is hand-tuned
+# on top of this: v* tags only + workflow_dispatch dry-run, environment=pypi).
+[tool.maturin.generate-ci.github]
+pytest = false
+zig = true
+skip-attestation = false
+trusted-publishing = true
+publishing-environment = "pypi"
+
+[tool.maturin.generate-ci.github.linux]
+targets = ["x86_64", "aarch64"]
+
+[tool.maturin.generate-ci.github.musllinux]
+targets = ["x86_64", "aarch64"]
+
+[tool.maturin.generate-ci.github.macos]
+targets = ["x86_64", "aarch64"]
+
+[tool.maturin.generate-ci.github.windows]
+targets = ["x86_64"]
