@@ -115,7 +115,18 @@ def emit_table(results_json: str, results_tsv: str) -> None:
         line = line.strip()
         if not line:
             continue
-        name, commit, scan, files, findings, candidates, cold, warm, rss = line.split("|")
+        (
+            name,
+            commit,
+            scan,
+            files,
+            findings,
+            candidates,
+            cold,
+            warm,
+            rss,
+            identical,
+        ) = line.split("|")
         rows.append(
             {
                 "name": name,
@@ -127,6 +138,7 @@ def emit_table(results_json: str, results_tsv: str) -> None:
                 "cold_s": float(cold),
                 "warm_s": float(warm),
                 "peak_rss_kib": int(rss),
+                "identical": identical,
             }
         )
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -143,13 +155,17 @@ def emit_table(results_json: str, results_tsv: str) -> None:
             return f"{mib / 1024:.2f} GiB"
         return f"{mib:.0f} MiB"
 
-    print("| Corpus | Commit | Scan | Files | Findings | Candidates | Cold | Warm | Peak RSS |")
-    print("| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |")
+    print(
+        "| Corpus | Commit | Scan | Files | Findings | Candidates | Cold | Warm | "
+        "Peak RSS | Identical |"
+    )
+    print("| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |")
     for r in rows:
         print(
             f"| {r['name']} | `{r['commit'][:12]}` | `{r['scan']}/` | {r['files']} "
             f"| {r['findings']} | {r['candidates']} | {fmt_s(r['cold_s'])} "
-            f"| {fmt_s(r['warm_s'])} | {fmt_rss(r['peak_rss_kib'])} |"
+            f"| {fmt_s(r['warm_s'])} | {fmt_rss(r['peak_rss_kib'])} "
+            f"| {r['identical']} |"
         )
 
 

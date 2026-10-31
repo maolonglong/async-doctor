@@ -150,8 +150,14 @@ for blob in "${REPO_BLOBS[@]}"; do
     peak_rss_kib="${warm_rss}"
   fi
 
-  RESULTS+=("${name}|${commit}|${scan}|${files}|${findings}|${candidates}|${cold_s}|${warm_s}|${peak_rss_kib}")
-  echo "    files=${files} findings=${findings} candidates=${candidates} cold=${cold_s}s warm=${warm_s}s rss=${peak_rss_kib}KiB" >&2
+  if cmp -s "${cold_json}" "${warm_json}"; then
+    identical="yes"
+  else
+    identical="no"
+  fi
+
+  RESULTS+=("${name}|${commit}|${scan}|${files}|${findings}|${candidates}|${cold_s}|${warm_s}|${peak_rss_kib}|${identical}")
+  echo "    files=${files} findings=${findings} candidates=${candidates} cold=${cold_s}s warm=${warm_s}s rss=${peak_rss_kib}KiB identical=${identical}" >&2
 done
 
 RESULTS_TSV="${CLONE_ROOT}/results.tsv"
