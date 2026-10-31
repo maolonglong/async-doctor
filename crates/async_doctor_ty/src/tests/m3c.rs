@@ -1,4 +1,4 @@
-//! M3c recall: nested editable packages + self.engine SQLAlchemy.
+//! M3c recall: nested editable packages, search-path safety, self.engine.
 
 use std::fs;
 
@@ -71,8 +71,24 @@ fn m3c_nested_editable_cold_warm_identical() {
 }
 
 #[test]
-fn m3c_unresolved_import_surfaces_as_candidate() {
-    // Missing sibling package: call must not be silently dropped.
+fn m3c_sitepkgs_cold_warm_hidden_unresolved_identical() {
+    // Locks cold==warm including hiddenUnresolvedCandidates (third-party follow).
+    let dir = clone_fixture("m2_sitepkgs_cache");
+    let cache = fresh_cache_dir("m3c-sitepkgs-cw");
+    let cold = report_json_with_cache(&dir, &cache);
+    let warm = report_json_with_cache(&dir, &cache);
+    assert_eq!(
+        cold, warm,
+        "cold/warm must match including hidden unresolved counts"
+    );
+    let report: async_doctor_core::Report = serde_json::from_str(&cold).unwrap();
+    assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&cache);
+}
+
+#[test]
+fn m3c_unresolved_import_surfaces_once() {
     let dir = temp_project(&[(
         "main.py",
         "from missing_pkg.cfg import load_config\n\nasync def handler():\n    return load_config()\n",
@@ -85,8 +101,14 @@ fn m3c_unresolved_import_surfaces_as_candidate() {
     );
     assert!(
         hidden.hidden_unresolved_candidates >= 1,
-        "expected hidden unresolved candidate, got {}",
+        "expected hidden unresolved import, got {}",
         hidden.hidden_unresolved_candidates
+    );
+    // Call-level Name misses must not explode into candidates.
+    assert!(
+        hidden.candidates.is_empty(),
+        "plain unresolved calls must stay hidden without --show-unresolved: {:?}",
+        hidden.candidates
     );
 
     let shown = scan_path_with_options(
@@ -99,11 +121,49 @@ fn m3c_unresolved_import_surfaces_as_candidate() {
     .unwrap();
     assert!(
         shown
+            .unresolved_summary
+            .iter()
+            .any(|p| p.pattern.starts_with("unresolved-import:")),
+        "expected unresolved-import in summary: {:?}",
+        shown.unresolved_summary
+    );
+    assert!(
+        shown
             .candidates
             .iter()
-            .any(|c| c.rule == "unresolved-call" && c.entry.name == "handler"),
-        "expected unresolved candidate for load_config(): {:?}",
+            .any(|c| c.rule == "unresolved-import"),
+        "expected unresolved-import candidate: {:?}",
         shown.candidates
+    );
+    // No per-call unresolved-call candidate for load_config().
+    assert!(
+        shown
+            .candidates
+            .iter()
+            .all(|c| c.rule != "unresolved-call" || c.entry.name != "handler"),
+        "must not emit per-call unresolved for handler: {:?}",
+        shown.candidates
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn m3c_ruff_src_dot_keeps_findings() {
+    let dir = clone_fixture("m3c_ruff_src_dot");
+    let report = scan_path(&dir).unwrap();
+    assert_eq!(
+        report.findings.len(),
+        2,
+        "src=['.'] must not drop bot.store sinks: {:?}",
+        report.findings
+    );
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|f| f.rule == "blocking-db" && f.entry.name == "handle"),
+        "{:?}",
+        report.findings
     );
     let _ = fs::remove_dir_all(&dir);
 }
@@ -146,7 +206,6 @@ fn m3c_self_engine_begin_and_connect() {
 
 #[test]
 fn m3c_editable_finder_alone_resolves_without_config() {
-    // No pyright/ruff/ty config — only the setuptools finder MAPPING.
     let dir = temp_project(&[
         (
             "main.py",
@@ -181,4 +240,60 @@ fn m3c_editable_finder_alone_resolves_without_config() {
     let report = scan_path(&dir).unwrap();
     assert_four_http_sleep(&report, "finder-only");
     let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn m3c_editable_outside_scan_root_resolves() {
+    // Package lives outside the scan root; finder MAPPING points at it.
+    let pkg = temp_project(&[
+        ("libcore/__init__.py", ""),
+        (
+            "libcore/cfg.py",
+            "import time\nimport requests\n\ndef _fetch(key):\n    for attempt in range(3):\n        try:\n            return requests.get(f'https://config.example.com/{key}', timeout=5).text\n        except Exception:\n            time.sleep(0.5 * 2 ** attempt)\n    return ''\n\ndef load_config():\n    return {'secret': _fetch('secrets')}\n",
+        ),
+    ]);
+    let mapped = pkg.join("libcore");
+    let scan = temp_project(&[
+        (
+            "main.py",
+            "from libcore.cfg import load_config\n\nasync def handler():\n    return load_config()\n\nasync def other():\n    return load_config()\n",
+        ),
+        (
+            ".venv/pyvenv.cfg",
+            "home = /usr/bin\ninclude-system-site-packages = false\nversion = 3.12.0\n",
+        ),
+        (
+            ".venv/lib/python3.12/site-packages/requests/__init__.py",
+            "def get(url, **kwargs):\n    class R:\n        text = ''\n    return R()\n",
+        ),
+        (
+            ".venv/lib/python3.12/site-packages/requests-2.0.0.dist-info/METADATA",
+            "Name: requests\nVersion: 2.0.0\n",
+        ),
+        (
+            ".venv/lib/python3.12/site-packages/__editable___libcore_0_1_0_finder.py",
+            &format!(
+                "MAPPING = {{'libcore': '{}'}}\\nNAMESPACES = {{}}\\n",
+                mapped.display()
+            ),
+        ),
+        (
+            ".venv/lib/python3.12/site-packages/__editable__.libcore-0.1.0.pth",
+            "import __editable___libcore_0_1_0_finder\n",
+        ),
+    ]);
+    // Fix accidental escaped newline from format — rewrite finder cleanly.
+    fs::write(
+        scan.join(".venv/lib/python3.12/site-packages/__editable___libcore_0_1_0_finder.py"),
+        format!(
+            "MAPPING = {{'libcore': r'{}'}}\nNAMESPACES = {{}}\n",
+            mapped.display()
+        ),
+    )
+    .unwrap();
+
+    let report = scan_path(&scan).unwrap();
+    assert_four_http_sleep(&report, "outside-scan-root editable");
+    let _ = fs::remove_dir_all(&scan);
+    let _ = fs::remove_dir_all(&pkg);
 }

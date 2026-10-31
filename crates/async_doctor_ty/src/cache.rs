@@ -24,9 +24,10 @@ use serde::{Deserialize, Serialize};
 /// v5: redis subclass Externals key off receiver MRO (asyncio base ⇒
 /// `redis.asyncio.Redis.*`). A v4 cache written before that fix still stores
 /// sync `redis.Redis.*` for asyncio subclasses and must not be reused.
-/// v6: unresolved Name/Attribute callees emit `Unresolved` edges (no silent
-/// drop); extra search paths can change which third-party edges are recorded.
-pub const CACHE_SCHEMA_VERSION: u32 = 6;
+/// v6: briefly emitted unresolved Name/Attribute call edges (reverted in v7).
+/// v7: restore call-edge silence for plain Name/Attribute; failed imports are
+/// recorded separately; search paths append after src_roots (skip root dupes).
+pub const CACHE_SCHEMA_VERSION: u32 = 7;
 
 /// Tool version embedded in the cache path (from this crate's Cargo.toml).
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -410,9 +411,7 @@ mod tests {
 
     #[test]
     fn stale_schema_cache_is_not_reused() {
-        // v4 added `callee_is_coroutine`; v5 changed redis-subclass External
-        // keys; v6 records unresolved Name/Attribute edges. Older
-        // schema_version documents (or v3/v4/v5 directories) must miss.
+        // v4–v6 must not load under v7.
         let dir =
             std::env::temp_dir().join(format!("async-doctor-cache-stale-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -421,7 +420,7 @@ mod tests {
         let mut cache = PackageCache::new("demo", "1.0.0");
         assert_eq!(cache.schema_version, CACHE_SCHEMA_VERSION);
         assert!(cache.is_compatible());
-        for stale in [3u32, 4u32, 5u32] {
+        for stale in [3u32, 4u32, 5u32, 6u32] {
             cache.schema_version = stale;
             assert!(
                 !cache.is_compatible(),
@@ -433,7 +432,7 @@ mod tests {
         cache.schema_version = CACHE_SCHEMA_VERSION;
         save_package_cache(&root, &cache, "fpstale").unwrap();
         let path = package_cache_path(&root, "demo", "1.0.0", "fpstale");
-        for stale in [3u32, 4u32, 5u32] {
+        for stale in [3u32, 4u32, 5u32, 6u32] {
             let mut spoofed: serde_json::Value =
                 serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
             spoofed["schema_version"] = serde_json::json!(stale);
@@ -444,8 +443,8 @@ mod tests {
             );
         }
 
-        // Legacy directory layouts (v3/, v4/, v5/) must also miss.
-        for stale in [3u32, 4u32, 5u32] {
+        // Legacy directory layouts must also miss.
+        for stale in [3u32, 4u32, 5u32, 6u32] {
             let stale_dir = root
                 .join(format!("v{stale}"))
                 .join(sanitize(TOOL_VERSION))
@@ -462,7 +461,7 @@ mod tests {
         }
         assert!(
             load_package_cache(&root, "demo", "1.0.0", "fpstale").is_none(),
-            "files under v3/ or v4/ or v5/ must not be reused by schema v{CACHE_SCHEMA_VERSION}"
+            "legacy schema dirs must not be reused by schema v{CACHE_SCHEMA_VERSION}"
         );
 
         let _ = fs::remove_dir_all(&dir);

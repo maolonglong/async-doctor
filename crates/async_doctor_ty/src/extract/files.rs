@@ -202,6 +202,11 @@ pub(crate) fn extract_files(
         follow_budget,
     );
 
+    // Stable unresolved-import order (cold == warm JSON).
+    facts
+        .unresolved_imports
+        .sort_by(|a, b| (&a.file, a.line, &a.module).cmp(&(&b.file, b.line, &b.module)));
+
     // Stable edge order so cold extract vs warm cache materialization agree.
     // Never key on raw FunctionId — those differ between cold follow and warm
     // materialization even when the semantic graph is identical.

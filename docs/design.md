@@ -249,7 +249,7 @@ langgraph, home-assistant core, plus small fixtures per rule/pattern.
   Sync `with Engine.begin()` records the context `Call` as `WithEnter`.
   Consume-only sinks (`redis.PubSub.listen`) fire only when iterated.
 - **Per-`(package, version, content-fingerprint)` disk cache** under the user
-  cache dir (`v6/{tool}/{pkg}/{version}-{fingerprint}.json`), keyed by
+  cache dir (`v7/{tool}/{pkg}/{version}-{fingerprint}.json`), keyed by
   External qualname. Package meta lookups are memoized in a **per-scan**
   `PackageMetaMemo` (no process-global state). Callers (and tests) may inject
   the cache root explicitly — do not rely on mutating process-wide
@@ -280,11 +280,14 @@ langgraph, home-assistant core, plus small fixtures per rule/pattern.
 - Nested defs keyed by full scope; lambda assign+call; `@property` gets;
   genexpr consumption; imperative FastAPI/Starlette routes / `include_router`.
 - `--show-unresolved` aggregates by callee pattern (ranked by entries).
-  Unresolved Name/Attribute callees emit candidates (never silently dropped).
+  Failed imports surface once each (`unresolved-import:…`); plain unresolved
+  Name/Attribute *calls* stay silent (no per-call explosion).
 - Venv discovery: ty + `.venv` / `venv` / `VIRTUAL_ENV` (uv/poetry in-project).
-- Zero-config extra search paths: `pyrightconfig` / `[tool.pyright] extraPaths`,
-  `[tool.ty.environment] extra-paths`, `[tool.ruff] src`, and setuptools
-  editable finder `MAPPING` parents (finder `.pth` is not path-style).
+- Zero-config extra search paths (appended after src roots; skip root dupes):
+  `pyrightconfig` / `[tool.pyright] extraPaths`, `[tool.ty.environment]
+  extra-paths`, `[tool.ruff] src`, and setuptools editable finder `MAPPING`
+  parents (finder `.pth` is not path-style). Outside-scan-root editables are
+  walked so calls into them resolve.
 - Precision notes: `docs/precision_m2.md`.
 
 ### API notes (ty 0.0.20)
