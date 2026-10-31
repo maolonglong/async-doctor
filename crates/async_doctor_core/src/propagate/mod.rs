@@ -303,6 +303,25 @@ pub fn analyze_with_options(
             {
                 force_conditional = true;
             }
+            // Nested event-loop APIs behind `if loop is None` / similar guards
+            // (litellm `_dispatch_from_sync`) are runtime-safe when a loop is
+            // already running — demote to candidates to keep noise low.
+            if matches!(
+                &seed.kind,
+                SeedKind::Sink(h) if h.rule == special::RULE_NESTED_EVENT_LOOP
+            ) && (seed_edge
+                .conditions
+                .iter()
+                .any(|c| c.is_branch_like() || matches!(c, ConditionTag::AsyncBranch))
+                || path.edges.iter().any(|&i| {
+                    facts.edges[i]
+                        .conditions
+                        .iter()
+                        .any(|c| c.is_branch_like() || matches!(c, ConditionTag::AsyncBranch))
+                }))
+            {
+                force_conditional = true;
+            }
 
             match &seed.kind {
                 SeedKind::Sink(hit) => {

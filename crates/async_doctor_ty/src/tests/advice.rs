@@ -184,6 +184,49 @@ fn nested_event_loop_direct() {
 }
 
 #[test]
+fn nested_event_loop_guarded_is_candidate() {
+    // Mirrors litellm `_dispatch_from_sync`: asyncio.run only when no loop.
+    let dir = temp_project(&[(
+        "app.py",
+        concat!(
+            "import asyncio\n",
+            "\n",
+            "def dispatch(coro_factory):\n",
+            "    try:\n",
+            "        loop = asyncio.get_event_loop()\n",
+            "    except RuntimeError:\n",
+            "        loop = None\n",
+            "    if loop is None:\n",
+            "        asyncio.run(coro_factory())\n",
+            "    elif loop.is_running():\n",
+            "        loop.create_task(coro_factory())\n",
+            "    else:\n",
+            "        loop.run_until_complete(coro_factory())\n",
+            "\n",
+            "async def handler():\n",
+            "    dispatch(lambda: asyncio.sleep(0))\n",
+        ),
+    )]);
+    let report = scan_path(&dir).unwrap();
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|f| f.rule != "nested-event-loop"),
+        "guarded nested run must not be a finding: {:?}",
+        report.findings
+    );
+    assert!(
+        report
+            .candidates
+            .iter()
+            .any(|c| c.rule == "nested-event-loop" && c.entry.name == "handler"),
+        "expected nested-event-loop candidate: {:?}",
+        report.candidates
+    );
+}
+
+#[test]
 fn offload_coroutine_finding() {
     let dir = temp_project(&[(
         "app.py",
