@@ -7,11 +7,14 @@
 //! invalidate F without a per-file salsa reset.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
+use ruff_db::system::SystemPathBuf;
 use ruff_python_ast::Stmt;
 use ruff_python_parser::parse_module;
+
+use crate::extract::path::module_name_from_relative;
 
 use super::short_hash;
 
@@ -26,15 +29,98 @@ pub struct DepCatalogEntry {
     pub module: String,
 }
 
-/// Build `module_name (+ package-root aliases) → rel` for exact resolution.
+/// First-party module search roots matching ty's layout (`db.rs`):
+/// project root, `src/` when present, package-parent when scanning a package
+/// dir, plus config / editable-finder extras (without opening a salsa Db).
+pub fn first_party_search_roots(project_root: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![project_root.to_path_buf()];
+    let src_layout = project_root.join("src");
+    if src_layout.is_dir() {
+        roots.push(src_layout);
+    }
+    if project_root.join("__init__.py").is_file()
+        && let Some(parent) = project_root.parent()
+    {
+        let parent_buf = parent.to_path_buf();
+        if !roots.iter().any(|r| r == &parent_buf) {
+            roots.push(parent_buf);
+        }
+    }
+    let Ok(sys_root) = SystemPathBuf::from_path_buf(project_root.to_path_buf()) else {
+        return roots;
+    };
+    let existing: Vec<SystemPathBuf> = roots
+        .iter()
+        .filter_map(|r| SystemPathBuf::from_path_buf(r.clone()).ok())
+        .collect();
+    let site: Vec<SystemPathBuf> = Vec::new();
+    for extra in crate::search_paths::discover_extra_paths(&sys_root, &site, &existing) {
+        let p = PathBuf::from(extra.as_str());
+        if p.is_dir() && !roots.iter().any(|r| r == &p) {
+            roots.push(p);
+        }
+    }
+    roots
+}
+
+/// Module name of `abs` when imported via search root `root` (exact strip).
+pub fn module_under_search_root(root: &Path, abs: &Path) -> Option<String> {
+    let rel = abs.strip_prefix(root).ok()?;
+    let rel = rel.to_string_lossy().replace('\\', "/");
+    if rel.is_empty() {
+        return None;
+    }
+    Some(module_name_from_relative(&rel))
+}
+
+/// Prefer the longest matching search-root prefix (e.g. `src/` over project).
+pub fn importable_module(abs: &Path, roots: &[PathBuf]) -> String {
+    let mut best: Option<(usize, String)> = None;
+    for root in roots {
+        let Ok(canon_root) = root.canonicalize() else {
+            if let Some(m) = module_under_search_root(root, abs) {
+                let len = root.as_os_str().len();
+                if best.as_ref().is_none_or(|(l, _)| len > *l) {
+                    best = Some((len, m));
+                }
+            }
+            continue;
+        };
+        let abs_c = abs.canonicalize().unwrap_or_else(|_| abs.to_path_buf());
+        if let Some(m) = module_under_search_root(&canon_root, &abs_c) {
+            let len = canon_root.as_os_str().len();
+            if best.as_ref().is_none_or(|(l, _)| len > *l) {
+                best = Some((len, m));
+            }
+        }
+    }
+    best.map(|(_, m)| m).unwrap_or_default()
+}
+
+/// Build `module_name (+ search-root / package aliases) → rel` for exact resolution.
 pub fn build_module_to_rel(
     catalog: &[DepCatalogEntry],
     scan_root: &Path,
 ) -> HashMap<String, String> {
-    let mut out = HashMap::with_capacity(catalog.len().saturating_mul(2));
+    let roots = first_party_search_roots(scan_root);
+    let mut out = HashMap::with_capacity(catalog.len().saturating_mul(4));
     for e in catalog {
         for alias in module_name_aliases(scan_root, &e.module) {
             out.insert(alias, e.rel.clone());
+        }
+        for root in &roots {
+            if let Some(m) = module_under_search_root(root, &e.abs)
+                && !m.is_empty()
+            {
+                out.insert(m, e.rel.clone());
+            }
+            // Also try canonical paths when abs is already canonicalized.
+            if let (Ok(cr), Ok(ca)) = (root.canonicalize(), e.abs.canonicalize())
+                && let Some(m) = module_under_search_root(&cr, &ca)
+                && !m.is_empty()
+            {
+                out.insert(m, e.rel.clone());
+            }
         }
     }
     out
@@ -73,15 +159,52 @@ pub fn resolve_head_to_rel(
     module_to_rel.get(head).cloned()
 }
 
-/// Candidate project-relative paths for an unresolved dotted module head.
-pub fn absent_probe_rels(head: &str) -> Vec<String> {
+/// Project-relative absent probes under every first-party search root.
+///
+/// `from pkg.newm import f` with a `src/` layout probes `src/pkg/newm.py`
+/// (and `__init__`), not only `<root>/pkg/newm.py`.
+pub fn absent_probe_rels(head: &str, project_root: &Path, roots: &[PathBuf]) -> Vec<String> {
     if head.is_empty() || head.starts_with('.') {
         return Vec::new();
     }
     let path = head.replace('.', "/");
-    vec![format!("{path}.py"), format!("{path}/__init__.py")]
+    let suffixes = [format!("{path}.py"), format!("{path}/__init__.py")];
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let proj_canon = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    for root in roots {
+        for suffix in &suffixes {
+            let abs = root.join(suffix);
+            let rel = if let Ok(r) = abs.strip_prefix(project_root) {
+                r.to_string_lossy().replace('\\', "/")
+            } else if let Ok(r) = abs.strip_prefix(&proj_canon) {
+                r.to_string_lossy().replace('\\', "/")
+            } else if let (Ok(cr), Ok(ca)) = (root.canonicalize(), abs.canonicalize()) {
+                match ca.strip_prefix(&proj_canon) {
+                    Ok(r) => r.to_string_lossy().replace('\\', "/"),
+                    Err(_) => match ca.strip_prefix(&cr) {
+                        // Root outside the project (editable): keep root-relative
+                        // marker prefixed so it cannot collide with in-tree paths.
+                        Ok(r) => {
+                            let name = cr.file_name().and_then(|n| n.to_str()).unwrap_or("ext");
+                            let rest = r.to_string_lossy().replace('\\', "/");
+                            format!("__root__/{name}/{rest}")
+                        }
+                        Err(_) => continue,
+                    },
+                }
+            } else {
+                continue;
+            };
+            if seen.insert(rel.clone()) {
+                out.push(rel);
+            }
+        }
+    }
+    out
 }
-
 /// Import module heads scraped via AST (sorted unique).
 ///
 /// - `import a.b` → `a.b`
@@ -236,6 +359,7 @@ pub fn direct_deps_for_source(
     file_module: &str,
     module_to_rel: &HashMap<String, String>,
     scan_root: &Path,
+    search_roots: &[PathBuf],
 ) -> (Vec<String>, Vec<String>) {
     let mut deps = Vec::new();
     let mut absents = Vec::new();
@@ -248,7 +372,7 @@ pub fn direct_deps_for_source(
             }
             continue;
         }
-        for probe in absent_probe_rels(&head) {
+        for probe in absent_probe_rels(&head, scan_root, search_roots) {
             if seen_absent.insert(probe.clone()) {
                 absents.push(probe);
             }
@@ -266,22 +390,44 @@ pub type DepsAndFps = (
     HashMap<String, String>,
 );
 
+/// Content fingerprints only (no AST scrape) — cheap wide-miss preflight.
+pub fn build_content_fps_parallel(catalog: &[DepCatalogEntry]) -> HashMap<String, String> {
+    catalog
+        .par_iter()
+        .filter_map(|e| {
+            let bytes = std::fs::read(&e.abs).ok()?;
+            Some((e.rel.clone(), short_hash(&bytes)))
+        })
+        .collect()
+}
+
 /// One parallel pass: content fingerprints + direct deps + absents.
 ///
-/// Avoids double-reading every catalog file on cold save.
+/// Avoids double-reading every catalog file on cold save. Uses importable
+/// module names under ty search roots so `src/` layouts resolve.
 pub fn build_deps_and_fps_parallel(
     catalog: &[DepCatalogEntry],
     module_to_rel: &HashMap<String, String>,
     scan_root: &Path,
 ) -> DepsAndFps {
+    let search_roots = first_party_search_roots(scan_root);
     let pairs: Vec<(String, Vec<String>, Vec<String>, String)> = catalog
         .par_iter()
         .filter_map(|e| {
             let bytes = std::fs::read(&e.abs).ok()?;
             let fp = short_hash(&bytes);
             let source = String::from_utf8_lossy(&bytes);
-            let (deps, absents) =
-                direct_deps_for_source(&source, &e.module, module_to_rel, scan_root);
+            let file_module = {
+                let m = importable_module(&e.abs, &search_roots);
+                if m.is_empty() { e.module.clone() } else { m }
+            };
+            let (deps, absents) = direct_deps_for_source(
+                &source,
+                &file_module,
+                module_to_rel,
+                scan_root,
+                &search_roots,
+            );
             Some((e.rel.clone(), deps, absents, fp))
         })
         .collect();
@@ -295,7 +441,6 @@ pub fn build_deps_and_fps_parallel(
     }
     (direct, absents, content_fps)
 }
-
 /// FNV hash of sorted `{rel}\t{fp}` lines for the transitive import closure
 /// of `start_rel`, plus that file's absent probes.
 pub fn transitive_deps_fp(
@@ -579,6 +724,53 @@ mod scrape_tests {
         assert_eq!(
             resolve_head_to_rel("pkg.util", &map, root).as_deref(),
             Some("pkg/util.py")
+        );
+    }
+
+    #[test]
+    fn src_layout_absent_probes_and_module_map() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let src_pkg = root.join("src/pkg");
+        std::fs::create_dir_all(&src_pkg).unwrap();
+        std::fs::write(root.join("pyproject.toml"), "[project]\nname=\"x\"\n").unwrap();
+        std::fs::write(src_pkg.join("__init__.py"), "").unwrap();
+        std::fs::write(
+            src_pkg.join("svc.py"),
+            "from pkg.newm import f\nasync def run():\n    f()\n",
+        )
+        .unwrap();
+        let catalog = vec![
+            DepCatalogEntry {
+                abs: src_pkg.join("__init__.py"),
+                rel: "src/pkg/__init__.py".into(),
+                module: "src.pkg".into(),
+            },
+            DepCatalogEntry {
+                abs: src_pkg.join("svc.py"),
+                rel: "src/pkg/svc.py".into(),
+                module: "src.pkg.svc".into(),
+            },
+        ];
+        let map = build_module_to_rel(&catalog, root);
+        assert_eq!(
+            map.get("pkg.svc").map(String::as_str),
+            Some("src/pkg/svc.py"),
+            "src/ search root must register importable pkg.svc"
+        );
+        let roots = first_party_search_roots(root);
+        assert!(roots.iter().any(|r| r.ends_with("src")));
+        let probes = absent_probe_rels("pkg.newm", root, &roots);
+        assert!(
+            probes.iter().any(|p| p == "src/pkg/newm.py"),
+            "absent probe must sit under src/, got {probes:?}"
+        );
+        let (direct, absents, _) = build_deps_and_fps_parallel(&catalog, &map, root);
+        let svc_abs = absents.get("src/pkg/svc.py").cloned().unwrap_or_default();
+        assert!(
+            svc_abs.iter().any(|p| p == "src/pkg/newm.py"),
+            "svc deps must probe src/pkg/newm.py, got {svc_abs:?}; direct={:?}",
+            direct.get("src/pkg/svc.py")
         );
     }
 

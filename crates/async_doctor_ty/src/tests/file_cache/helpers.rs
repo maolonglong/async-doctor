@@ -49,12 +49,28 @@ pub(super) fn walkdir_json(root: &Path) -> Vec<PathBuf> {
             let p = ent.path();
             if p.is_dir() {
                 stack.push(p);
-            } else if p.extension().and_then(|e| e.to_str()) == Some("json") {
+                continue;
+            }
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.ends_with(".json") || name.ends_with(".json.gz") {
                 out.push(p);
             }
         }
     }
     out
+}
+
+pub(super) fn read_slot_json(path: &Path) -> String {
+    use std::io::Read;
+    if path.extension().and_then(|e| e.to_str()) == Some("gz") {
+        let raw = fs::read(path).unwrap();
+        let mut dec = flate2::read::GzDecoder::new(raw.as_slice());
+        let mut s = String::new();
+        dec.read_to_string(&mut s).unwrap();
+        s
+    } else {
+        fs::read_to_string(path).unwrap()
+    }
 }
 
 /// Default `scen.sh` / `scen2.sh` package tree (`base()`).

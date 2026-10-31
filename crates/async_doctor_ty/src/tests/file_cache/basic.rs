@@ -4,7 +4,9 @@ use std::fs;
 use std::time::Instant;
 
 use super::super::helpers::{clone_fixture, fresh_cache_dir, report_json_with_cache, temp_project};
-use super::helpers::{files_cache_dir, incremental_vs_cold, walkdir_json, wipe_scan_cache};
+use super::helpers::{
+    files_cache_dir, incremental_vs_cold, read_slot_json, walkdir_json, wipe_scan_cache,
+};
 use crate::cache::CACHE_SCHEMA_VERSION;
 
 #[test]
@@ -118,11 +120,23 @@ fn stale_file_cache_schema_is_not_reused() {
     let files_root = files_cache_dir(&cache);
     assert!(files_root.is_dir());
     for entry in walkdir_json(&files_root) {
-        let data = fs::read_to_string(&entry).unwrap();
+        if entry.file_name().and_then(|n| n.to_str()) == Some("_project_meta.json") {
+            let data = fs::read_to_string(&entry).unwrap();
+            let mut spoofed: serde_json::Value = serde_json::from_str(&data).unwrap();
+            spoofed["schema_version"] = serde_json::json!(CACHE_SCHEMA_VERSION - 1);
+            fs::write(&entry, serde_json::to_string(&spoofed).unwrap()).unwrap();
+            continue;
+        }
+        let data = read_slot_json(&entry);
         let mut spoofed: serde_json::Value = serde_json::from_str(&data).unwrap();
         if spoofed.get("schema_version").is_some() {
             spoofed["schema_version"] = serde_json::json!(CACHE_SCHEMA_VERSION - 1);
-            fs::write(&entry, serde_json::to_string(&spoofed).unwrap()).unwrap();
+            let raw = serde_json::to_vec(&spoofed).unwrap();
+            let f = fs::File::create(&entry).unwrap();
+            let mut enc = flate2::write::GzEncoder::new(f, flate2::Compression::fast());
+            use std::io::Write;
+            enc.write_all(&raw).unwrap();
+            enc.finish().unwrap();
         }
     }
     wipe_scan_cache(&cache);
@@ -156,7 +170,7 @@ fn deps_fp_populated_on_cold_save() {
         if entry.file_name().and_then(|n| n.to_str()) == Some("_project_meta.json") {
             continue;
         }
-        let data = fs::read_to_string(&entry).unwrap();
+        let data = read_slot_json(&entry);
         let v: serde_json::Value = serde_json::from_str(&data).unwrap();
         let rel = v["rel"].as_str().unwrap_or("");
         let deps = v["deps_fp"].as_str().unwrap_or("");

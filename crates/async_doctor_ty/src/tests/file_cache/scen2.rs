@@ -334,3 +334,59 @@ fn scen_bodyonly() {
     .unwrap();
     incremental_vs_cold(&dir, &cache, "bodyonly");
 }
+
+/// `src/` layout: new module appears under the ty search root (not project root).
+#[test]
+fn scen_srcadd() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().to_path_buf();
+    fs::create_dir_all(dir.join("src/pkg")).unwrap();
+    fs::write(dir.join("pyproject.toml"), "[project]\nname=\"x\"\n").unwrap();
+    fs::write(dir.join("src/pkg/__init__.py"), "").unwrap();
+    fs::write(
+        dir.join("src/pkg/svc.py"),
+        "from pkg.newm import f\nasync def run():\n    f()\n",
+    )
+    .unwrap();
+    let cache = fresh_cache_dir("scen-srcadd");
+    let _ = report_json_with_cache(&dir, &cache);
+    fs::write(
+        dir.join("src/pkg/newm.py"),
+        "import time\ndef f():\n    time.sleep(1)\n",
+    )
+    .unwrap();
+    incremental_vs_cold(&dir, &cache, "srcadd");
+}
+
+/// `src/` layout: return-annotation-only change under `src/pkg/`.
+#[test]
+fn scen_srcret() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().to_path_buf();
+    fs::create_dir_all(dir.join("src/pkg")).unwrap();
+    fs::write(dir.join("pyproject.toml"), "[project]\nname=\"x\"\n").unwrap();
+    fs::write(dir.join("src/pkg/__init__.py"), "").unwrap();
+    fs::write(
+        dir.join("src/pkg/bases.py"),
+        "import time\nclass Safe:\n    def go(self):\n        pass\nclass Blocking:\n    def go(self):\n        time.sleep(1)\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/pkg/svc.py"),
+        "from pkg.factory import make\nasync def run():\n    make().go()\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/pkg/factory.py"),
+        "from pkg.bases import Safe, Blocking\ndef make(x=None) -> Safe:\n    return x\n",
+    )
+    .unwrap();
+    let cache = fresh_cache_dir("scen-srcret");
+    let _ = report_json_with_cache(&dir, &cache);
+    fs::write(
+        dir.join("src/pkg/factory.py"),
+        "from pkg.bases import Safe, Blocking\ndef make(x=None) -> Blocking:\n    return x\n",
+    )
+    .unwrap();
+    incremental_vs_cold(&dir, &cache, "srcret");
+}
