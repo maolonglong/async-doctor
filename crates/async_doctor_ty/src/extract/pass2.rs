@@ -1,18 +1,17 @@
 //! Parallel first-party call-resolution (pass 2).
 //!
-//! Each worker clones the salsa [`AsyncDoctorDb`] (shared memo storage — ty
-//! supports parallel queries) and extracts one file into an isolated
-//! [`Pass2FileResult`]. Results are merged in catalog file order so FunctionIds
-//! for lambdas stay byte-identical to a sequential run.
+//! Salsa `Storage` is `Send + !Sync`, so each worker gets an owned DB clone
+//! created on the calling thread, then work-steals file indices from a shared
+//! queue (per-file granularity). Shared def/qual tables are read through base
+//! overlays so workers do not clone those maps per file.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_doctor_core::{
     CallEdge, CalleeRef, FunctionFact, FunctionId, ProjectFacts, UnresolvedImport,
 };
-use rayon::prelude::*;
 use ruff_db::files::system_path_to_file;
 use ruff_db::parsed::parsed_module;
 use ruff_db::source::{line_index, source_text};
@@ -27,8 +26,7 @@ use super::collector::CallCollector;
 use super::constants::collect_module_constants;
 use super::ctx::{DefKey, FileCtx, TaskTargets};
 
-/// Inputs shared read-only across pass-2 workers (cloned Arc per worker for maps
-/// that CallCollector mutates with lambda inserts).
+/// Inputs shared read-only across pass-2 workers.
 pub(crate) struct Pass2Shared {
     pub functions: Arc<Vec<FunctionFact>>,
     pub def_map: Arc<HashMap<DefKey, FunctionId>>,
@@ -53,16 +51,21 @@ pub(crate) struct Pass2FileResult {
     /// Existing (pre-pass2) functions labeled Route by imperative registration.
     pub route_ids: HashSet<FunctionId>,
     pub sync_route_ids: HashSet<FunctionId>,
+    /// Base-function field patches applied during this file's visit.
+    pub base_patches: Vec<BaseFnPatch>,
     pub unresolved_imports: Vec<UnresolvedImport>,
     pub unresolved_third_party_modules: Vec<String>,
 }
 
-/// Run pass 2 in parallel; returned vec is aligned with `files` order.
-///
-/// Salsa `Storage` is `Send + !Sync` (thread-local ZalsaLocal). Clone one owned
-/// DB **per rayon worker chunk** (not per file) on the calling thread, then
-/// process that chunk sequentially so SemanticModel memos reuse within a
-/// thread — matching ty's parallel-query model without clone storms.
+/// Mutations CallCollector makes on pre-existing (pass-1) functions.
+#[derive(Debug, Clone)]
+pub(crate) struct BaseFnPatch {
+    pub id: FunctionId,
+    pub is_offload_wrapper: bool,
+    pub invokes_params: Vec<u32>,
+}
+
+/// Run pass 2 in parallel with per-thread DB clones and per-file work-stealing.
 pub(crate) fn run_pass2_parallel(
     db: &AsyncDoctorDb,
     files: &[Pass2FileSpec],
@@ -71,26 +74,38 @@ pub(crate) fn run_pass2_parallel(
     if files.is_empty() {
         return Vec::new();
     }
-    let nthreads = rayon::current_num_threads().max(1);
-    let chunk_size = files.len().div_ceil(nthreads).max(1);
-    // Build (owned db, index range) jobs on this thread — Storage is !Sync.
-    let mut jobs: Vec<(AsyncDoctorDb, usize, usize)> = Vec::new();
-    let mut start = 0;
-    while start < files.len() {
-        let end = (start + chunk_size).min(files.len());
-        jobs.push((db.clone(), start, end));
-        start = end;
-    }
-    let mut indexed: Vec<(usize, Pass2FileResult)> = jobs
-        .into_par_iter()
-        .flat_map(|(db, start, end)| {
-            files[start..end]
-                .iter()
-                .enumerate()
-                .map(|(offset, spec)| (start + offset, extract_one_file(&db, spec, shared)))
-                .collect::<Vec<_>>()
-        })
-        .collect();
+    let nthreads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(files.len())
+        .max(1);
+    let queue = Mutex::new((0..files.len()).collect::<VecDeque<_>>());
+    let mut indexed: Vec<(usize, Pass2FileResult)> = Vec::with_capacity(files.len());
+
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(nthreads);
+        for _ in 0..nthreads {
+            // Clone on this thread — Storage is !Sync so rayon map_init cannot
+            // capture `&AsyncDoctorDb`.
+            let worker_db = db.clone();
+            let queue = &queue;
+            handles.push(scope.spawn(move || {
+                let mut out = Vec::new();
+                loop {
+                    let i = queue.lock().unwrap().pop_front();
+                    let Some(i) = i else {
+                        break;
+                    };
+                    out.push((i, extract_one_file(&worker_db, &files[i], shared)));
+                }
+                out
+            }));
+        }
+        for h in handles {
+            indexed.extend(h.join().expect("pass2 worker"));
+        }
+    });
+
     indexed.sort_by_key(|(i, _)| *i);
     indexed.into_iter().map(|(_, r)| r).collect()
 }
@@ -101,17 +116,6 @@ fn extract_one_file(
     shared: &Pass2Shared,
 ) -> Pass2FileResult {
     let base_len = shared.functions.len();
-    let mut facts = ProjectFacts {
-        functions: (*shared.functions).clone(),
-        complete: true,
-        ..ProjectFacts::default()
-    };
-    let mut def_map = (*shared.def_map).clone();
-    let mut qual_map = (*shared.qual_map).clone();
-    let mut follow_targets: HashMap<String, FollowTarget> = HashMap::new();
-    let mut task_targets = TaskTargets::default();
-    let mut package_meta = PackageMetaMemo::new();
-
     let empty = Pass2FileResult {
         rel: spec.rel.clone(),
         new_functions: Vec::new(),
@@ -121,6 +125,7 @@ fn extract_one_file(
         task_target_ids: HashSet::new(),
         route_ids: HashSet::new(),
         sync_route_ids: HashSet::new(),
+        base_patches: Vec::new(),
         unresolved_imports: Vec::new(),
         unresolved_third_party_modules: Vec::new(),
     };
@@ -137,6 +142,21 @@ fn extract_one_file(
     if parsed.has_invalid_syntax() {
         return empty;
     }
+
+    // Functions: copy-on-write scratch (CallCollector mutates base slots).
+    // def/qual maps: empty locals + shared base overlays (no full-map clone).
+    let mut facts = ProjectFacts {
+        functions: Vec::with_capacity(base_len + 8),
+        complete: true,
+        ..ProjectFacts::default()
+    };
+    facts.functions.extend(shared.functions.iter().cloned());
+    let mut def_map: HashMap<DefKey, FunctionId> = HashMap::new();
+    let mut qual_map: HashMap<(String, String), FunctionId> = HashMap::new();
+    let mut follow_targets: HashMap<String, FollowTarget> = HashMap::new();
+    let mut task_targets = TaskTargets::default();
+    let mut package_meta = PackageMetaMemo::new();
+
     let model = SemanticModel::new(db, program_file);
     let ctx = FileCtx {
         db,
@@ -153,7 +173,9 @@ fn extract_one_file(
         model: &model,
         facts: &mut facts,
         def_map: &mut def_map,
+        def_map_base: Some(shared.def_map.as_ref()),
         qual_map: &mut qual_map,
+        qual_map_base: Some(shared.qual_map.as_ref()),
         property_defs: &shared.property_defs,
         task_targets: &mut task_targets,
         follow_targets: &mut follow_targets,
@@ -191,35 +213,33 @@ fn extract_one_file(
         visitor.visit_stmt(stmt);
     }
 
-    let new_functions: Vec<FunctionFact> = facts.functions.drain(base_len..).collect();
-    let mut new_def_keys = Vec::new();
-    for (i, f) in new_functions.iter().enumerate() {
-        // Provisional id was base_len + i.
-        let provisional = FunctionId((base_len + i) as u32);
-        if let Some((key, _)) = def_map.iter().find(|(_, id)| **id == provisional) {
-            new_def_keys.push((key.clone(), i));
-        } else {
-            // Fallback: reconstruct from file + name_start unknown — use qual map.
-            let _ = f;
-        }
-    }
-    // Prefer def_map entries whose FunctionId is in the provisional range.
-    new_def_keys.clear();
-    for (key, id) in &def_map {
-        let idx = id.0 as usize;
-        if idx >= base_len {
-            new_def_keys.push((key.clone(), idx - base_len));
-        }
-    }
-
+    let mut base_patches = Vec::new();
     let mut route_ids = HashSet::new();
     let mut sync_route_ids = HashSet::new();
-    for f in facts.functions.iter().take(base_len) {
+    for (i, f) in facts.functions.iter().enumerate().take(base_len) {
+        let base = &shared.functions[i];
         if f.label == async_doctor_core::EntryLabel::Route {
             route_ids.insert(f.id);
         }
         if f.is_sync_route {
             sync_route_ids.insert(f.id);
+        }
+        if f.is_offload_wrapper != base.is_offload_wrapper || f.invokes_params != base.invokes_params
+        {
+            base_patches.push(BaseFnPatch {
+                id: f.id,
+                is_offload_wrapper: f.is_offload_wrapper,
+                invokes_params: f.invokes_params.clone(),
+            });
+        }
+    }
+
+    let new_functions: Vec<FunctionFact> = facts.functions.drain(base_len..).collect();
+    let mut new_def_keys = Vec::with_capacity(def_map.len());
+    for (key, id) in &def_map {
+        let idx = id.0 as usize;
+        if idx >= base_len {
+            new_def_keys.push((key.clone(), idx - base_len));
         }
     }
 
@@ -232,6 +252,7 @@ fn extract_one_file(
         task_target_ids: task_targets.0,
         route_ids,
         sync_route_ids,
+        base_patches,
         unresolved_imports: facts.unresolved_imports,
         unresolved_third_party_modules: facts.unresolved_third_party_modules,
     }
@@ -261,6 +282,13 @@ pub(crate) fn merge_pass2_results(
             let provisional = FunctionId((base_fn_len + local_idx) as u32);
             if let Some(&new_id) = remap.get(&provisional) {
                 def_map.insert(key, new_id);
+            }
+        }
+        for patch in result.base_patches {
+            let id = remap.get(&patch.id).copied().unwrap_or(patch.id);
+            if let Some(f) = facts.functions.get_mut(id.index()) {
+                f.is_offload_wrapper = patch.is_offload_wrapper;
+                f.invokes_params = patch.invokes_params;
             }
         }
         for mut edge in result.edges {

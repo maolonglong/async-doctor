@@ -30,10 +30,11 @@ use super::ctx::{DefKey, FileCtx, TaskTargets};
 use super::facts_dump::dump_facts_pre_follow;
 use super::facts_merge::{append_cached_edges_only, stabilize_facts};
 use super::file_cache::{
-    CachedFileFacts, CachedProjectMeta, file_cache_slot_exists, file_content_fingerprint,
-    file_facts_from_project, import_fps_for_source, import_fps_still_valid,
-    load_file_facts_unchecked, load_project_meta, merge_cached_files, save_file_facts,
-    save_project_meta,
+    CachedFileFacts, CachedProjectMeta, MissFileSpec, direct_import_deps,
+    expand_transitive_import_fps, file_cache_slot_exists, file_content_fingerprint,
+    import_fps_for_source, import_fps_still_valid, insert_module_fp_aliases,
+    load_file_facts_unchecked, load_project_meta, merge_cached_files,
+    save_miss_file_facts_parallel, save_project_meta,
 };
 use super::follow::follow_third_party;
 use super::functions::{collect_functions, twin_name};
@@ -118,7 +119,7 @@ pub(crate) fn extract_files(
     if any_slot {
         for f in &mut catalog {
             if let Some(fp) = file_content_fingerprint(&f.abs) {
-                module_fps.insert(f.module.clone(), fp.clone());
+                insert_module_fp_aliases(&mut module_fps, project_std, &f.module, fp.clone());
                 f.content_fp = Some(fp);
             }
         }
@@ -480,16 +481,30 @@ fn extract_with_optional_cache_hits(
         }
     }
 
-    // Ensure module_fps covers the whole catalog before encoding import keys.
-    if module_fps.len() < catalog.len() {
-        for entry in catalog {
-            module_fps.entry(entry.module.clone()).or_insert_with(|| {
-                file_content_fingerprint(&entry.abs).unwrap_or_else(|| String::from("0"))
-            });
+    let project_std = project_root.as_std_path();
+    let canon_modules: HashSet<String> = catalog.iter().map(|e| e.module.clone()).collect();
+
+    // Ensure module_fps covers the whole catalog (with package-root aliases)
+    // before encoding import keys.
+    for entry in catalog {
+        if module_fps.contains_key(&entry.module) {
+            continue;
         }
+        let fp = file_content_fingerprint(&entry.abs).unwrap_or_else(|| String::from("0"));
+        insert_module_fp_aliases(module_fps, project_std, &entry.module, fp);
     }
 
-    // Persist first-party per-file caches *before* follow.
+    // Direct first-party import graph for transitive invalidation (canonical keys).
+    let mut direct_deps: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for entry in catalog {
+        let source = std::fs::read_to_string(&entry.abs).unwrap_or_default();
+        let deps =
+            direct_import_deps(&source, &entry.module, module_fps, &canon_modules, project_std);
+        direct_deps.insert(entry.module.clone(), deps);
+    }
+
+    // Persist first-party per-file caches *before* follow (parallel encode/save).
+    let mut miss_specs: Vec<MissFileSpec> = Vec::with_capacity(misses.len());
     for &idx in misses {
         let entry = &catalog[idx];
         let fp = entry.content_fp.clone().unwrap_or_else(|| {
@@ -500,22 +515,28 @@ fn extract_with_optional_cache_hits(
                 .unwrap_or_else(|| String::from("0"))
         });
         let source = std::fs::read_to_string(&entry.abs).unwrap_or_default();
-        let import_fps = import_fps_for_source(&source, &entry.module, module_fps);
-        let file_tp = tp_by_rel.remove(&entry.rel).unwrap_or_default();
-        let cached = file_facts_from_project(
-            &facts,
-            &entry.rel,
-            &fp,
-            venv_fp,
-            import_fps,
-            file_tp,
-            &def_map,
-            &follow_targets,
-            &task_targets.0,
-            &property_defs,
+        let direct = import_fps_for_source(
+            &source,
+            &entry.module,
+            module_fps,
+            &canon_modules,
+            project_std,
         );
-        let _ = save_file_facts(cache_root, project_root.as_std_path(), &cached);
+        let import_fps = expand_transitive_import_fps(&direct, &direct_deps, module_fps);
+        let file_tp = tp_by_rel.remove(&entry.rel).unwrap_or_default();
+        miss_specs.push((entry.rel.clone(), fp, import_fps, file_tp));
     }
+    save_miss_file_facts_parallel(
+        cache_root,
+        project_root.as_std_path(),
+        &facts,
+        &def_map,
+        &follow_targets,
+        &task_targets.0,
+        &property_defs,
+        venv_fp,
+        &miss_specs,
+    );
     let mut tp = facts.unresolved_third_party_modules.clone();
     tp.sort();
     tp.dedup();
@@ -612,7 +633,9 @@ fn run_pass2_batched(
                 model: &model,
                 facts,
                 def_map,
+                def_map_base: None,
                 qual_map,
+                qual_map_base: None,
                 property_defs,
                 task_targets,
                 follow_targets,

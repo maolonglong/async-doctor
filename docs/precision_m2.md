@@ -41,8 +41,9 @@ cited in review (target was ≤1.2×).
 Warm runs with a real site-packages follow path are faster because the
 versioned package cache (`v{schema}/{tool}/{package}/{version}-{fingerprint}.json`) stores
 full edge summaries under External qualname keys and materializes transitive
-callees without re-parsing. Schema **v10** also adds a whole-scan report cache
-(`scan/{input-fingerprint}.json`) so unchanged inputs skip extract entirely.
+callees without re-parsing. Schema **v13** also adds a whole-scan report cache
+(`scan/{input-fingerprint}.json`, content-hash keyed) so unchanged inputs skip
+extract entirely, plus a per-file fact cache for incremental one-file edits.
 
 ## FP / FN list (sampled)
 

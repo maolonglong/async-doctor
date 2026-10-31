@@ -37,7 +37,10 @@ use serde::{Deserialize, Serialize};
 /// after editing a subset of sources.
 /// v12: file-cache stores `async_twins`, import/venv fingerprints, and a
 /// project sidecar for unresolved third-party module heads.
-pub const CACHE_SCHEMA_VERSION: u32 = 12;
+/// v13: import keys by scanned module names (submodule + package-root aliases),
+/// transitive first-party import closure, module+qualname edge remapping, and
+/// content-hash whole-scan fingerprints.
+pub const CACHE_SCHEMA_VERSION: u32 = 13;
 
 /// Tool version embedded in the cache path (from this crate's Cargo.toml).
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");

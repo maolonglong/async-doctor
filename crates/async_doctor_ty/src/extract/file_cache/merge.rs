@@ -124,20 +124,6 @@ pub fn merge_cached_files(
         }
     }
 
-    let resolve = |r: &CachedProjectRef| -> Option<FunctionId> {
-        if !r.file.is_empty()
-            && let Some(&id) = def_map.get(&DefKey {
-                file: r.file.clone(),
-                name_start: r.name_start,
-            })
-        {
-            return Some(id);
-        }
-        qual_map
-            .get(&(r.module.clone(), r.qualname.clone()))
-            .copied()
-    };
-
     for cf in cached {
         for e in &cf.edges {
             let Some(&caller) = def_map.get(&DefKey {
@@ -146,23 +132,21 @@ pub fn merge_cached_files(
             }) else {
                 continue;
             };
+            let resolve = |r: &CachedProjectRef| -> Option<FunctionId> {
+                resolve_project_ref(&facts.functions, &def_map, &qual_map, r)
+            };
             let callee = match e.callee_kind.as_str() {
                 "project" => {
-                    let by_def = match (&e.callee_file, e.callee_name_start) {
-                        (Some(file), Some(ns)) if !file.is_empty() => def_map
-                            .get(&DefKey {
-                                file: file.clone(),
-                                name_start: ns,
-                            })
-                            .copied(),
-                        _ => None,
-                    };
                     let module = e.callee_module.clone().unwrap_or_default();
-                    match by_def.or_else(|| {
-                        qual_map
-                            .get(&(module.clone(), e.callee_qualname.clone()))
-                            .copied()
-                    }) {
+                    match resolve_project_callee(
+                        &facts.functions,
+                        &def_map,
+                        &qual_map,
+                        e.callee_file.as_deref(),
+                        e.callee_name_start,
+                        &module,
+                        &e.callee_qualname,
+                    ) {
                         Some(id) => CalleeRef::Project(id),
                         None => CalleeRef::Unresolved {
                             reason: format!("project:{module}.{}", e.callee_qualname),
@@ -194,6 +178,17 @@ pub fn merge_cached_files(
                     qualname: e.callee_qualname.clone(),
                 },
             };
+            let positional_callables: Vec<_> = e
+                .positional_callable_refs
+                .iter()
+                .map(|o| o.as_ref().and_then(resolve))
+                .collect();
+            let keyword_callables: Vec<_> = e
+                .keyword_callable_refs
+                .iter()
+                .filter_map(|(k, r)| resolve(r).map(|id| (k.clone(), id)))
+                .collect();
+            let context_from_caller = e.context_from_caller.as_ref().and_then(resolve);
             facts.edges.push(CallEdge {
                 caller,
                 callee,
@@ -213,16 +208,8 @@ pub fn merge_cached_files(
                     .iter()
                     .map(|o| o.as_deref().and_then(parse_literal))
                     .collect(),
-                positional_callables: e
-                    .positional_callable_refs
-                    .iter()
-                    .map(|o| o.as_ref().and_then(resolve))
-                    .collect(),
-                keyword_callables: e
-                    .keyword_callable_refs
-                    .iter()
-                    .filter_map(|(k, r)| resolve(r).map(|id| (k.clone(), id)))
-                    .collect(),
+                positional_callables,
+                keyword_callables,
                 param_guard: match (e.param_guard_index, e.param_guard_inverted) {
                     (Some(index), Some(inverted)) => Some(ParamGuard { index, inverted }),
                     _ => None,
@@ -230,7 +217,7 @@ pub fn merge_cached_files(
                 is_awaited: e.is_awaited,
                 callee_is_coroutine: e.callee_is_coroutine,
                 is_eager_offload_arg: e.is_eager_offload_arg,
-                context_from_caller: e.context_from_caller.as_ref().and_then(resolve),
+                context_from_caller,
             });
         }
         for &ns in &cf.task_target_name_starts {
@@ -247,4 +234,54 @@ pub fn merge_cached_files(
     }
 
     (facts, def_map, qual_map)
+}
+
+/// Remap a cached project callee: DefKey hit only when module+qualname still
+/// match (offset shifts must not re-point at a different function). Fall back
+/// to `(module, qualname)`; otherwise `None` (caller should re-extract).
+pub(crate) fn resolve_project_callee(
+    functions: &[FunctionFact],
+    def_map: &DefMap,
+    qual_map: &QualMap,
+    callee_file: Option<&str>,
+    callee_name_start: Option<u32>,
+    module: &str,
+    qualname: &str,
+) -> Option<FunctionId> {
+    if let (Some(file), Some(ns)) = (callee_file, callee_name_start)
+        && !file.is_empty()
+        && let Some(&id) = def_map.get(&DefKey {
+            file: file.to_string(),
+            name_start: ns,
+        })
+        && let Some(f) = functions.get(id.index())
+        && f.module == module
+        && f.qualname == qualname
+    {
+        return Some(id);
+    }
+    qual_map
+        .get(&(module.to_string(), qualname.to_string()))
+        .copied()
+}
+
+pub(crate) fn resolve_project_ref(
+    functions: &[FunctionFact],
+    def_map: &DefMap,
+    qual_map: &QualMap,
+    r: &CachedProjectRef,
+) -> Option<FunctionId> {
+    resolve_project_callee(
+        functions,
+        def_map,
+        qual_map,
+        if r.file.is_empty() {
+            None
+        } else {
+            Some(r.file.as_str())
+        },
+        Some(r.name_start),
+        &r.module,
+        &r.qualname,
+    )
 }

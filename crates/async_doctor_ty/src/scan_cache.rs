@@ -9,7 +9,6 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use async_doctor_core::{AnalyzeOptions, Report};
 use serde::{Deserialize, Serialize};
@@ -79,8 +78,11 @@ pub fn save_scan_report(root: &Path, fingerprint: &str, report: &Report) -> std:
 /// Fingerprint everything that can change graded output for a scan root.
 ///
 /// Includes schema/tool versions, analyze options, follow budget, every
-/// first-party `.py` `(rel, len, mtime_secs)`, the active venv identity, and
+/// first-party `.py` `(rel, content-hash)`, the active venv identity, and
 /// each installed dist-info content fingerprint.
+///
+/// Content hashes (not whole-second mtime+size) so same-second same-size edits
+/// still invalidate the whole-scan cache.
 pub fn scan_input_fingerprint(
     scan_root: &Path,
     first_party_files: &[PathBuf],
@@ -88,7 +90,7 @@ pub fn scan_input_fingerprint(
     follow_budget: usize,
 ) -> String {
     let mut blob = String::with_capacity(64 * 1024);
-    blob.push_str("scan-cache-v1\n");
+    blob.push_str("scan-cache-v2\n");
     blob.push_str(&format!(
         "schema:{CACHE_SCHEMA_VERSION}\ntool:{TOOL_VERSION}\n"
     ));
@@ -102,22 +104,19 @@ pub fn scan_input_fingerprint(
         .unwrap_or_else(|_| scan_root.to_path_buf());
     blob.push_str(&format!("root:{}\n", root_canon.display()));
 
-    let mut files: Vec<(String, u64, u64)> = Vec::with_capacity(first_party_files.len());
+    let mut files: Vec<(String, String)> = Vec::with_capacity(first_party_files.len());
     for path in first_party_files {
         let rel = path
             .strip_prefix(&root_canon)
             .or_else(|_| path.strip_prefix(scan_root))
             .unwrap_or(path);
         let rel = rel.to_string_lossy().replace('\\', "/");
-        let (len, mtime) = match fs::metadata(path) {
-            Ok(meta) => (meta.len(), mtime_secs(&meta)),
-            Err(_) => (0, 0),
-        };
-        files.push((rel, len, mtime));
+        let fp = content_fingerprint(path).unwrap_or_else(|| "0".to_string());
+        files.push((rel, fp));
     }
     files.sort();
-    for (rel, len, mtime) in &files {
-        blob.push_str(&format!("py:{rel}:{len}:{mtime}\n"));
+    for (rel, fp) in &files {
+        blob.push_str(&format!("py:{rel}:{fp}\n"));
     }
 
     // Config files that affect search-path discovery (extraPaths / editables).
@@ -128,9 +127,9 @@ pub fn scan_input_fingerprint(
         "ruff.toml",
         ".ruff.toml",
     ] {
-        push_file_meta(&mut blob, "cfg", &root_canon.join(name));
+        push_file_content(&mut blob, "cfg", &root_canon.join(name));
         if let Some(parent) = root_canon.parent() {
-            push_file_meta(&mut blob, "cfg", &parent.join(name));
+            push_file_content(&mut blob, "cfg", &parent.join(name));
         }
     }
 
@@ -152,25 +151,19 @@ pub fn scan_input_fingerprint(
     short_hash(blob.as_bytes())
 }
 
-fn push_file_meta(blob: &mut String, tag: &str, path: &Path) {
-    if let Ok(meta) = fs::metadata(path)
-        && meta.is_file()
-    {
-        blob.push_str(&format!(
-            "{tag}:{}:{}:{}\n",
-            path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
-            meta.len(),
-            mtime_secs(&meta)
-        ));
-    }
+fn content_fingerprint(path: &Path) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    Some(short_hash(&bytes))
 }
 
-fn mtime_secs(meta: &fs::Metadata) -> u64 {
-    meta.modified()
-        .ok()
-        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+fn push_file_content(blob: &mut String, tag: &str, path: &Path) {
+    if let Some(fp) = content_fingerprint(path) {
+        blob.push_str(&format!(
+            "{tag}:{}:{}\n",
+            path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+            fp
+        ));
+    }
 }
 
 /// Compact fingerprint of the active venv's installed dist-info set.

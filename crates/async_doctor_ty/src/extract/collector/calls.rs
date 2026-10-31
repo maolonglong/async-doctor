@@ -417,9 +417,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             return;
         };
         let is_prop = self
-            .def_map
+            .property_defs
             .iter()
-            .any(|(k, id)| *id == fid && self.property_defs.contains(k));
+            .any(|k| self.def_get(k) == Some(fid));
         if !is_prop {
             return;
         }
@@ -494,7 +494,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             file: self.ctx.rel.clone(),
             name_start: u32::from(lam.range.start()),
         };
-        if let Some(id) = self.def_map.get(&key).copied() {
+        if let Some(id) = self.def_get(&key) {
             return id;
         }
         let id = FunctionId(self.facts.functions.len() as u32);

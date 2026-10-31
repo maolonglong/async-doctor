@@ -17,24 +17,6 @@ pub(crate) fn append_cached_edges_only(
     def_map: &HashMap<DefKey, FunctionId>,
     qual_map: &HashMap<(String, String), FunctionId>,
 ) {
-    let resolve_ref = |r: &super::file_cache::CachedProjectRef| -> Option<FunctionId> {
-        if !r.file.is_empty()
-            && let Some(&id) = def_map.get(&DefKey {
-                file: r.file.clone(),
-                name_start: r.name_start,
-            })
-        {
-            return Some(id);
-        }
-        qual_map
-            .get(&(r.module.clone(), r.qualname.clone()))
-            .copied()
-    };
-    let resolve = |module: &str, qual: &str| -> Option<FunctionId> {
-        qual_map
-            .get(&(module.to_string(), qual.to_string()))
-            .copied()
-    };
     for cf in cached {
         for e in &cf.edges {
             let Some(&caller) = def_map.get(&DefKey {
@@ -43,19 +25,21 @@ pub(crate) fn append_cached_edges_only(
             }) else {
                 continue;
             };
+            let resolve_ref = |r: &super::file_cache::CachedProjectRef| -> Option<FunctionId> {
+                super::file_cache::resolve_project_ref(&facts.functions, def_map, qual_map, r)
+            };
             let callee = match e.callee_kind.as_str() {
                 "project" => {
-                    let by_def = match (&e.callee_file, e.callee_name_start) {
-                        (Some(file), Some(ns)) if !file.is_empty() => def_map
-                            .get(&DefKey {
-                                file: file.clone(),
-                                name_start: ns,
-                            })
-                            .copied(),
-                        _ => None,
-                    };
                     let module = e.callee_module.as_deref().unwrap_or("");
-                    match by_def.or_else(|| resolve(module, &e.callee_qualname)) {
+                    match super::file_cache::resolve_project_callee(
+                        &facts.functions,
+                        def_map,
+                        qual_map,
+                        e.callee_file.as_deref(),
+                        e.callee_name_start,
+                        module,
+                        &e.callee_qualname,
+                    ) {
                         Some(id) => CalleeRef::Project(id),
                         None => CalleeRef::Unresolved {
                             reason: format!("project:{module}.{}", e.callee_qualname),
@@ -110,6 +94,17 @@ pub(crate) fn append_cached_edges_only(
                 "GeneratorConsume" => CallKind::GeneratorConsume,
                 _ => CallKind::Call,
             };
+            let positional_callables: Vec<_> = e
+                .positional_callable_refs
+                .iter()
+                .map(|o| o.as_ref().and_then(resolve_ref))
+                .collect();
+            let keyword_callables: Vec<_> = e
+                .keyword_callable_refs
+                .iter()
+                .filter_map(|(k, r)| resolve_ref(r).map(|id| (k.clone(), id)))
+                .collect();
+            let context_from_caller = e.context_from_caller.as_ref().and_then(resolve_ref);
             facts.edges.push(CallEdge {
                 caller,
                 callee,
@@ -125,16 +120,8 @@ pub(crate) fn append_cached_edges_only(
                     .iter()
                     .map(|o| o.as_deref().and_then(parse_lit))
                     .collect(),
-                positional_callables: e
-                    .positional_callable_refs
-                    .iter()
-                    .map(|o| o.as_ref().and_then(resolve_ref))
-                    .collect(),
-                keyword_callables: e
-                    .keyword_callable_refs
-                    .iter()
-                    .filter_map(|(k, r)| resolve_ref(r).map(|id| (k.clone(), id)))
-                    .collect(),
+                positional_callables,
+                keyword_callables,
                 param_guard: match (e.param_guard_index, e.param_guard_inverted) {
                     (Some(index), Some(inverted)) => Some(ParamGuard { index, inverted }),
                     _ => None,
@@ -142,7 +129,7 @@ pub(crate) fn append_cached_edges_only(
                 is_awaited: e.is_awaited,
                 callee_is_coroutine: e.callee_is_coroutine,
                 is_eager_offload_arg: e.is_eager_offload_arg,
-                context_from_caller: e.context_from_caller.as_ref().and_then(resolve_ref),
+                context_from_caller,
             });
         }
     }

@@ -1,6 +1,8 @@
-//! Encode live [`ProjectFacts`] into per-file cache blobs + import keys.
+//! Encode live [`ProjectFacts`] into per-file cache blobs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::Path;
+use std::sync::Arc;
 
 use async_doctor_core::{
     CallKind, CalleeRef, EntryLabel, FunctionFact, FunctionId, LiteralArg, ProjectFacts,
@@ -12,104 +14,6 @@ use super::{
     CachedFileEdge, CachedFileFacts, CachedFileFn, CachedFileUnresolvedImport, CachedProjectRef,
 };
 use crate::extract::ctx::DefKey;
-
-/// Map first-party import heads from `source` onto content fingerprints.
-pub fn import_fps_for_source(
-    source: &str,
-    file_module: &str,
-    module_fps: &BTreeMap<String, String>,
-) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
-    for head in scrape_import_modules(source, file_module) {
-        if let Some(fp) = lookup_module_fp(module_fps, &head) {
-            out.insert(head, fp);
-        }
-    }
-    out
-}
-
-/// True when every recorded import fingerprint still matches `module_fps`.
-pub fn import_fps_still_valid(
-    cached: &BTreeMap<String, String>,
-    module_fps: &BTreeMap<String, String>,
-) -> bool {
-    cached.iter().all(|(mod_name, fp)| {
-        lookup_module_fp(module_fps, mod_name)
-            .as_ref()
-            .is_some_and(|cur| cur == fp)
-    })
-}
-
-fn lookup_module_fp(module_fps: &BTreeMap<String, String>, name: &str) -> Option<String> {
-    if let Some(fp) = module_fps.get(name) {
-        return Some(fp.clone());
-    }
-    let mut cur = name;
-    while let Some((parent, _)) = cur.rsplit_once('.') {
-        if let Some(fp) = module_fps.get(parent) {
-            return Some(fp.clone());
-        }
-        cur = parent;
-    }
-    None
-}
-
-fn scrape_import_modules(source: &str, file_module: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for raw in source.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("import ") {
-            for part in rest.split(',') {
-                let full = part.split_whitespace().next().unwrap_or("").to_string();
-                if !full.is_empty() {
-                    out.push(full);
-                }
-            }
-        } else if let Some(rest) = line.strip_prefix("from ") {
-            let mut bits = rest.split_whitespace();
-            let Some(mod_part) = bits.next() else {
-                continue;
-            };
-            if mod_part.starts_with('.') {
-                if let Some(resolved) = resolve_relative_import(file_module, mod_part) {
-                    out.push(resolved);
-                }
-            } else if !mod_part.is_empty() {
-                out.push(mod_part.to_string());
-            }
-        }
-    }
-    out.sort();
-    out.dedup();
-    out
-}
-
-fn resolve_relative_import(file_module: &str, rel: &str) -> Option<String> {
-    let dots = rel.chars().take_while(|c| *c == '.').count();
-    let rest = &rel[dots..];
-    let mut parts: Vec<&str> = file_module.split('.').filter(|s| !s.is_empty()).collect();
-    if !file_module.is_empty() {
-        let _ = parts.pop();
-    }
-    if dots > 1 {
-        let up = dots - 1;
-        if up > parts.len() {
-            return None;
-        }
-        parts.truncate(parts.len() - up);
-    }
-    if !rest.is_empty() {
-        parts.extend(rest.split('.').filter(|s| !s.is_empty()));
-    }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join("."))
-    }
-}
 
 fn label_str(l: EntryLabel) -> &'static str {
     match l {
@@ -131,41 +35,72 @@ fn call_kind_to_str(k: CallKind) -> &'static str {
     }
 }
 
-/// Build a per-file cache blob from live facts for one relative path.
+/// Precomputed indexes for encoding many files without O(files × facts) rebuilds.
+pub struct EncodeIndexes<'a> {
+    pub def_by_id: HashMap<u32, &'a DefKey>,
+    pub fns_by_file: HashMap<&'a str, Vec<&'a FunctionFact>>,
+    pub name_start_by_id: HashMap<u32, u32>,
+    pub edges_by_file: HashMap<&'a str, Vec<usize>>,
+}
+
+impl<'a> EncodeIndexes<'a> {
+    pub fn build(facts: &'a ProjectFacts, def_map: &'a HashMap<DefKey, FunctionId>) -> Self {
+        let mut def_by_id: HashMap<u32, &DefKey> = HashMap::with_capacity(def_map.len());
+        let mut name_start_by_id: HashMap<u32, u32> = HashMap::with_capacity(def_map.len());
+        for (key, id) in def_map {
+            def_by_id.insert(id.0, key);
+            name_start_by_id.insert(id.0, key.name_start);
+        }
+        let mut fns_by_file: HashMap<&str, Vec<&FunctionFact>> = HashMap::new();
+        for f in &facts.functions {
+            if f.is_third_party {
+                continue;
+            }
+            fns_by_file.entry(f.file.as_str()).or_default().push(f);
+        }
+        let mut edges_by_file: HashMap<&str, Vec<usize>> = HashMap::new();
+        for (i, e) in facts.edges.iter().enumerate() {
+            let Some(caller) = facts.functions.get(e.caller.index()) else {
+                continue;
+            };
+            if caller.is_third_party {
+                continue;
+            }
+            edges_by_file
+                .entry(caller.file.as_str())
+                .or_default()
+                .push(i);
+        }
+        Self {
+            def_by_id,
+            fns_by_file,
+            name_start_by_id,
+            edges_by_file,
+        }
+    }
+}
+
+/// Build a per-file cache blob from live facts using precomputed indexes.
 #[allow(clippy::too_many_arguments)]
-pub fn file_facts_from_project(
+pub fn file_facts_from_project_with_indexes(
     facts: &ProjectFacts,
+    indexes: &EncodeIndexes<'_>,
     rel: &str,
     content_fp: &str,
     venv_fp: &str,
     import_fps: BTreeMap<String, String>,
     unresolved_third_party_modules: Vec<String>,
-    def_map: &std::collections::HashMap<DefKey, FunctionId>,
-    follow_targets: &std::collections::HashMap<String, crate::sitepkgs::FollowTarget>,
-    task_targets: &std::collections::HashSet<FunctionId>,
-    property_defs: &std::collections::HashSet<DefKey>,
+    follow_targets: &HashMap<String, crate::sitepkgs::FollowTarget>,
+    task_targets: &HashSet<FunctionId>,
+    property_defs: &HashSet<DefKey>,
 ) -> CachedFileFacts {
-    let file_fns: Vec<&FunctionFact> = facts
-        .functions
-        .iter()
-        .filter(|f| f.file == rel && !f.is_third_party)
-        .collect();
-    let id_set: std::collections::HashSet<FunctionId> = file_fns.iter().map(|f| f.id).collect();
-
-    // Full id → DefKey so Project callees in *other* files keep file+name_start.
-    let mut def_by_id: BTreeMap<u32, &DefKey> = BTreeMap::new();
-    let mut name_start_by_id: BTreeMap<u32, u32> = BTreeMap::new();
-    for (key, id) in def_map {
-        def_by_id.insert(id.0, key);
-        if key.file == rel {
-            name_start_by_id.insert(id.0, key.name_start);
-        }
-    }
+    let file_fns = indexes.fns_by_file.get(rel).map(Vec::as_slice).unwrap_or(&[]);
+    let id_set: HashSet<FunctionId> = file_fns.iter().map(|f| f.id).collect();
 
     let functions: Vec<CachedFileFn> = file_fns
         .iter()
         .filter_map(|f| {
-            let name_start = name_start_by_id.get(&f.id.0).copied()?;
+            let name_start = indexes.name_start_by_id.get(&f.id.0).copied()?;
             Some(CachedFileFn {
                 name_start,
                 line: f.line,
@@ -188,7 +123,7 @@ pub fn file_facts_from_project(
         if f.is_third_party {
             return None;
         }
-        let key = def_by_id.get(&id.0)?;
+        let key = indexes.def_by_id.get(&id.0)?;
         Some(CachedProjectRef {
             module: f.module.clone(),
             qualname: f.qualname.clone(),
@@ -197,12 +132,19 @@ pub fn file_facts_from_project(
         })
     };
 
-    let edges: Vec<CachedFileEdge> = facts
-        .edges
+    let edge_idxs = indexes
+        .edges_by_file
+        .get(rel)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let edges: Vec<CachedFileEdge> = edge_idxs
         .iter()
-        .filter(|e| id_set.contains(&e.caller))
-        .filter_map(|e| {
-            let caller_name_start = *name_start_by_id.get(&e.caller.0)?;
+        .filter_map(|&ei| {
+            let e = facts.edges.get(ei)?;
+            if !id_set.contains(&e.caller) {
+                return None;
+            }
+            let caller_name_start = *indexes.name_start_by_id.get(&e.caller.0)?;
             let (
                 callee_kind,
                 callee_qualname,
@@ -266,7 +208,7 @@ pub fn file_facts_from_project(
                             f.qualname.clone(),
                             Some(f.module.clone()),
                             Some(f.file.clone()),
-                            def_by_id.get(&id.0).map(|k| k.name_start),
+                            indexes.def_by_id.get(&id.0).map(|k| k.name_start),
                             None,
                             None,
                         )
@@ -366,7 +308,13 @@ pub fn file_facts_from_project(
         follow_targets: follow,
         task_target_name_starts: task_targets
             .iter()
-            .filter_map(|id| name_start_by_id.get(&id.0).copied())
+            .filter_map(|id| {
+                let f = facts.functions.get(id.index())?;
+                if f.file != rel {
+                    return None;
+                }
+                indexes.name_start_by_id.get(&id.0).copied()
+            })
             .collect(),
         property_def_name_starts: property_defs
             .iter()
@@ -374,4 +322,42 @@ pub fn file_facts_from_project(
             .map(|k| k.name_start)
             .collect(),
     }
+}
+
+/// One miss file to encode: `(rel, content_fp, import_fps, unresolved_tp)`.
+pub type MissFileSpec = (String, String, BTreeMap<String, String>, Vec<String>);
+
+/// Encode and save miss files in parallel using shared read-only indexes.
+#[allow(clippy::too_many_arguments)]
+pub fn save_miss_file_facts_parallel(
+    cache_root: &Path,
+    project_root: &Path,
+    facts: &ProjectFacts,
+    def_map: &HashMap<DefKey, FunctionId>,
+    follow_targets: &HashMap<String, crate::sitepkgs::FollowTarget>,
+    task_targets: &HashSet<FunctionId>,
+    property_defs: &HashSet<DefKey>,
+    venv_fp: &str,
+    miss_specs: &[MissFileSpec],
+) {
+    if miss_specs.is_empty() {
+        return;
+    }
+    let indexes = Arc::new(EncodeIndexes::build(facts, def_map));
+    use rayon::prelude::*;
+    miss_specs.par_iter().for_each(|(rel, fp, import_fps, file_tp)| {
+        let cached = file_facts_from_project_with_indexes(
+            facts,
+            &indexes,
+            rel,
+            fp,
+            venv_fp,
+            import_fps.clone(),
+            file_tp.clone(),
+            follow_targets,
+            task_targets,
+            property_defs,
+        );
+        let _ = super::save_file_facts(cache_root, project_root, &cached);
+    });
 }

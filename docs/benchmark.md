@@ -22,8 +22,10 @@ Numbers from this VM (Linux x86_64, release binary, isolated
 Cold JSON finding **ids** match the pre-change baseline on litellm (4491).
 Warm ≪ cold via the whole-scan report cache. Incremental one-file edit (file
 cache hits + one miss) is ~3–4s and **byte-identical** to a fresh cold on the
-edited tree. Default pass-2 keeps one salsa DB (cold ≈ baseline); set
-`ASYNC_DOCTOR_PASS2_BATCH=N` or `locality` to trade wall time for lower peak RSS.
+edited tree. Default pass-2 uses **parallel per-thread salsa DB clones** with
+per-file work-stealing (cold ≈ baseline on multi-core); set
+`ASYNC_DOCTOR_PASS2_BATCH=N` or `locality` for a single DB with periodic resets
+(lower peak RSS, slower cold).
 
 ### Incremental / all-hit (litellm, package cache warm)
 
@@ -47,7 +49,10 @@ Warm was not faster: the package cache only skips third-party re-parse;
 first-party `SemanticModel` work dominated. After this change, warm is
 discovery + fingerprint + scan-cache load (~50 ms) plus JSON emit (~0.4 s).
 
-- **async-doctor:** `0.1.0` (CACHE_SCHEMA_VERSION **v12**)
+- **async-doctor:** `0.1.0` (CACHE_SCHEMA_VERSION **v13**)
+- **jemalloc:** non-MSVC builds link `tikv-jemallocator`; building the Python
+  sdist/wheel that vendors the native binary needs a working `make` (jemalloc's
+  autotools build).
 - **Host:** Linux 6.12, x86_64 cloud agent VM (4 cores for these numbers)
 - **Measured:** wall clock via `time.perf_counter`; peak RSS via
   `resource.getrusage(RUSAGE_CHILDREN).ru_maxrss` (Linux KiB)

@@ -6,6 +6,7 @@
 //! stable ids by sorted file order so cold and incremental-warm agree.
 
 mod encode;
+mod import_keys;
 mod merge;
 
 use std::collections::BTreeMap;
@@ -17,8 +18,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::cache::{CACHE_SCHEMA_VERSION, CachedFollowTarget, TOOL_VERSION, sanitize_component};
 
-pub use encode::{file_facts_from_project, import_fps_for_source, import_fps_still_valid};
+pub use encode::{save_miss_file_facts_parallel, MissFileSpec};
+pub use import_keys::{
+    direct_import_deps, expand_transitive_import_fps, import_fps_for_source, import_fps_still_valid,
+    insert_module_fp_aliases,
+};
 pub use merge::merge_cached_files;
+pub(crate) use merge::{resolve_project_callee, resolve_project_ref};
 
 /// One first-party function body, keyed for remapping without global ids.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

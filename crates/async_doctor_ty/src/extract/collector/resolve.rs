@@ -437,7 +437,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             file: rel,
             name_start: u32::from(node.name.range.start()),
         };
-        self.def_map.get(&key).copied()
+        self.def_get(&key)
     }
 
     pub(crate) fn external_qualname(&mut self, func: &Expr) -> Option<String> {
