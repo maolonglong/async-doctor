@@ -61,11 +61,15 @@ pub(crate) fn copy_dir(src: &Path, dst: &Path) {
     fs::create_dir_all(dst).unwrap();
     for entry in fs::read_dir(src).unwrap() {
         let entry = entry.unwrap();
+        let from = entry.path();
         let to = dst.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
-            copy_dir(&entry.path(), &to);
+        // Follow directory symlinks (shared advice stub venv) into a real copy
+        // so each test gets an isolated tree under the temp dir.
+        let meta = fs::metadata(&from).unwrap();
+        if meta.is_dir() {
+            copy_dir(&from, &to);
         } else {
-            fs::copy(entry.path(), to).unwrap();
+            fs::copy(&from, to).unwrap();
         }
     }
 }
