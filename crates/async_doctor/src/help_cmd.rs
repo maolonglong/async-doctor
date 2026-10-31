@@ -34,8 +34,10 @@ pub fn run_why(
         include_non_production,
         show_unresolved,
     };
-    let report = async_doctor_ty::scan_path_with_options(path, options)
+    let mut report = async_doctor_ty::scan_path_with_options(path, options)
         .with_context(|| format!("failed to scan `{}`", path.display()))?;
+    // Same rewrite the default scan applies — nested `why:` lines must be runnable.
+    crate::rewrite_why_commands(&mut report, path);
 
     let matches = findings_at(&report, &file, line);
     let mut out = std::io::stdout().lock();
