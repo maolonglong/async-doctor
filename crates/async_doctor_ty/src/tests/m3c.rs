@@ -4,9 +4,7 @@ use std::fs;
 
 use async_doctor_core::AnalyzeOptions;
 
-use super::helpers::{
-    clone_fixture, fresh_cache_dir, report_json_with_cache, temp_project,
-};
+use super::helpers::{clone_fixture, fresh_cache_dir, report_json_with_cache, temp_project};
 use crate::{scan_path, scan_path_with_cache, scan_path_with_options};
 
 fn assert_four_http_sleep(report: &async_doctor_core::Report, label: &str) {
@@ -27,7 +25,11 @@ fn assert_four_http_sleep(report: &async_doctor_core::Report, label: &str) {
         .iter()
         .filter(|f| f.rule == "blocking-sleep")
         .count();
-    assert_eq!(http, 2, "{label}: expected 2 blocking-http: {:?}", report.findings);
+    assert_eq!(
+        http, 2,
+        "{label}: expected 2 blocking-http: {:?}",
+        report.findings
+    );
     assert_eq!(
         sleep, 2,
         "{label}: expected 2 blocking-sleep: {:?}",
@@ -129,10 +131,7 @@ fn m3c_self_engine_begin_and_connect() {
         "AsyncEngine paths must stay clean: {names:?}"
     );
     assert!(
-        report
-            .findings
-            .iter()
-            .all(|f| f.rule == "blocking-db"),
+        report.findings.iter().all(|f| f.rule == "blocking-db"),
         "expected only blocking-db: {:?}",
         report.findings
     );
