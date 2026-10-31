@@ -253,9 +253,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 .args
                 .get(callable_idx)
                 .and_then(|arg| match arg {
-                    Expr::Call(inner) if is_partial_call(inner) => {
-                        inner.arguments.args.first()
-                    }
+                    Expr::Call(inner) if is_partial_call(inner) => inner.arguments.args.first(),
                     other => Some(other),
                 })
                 .and_then(|target| self.resolve_callee_is_coroutine(target));

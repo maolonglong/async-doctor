@@ -1,5 +1,6 @@
 //! Integration tests for call-graph extraction + propagation.
 
+mod advice;
 mod basics;
 mod budget;
 mod conditions;
@@ -10,6 +11,5 @@ mod m2;
 mod m3a;
 mod m3a_precision;
 mod m3c;
-mod advice;
 mod offload;
 mod scan_cache;

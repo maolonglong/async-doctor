@@ -137,12 +137,10 @@ pub(super) fn collect_offload_twin_advice(
             let conditions = reconcile_conditions(&condition_tags);
             // Advice requires unconditional reachability of the sinks; also
             // prefer unconditional offload sites.
-            if conditions.iter().any(|c| {
-                matches!(
-                    c.as_str(),
-                    "async-branch" | "cache_miss_dependent" | "loop"
-                )
-            }) && !conditions.iter().any(|c| c == "unconditional")
+            if conditions
+                .iter()
+                .any(|c| matches!(c.as_str(), "async-branch" | "cache_miss_dependent" | "loop"))
+                && !conditions.iter().any(|c| c == "unconditional")
             {
                 // Still allow if reconcile kept unconditional — skip only when
                 // the offload itself is clearly branch-guarded with no
