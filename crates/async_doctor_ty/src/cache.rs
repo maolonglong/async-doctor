@@ -47,9 +47,34 @@ pub const CACHE_SCHEMA_VERSION: u32 = 13;
 /// Tool version embedded in the cache path (from this crate's Cargo.toml).
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Build identity from `build.rs` (git sha or stable fallback). Used so two
-/// binaries with the same package version do not share whole-scan reports.
-pub const BUILD_ID: &str = env!("ASYNC_DOCTOR_BUILD_ID");
+/// Build identity for whole-scan report cache keys.
+///
+/// Hashed from the running executable so edits in any linked crate (or the
+/// workspace lockfile) invalidate reuse after rebuild — without relying on
+/// `build.rs` rerun-if-changed coverage of every path.
+pub fn build_id() -> &'static str {
+    use std::sync::OnceLock;
+    static ID: OnceLock<String> = OnceLock::new();
+    ID.get_or_init(|| {
+        if let Ok(exe) = std::env::current_exe()
+            && let Ok(bytes) = std::fs::read(&exe)
+        {
+            return format!("exe-{:x}", fnv1a64_bytes(&bytes));
+        }
+        // Fallback when the exe cannot be read (unusual): compile-time stamp.
+        env!("ASYNC_DOCTOR_BUILD_ID").to_string()
+    })
+    .as_str()
+}
+
+fn fnv1a64_bytes(data: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in data {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
 
 /// One cached edge from a third-party function body (full summary).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
