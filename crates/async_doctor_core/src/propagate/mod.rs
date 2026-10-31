@@ -303,24 +303,18 @@ pub fn analyze_with_options(
             {
                 force_conditional = true;
             }
-            // Nested event-loop APIs behind `if loop is None` / similar guards
-            // (litellm `_dispatch_from_sync`) are runtime-safe when a loop is
-            // already running — demote to candidates to keep noise low.
+            // Nested event-loop under a proven "no running loop" guard
+            // (`if loop is None`, `except RuntimeError` after get_running_loop,
+            // `not loop.is_running()`, …) is runtime-safe when already async —
+            // drop entirely. Other conditional nested-loop sites stay findings.
             if matches!(
                 &seed.kind,
                 SeedKind::Sink(h) if h.rule == special::RULE_NESTED_EVENT_LOOP
-            ) && (seed_edge
-                .conditions
+            ) && condition_tags
                 .iter()
-                .any(|c| c.is_branch_like() || matches!(c, ConditionTag::AsyncBranch))
-                || path.edges.iter().any(|&i| {
-                    facts.edges[i]
-                        .conditions
-                        .iter()
-                        .any(|c| c.is_branch_like() || matches!(c, ConditionTag::AsyncBranch))
-                }))
+                .any(|c| matches!(c, ConditionTag::NoRunningLoopGuard))
             {
-                force_conditional = true;
+                continue;
             }
 
             match &seed.kind {
@@ -605,19 +599,17 @@ pub fn analyze_with_options(
             b.id.as_str(),
         ))
     });
+    // Keep advice ordered by offload site file/line (set in collect_offload_twin_advice).
     report.advice.sort_by(|a, b| {
-        (
-            a.fix.fix_group_id.as_str(),
-            a.entry.file.as_str(),
-            a.entry.line,
-            a.id.as_str(),
-        )
-            .cmp(&(
-                b.fix.fix_group_id.as_str(),
-                b.entry.file.as_str(),
-                b.entry.line,
-                b.id.as_str(),
-            ))
+        let (af, al) = match a.chain.last() {
+            Some(s) => (s.file.as_str(), s.line),
+            None => (a.entry.file.as_str(), a.entry.line),
+        };
+        let (bf, bl) = match b.chain.last() {
+            Some(s) => (s.file.as_str(), s.line),
+            None => (b.entry.file.as_str(), b.entry.line),
+        };
+        (af, al, a.id.as_str()).cmp(&(bf, bl, b.id.as_str()))
     });
 
     report.refresh_sink_sites();

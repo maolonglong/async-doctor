@@ -3,18 +3,19 @@
 //! Fires only at offload cut sites reachable from async entries, when every
 //! unconditionally reached sink has a high-confidence same-package async twin
 //! that resolves (with its `needs`) in the scanned venv. Never affects exit code.
+//!
+//! The offload site's own try/if/loop conditions are irrelevant — advice is about
+//! the offloaded work's sinks, not whether the offload call is branch-guarded.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use crate::graph::{
-    CalleeRef, ConditionTag, FunctionId, OffloadKind, ProjectFacts, is_non_production_entry_path,
+    CalleeRef, FunctionId, OffloadKind, ProjectFacts, is_non_production_entry_path,
 };
 use crate::id::{FindingIdParts, finding_id, fix_group_id};
 use crate::report::{Advice, AdviceCategory, ChainStep, Entry, Fix};
 
-use super::grade::{
-    chain_step_for, reconcile_conditions, resolution_for_edge, shortest_paths_to_async_entries,
-};
+use super::grade::{chain_step_for, resolution_for_edge, shortest_paths_to_async_entries};
 use super::{AsyncTwinHit, SinkTable};
 
 pub(super) const RULE_OFFLOAD_HAS_ASYNC_TWIN: &str = "offload-has-async-twin";
@@ -26,8 +27,9 @@ pub(super) fn collect_offload_twin_advice(
     reverse: &BTreeMap<FunctionId, Vec<usize>>,
     include_non_production: bool,
 ) -> Vec<Advice> {
-    let forward = build_forward_graph(facts);
-    let async_reachable = functions_reachable_from_async_entries(facts, &forward, reverse);
+    let edges_by_caller = build_edges_by_caller(facts);
+    let callers_of = build_callee_index(facts);
+    let async_reachable = functions_reachable_from_async_entries(facts, &edges_by_caller);
     let sync_only_callers = sync_non_async_reachable_callers(facts, &async_reachable);
 
     let mut advice = Vec::new();
@@ -56,11 +58,13 @@ pub(super) fn collect_offload_twin_advice(
 
         // Sync-caller exemption: target also invoked from sync code that is
         // not async-reachable — switching to an async twin would break it.
-        if target_has_sync_only_caller(facts, &target, &sync_only_callers, edge_idx) {
+        if target_has_sync_only_caller(facts, &target, &sync_only_callers, edge_idx, &callers_of) {
             continue;
         }
 
-        let Some(reached) = unconditional_sinks_from_target(facts, sinks, &forward, &target) else {
+        let Some(reached) =
+            unconditional_sinks_from_target(facts, sinks, &edges_by_caller, &target)
+        else {
             continue;
         };
         if reached.is_empty() {
@@ -104,7 +108,6 @@ pub(super) fn collect_offload_twin_advice(
 
             let mut chain_steps: Vec<ChainStep> = Vec::new();
             let mut chain_qualnames: Vec<String> = Vec::new();
-            let mut condition_tags: Vec<ConditionTag> = Vec::new();
 
             for &eidx in &path.edges {
                 let e = &facts.edges[eidx];
@@ -119,7 +122,6 @@ pub(super) fn collect_offload_twin_advice(
                 if let CalleeRef::Project(fid) = e.callee {
                     chain_qualnames.push(facts.function(fid).full_qualname());
                 }
-                condition_tags.extend(e.conditions.iter().copied());
             }
 
             let caller_fn = facts.function(edge.caller);
@@ -130,24 +132,10 @@ pub(super) fn collect_offload_twin_advice(
                 edge.text.clone(),
                 format!("offload boundary (`{}`)", kind.as_str()),
             ));
-            condition_tags.extend(edge.conditions.iter().copied());
+            // Offload-site try/if/loop tags are intentionally ignored — only
+            // unconditional sink reachability inside the target matters.
             chain_qualnames.push(format!("offload:{}", kind.as_str()));
             chain_qualnames.push(primary_twin.to_string());
-
-            let conditions = reconcile_conditions(&condition_tags);
-            // Advice requires unconditional reachability of the sinks; also
-            // prefer unconditional offload sites.
-            if conditions
-                .iter()
-                .any(|c| matches!(c.as_str(), "async-branch" | "cache_miss_dependent" | "loop"))
-                && !conditions.iter().any(|c| c == "unconditional")
-            {
-                // Still allow if reconcile kept unconditional — skip only when
-                // the offload itself is clearly branch-guarded with no
-                // unconditional tag. `reconcile_conditions` drops unconditional
-                // when branch-like tags are present.
-                continue;
-            }
 
             let chain_refs: Vec<&str> = chain_qualnames.iter().map(String::as_str).collect();
             let sink_key = format!("twin:{primary_twin}");
@@ -201,19 +189,17 @@ pub(super) fn collect_offload_twin_advice(
         }
     }
 
+    // Sort by offload site file/line (last chain hop), not fixGroupId hash.
     advice.sort_by(|a, b| {
-        (
-            a.fix.fix_group_id.as_str(),
-            a.entry.file.as_str(),
-            a.entry.line,
-            a.id.as_str(),
-        )
-            .cmp(&(
-                b.fix.fix_group_id.as_str(),
-                b.entry.file.as_str(),
-                b.entry.line,
-                b.id.as_str(),
-            ))
+        let (af, al) = match a.chain.last() {
+            Some(s) => (s.file.as_str(), s.line),
+            None => (a.entry.file.as_str(), a.entry.line),
+        };
+        let (bf, bl) = match b.chain.last() {
+            Some(s) => (s.file.as_str(), s.line),
+            None => (b.entry.file.as_str(), b.entry.line),
+        };
+        (af, al, a.id.as_str()).cmp(&(bf, bl, b.id.as_str()))
     });
     advice
 }
@@ -240,10 +226,6 @@ fn resolve_offload_target(
     if let Some(Some(q)) = edge.positional_externals.get(idx) {
         return Some(OffloadTarget::External(q.clone()));
     }
-    // callee_is_coroutine on the offload edge means the target was async.
-    if edge.callee_is_coroutine == Some(true) {
-        return None;
-    }
     None
 }
 
@@ -256,23 +238,38 @@ fn twin_resolves(facts: &ProjectFacts, twin: &AsyncTwinHit) -> bool {
         .all(|n| facts.resolved_symbols.contains(*n))
 }
 
-fn build_forward_graph(facts: &ProjectFacts) -> HashMap<FunctionId, Vec<usize>> {
-    let mut forward: HashMap<FunctionId, Vec<usize>> = HashMap::new();
+/// Index: caller → non-offload edge indices.
+fn build_edges_by_caller(facts: &ProjectFacts) -> HashMap<FunctionId, Vec<usize>> {
+    let mut index: HashMap<FunctionId, Vec<usize>> = HashMap::new();
     for (idx, edge) in facts.edges.iter().enumerate() {
         if edge.is_offload_wrapper {
             continue;
         }
-        if matches!(edge.callee, CalleeRef::Project(_)) {
-            forward.entry(edge.caller).or_default().push(idx);
+        index.entry(edge.caller).or_default().push(idx);
+    }
+    index
+}
+
+/// Index: callee FunctionId → edge indices that invoke it (non-offload).
+fn build_callee_index(facts: &ProjectFacts) -> HashMap<FunctionId, Vec<usize>> {
+    let mut index: HashMap<FunctionId, Vec<usize>> = HashMap::new();
+    for (idx, edge) in facts.edges.iter().enumerate() {
+        if edge.is_offload_wrapper {
+            continue;
+        }
+        if let CalleeRef::Project(fid) = edge.callee {
+            index.entry(fid).or_default().push(idx);
+        }
+        for fid in edge.positional_callables.iter().flatten() {
+            index.entry(*fid).or_default().push(idx);
         }
     }
-    forward
+    index
 }
 
 fn functions_reachable_from_async_entries(
     facts: &ProjectFacts,
-    forward: &HashMap<FunctionId, Vec<usize>>,
-    _reverse: &BTreeMap<FunctionId, Vec<usize>>,
+    edges_by_caller: &HashMap<FunctionId, Vec<usize>>,
 ) -> HashSet<FunctionId> {
     let mut reach = HashSet::new();
     let mut queue = VecDeque::new();
@@ -282,7 +279,7 @@ fn functions_reachable_from_async_entries(
         }
     }
     while let Some(id) = queue.pop_front() {
-        let Some(edges) = forward.get(&id) else {
+        let Some(edges) = edges_by_caller.get(&id) else {
             continue;
         };
         for &eidx in edges {
@@ -318,31 +315,24 @@ fn target_has_sync_only_caller(
     target: &OffloadTarget,
     sync_only: &HashSet<FunctionId>,
     offload_edge_idx: usize,
+    callers_of: &HashMap<FunctionId, Vec<usize>>,
 ) -> bool {
     let OffloadTarget::Project(target_id) = target else {
         // External direct offload — no project body shared with sync callers.
         return false;
     };
-    for (idx, edge) in facts.edges.iter().enumerate() {
+    let Some(edge_idxs) = callers_of.get(target_id) else {
+        return false;
+    };
+    for &idx in edge_idxs {
         if idx == offload_edge_idx {
             continue;
         }
+        let edge = &facts.edges[idx];
         if edge.is_offload_wrapper {
             continue;
         }
-        match &edge.callee {
-            CalleeRef::Project(fid) if *fid == *target_id && sync_only.contains(&edge.caller) => {
-                return true;
-            }
-            _ => {}
-        }
-        // Also: non-offload call that passes target as a higher-order arg from sync.
-        if sync_only.contains(&edge.caller)
-            && edge
-                .positional_callables
-                .iter()
-                .any(|c| c == &Some(*target_id))
-        {
+        if sync_only.contains(&edge.caller) {
             return true;
         }
     }
@@ -357,7 +347,7 @@ fn target_has_sync_only_caller(
 fn unconditional_sinks_from_target(
     facts: &ProjectFacts,
     sinks: &dyn SinkTable,
-    forward: &HashMap<FunctionId, Vec<usize>>,
+    edges_by_caller: &HashMap<FunctionId, Vec<usize>>,
     target: &OffloadTarget,
 ) -> Option<Vec<String>> {
     let mut sink_quals: Vec<String> = Vec::new();
@@ -378,14 +368,15 @@ fn unconditional_sinks_from_target(
             let mut queue = VecDeque::new();
             queue.push_back(*start);
             visited.insert(*start);
-            let _ = forward;
 
             while let Some(fid) = queue.pop_front() {
-                for edge in &facts.edges {
-                    if edge.caller != fid || edge.is_offload_wrapper {
-                        continue;
-                    }
-                    // Only unconditional edges count.
+                let Some(edge_idxs) = edges_by_caller.get(&fid) else {
+                    continue;
+                };
+                for &eidx in edge_idxs {
+                    let edge = &facts.edges[eidx];
+                    // Only unconditional edges count (relative to the target /
+                    // lambda body — enclosing offload-site tags are not here).
                     if edge.conditions.iter().any(|c| c.is_branch_like()) {
                         continue;
                     }
