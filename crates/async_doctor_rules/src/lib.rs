@@ -561,6 +561,7 @@ impl StdlibSinkTable {
         let replacements = [
             ("_io.", "io."),
             ("_sqlite3.", "sqlite3."),
+            // CPython runtime types behind `threading.Lock()` / `RLock()`.
             ("_thread.lock.", "threading.Lock."),
             ("_thread.RLock.", "threading.RLock."),
             ("_thread.", "threading."),
@@ -578,6 +579,19 @@ impl StdlibSinkTable {
         }
         // `_thread.lock` is the runtime type behind `threading.Lock()`.
         q = q.replace("_thread.lock.", "threading.Lock.");
+        // ty may surface `LockType.acquire` / `LockType.release` for
+        // `threading.Lock()` instances — map only those methods (not
+        // `__enter__`, which would flood short-lock candidates).
+        for (from, to) in [
+            ("_thread.LockType.acquire", "threading.Lock.acquire"),
+            ("_thread.LockType.release", "threading.Lock.release"),
+            ("threading.LockType.acquire", "threading.Lock.acquire"),
+            ("threading.LockType.release", "threading.Lock.release"),
+        ] {
+            if q == from {
+                return to.to_string();
+            }
+        }
         q
     }
 }

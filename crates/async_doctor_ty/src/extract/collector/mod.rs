@@ -3,6 +3,7 @@
 mod calls;
 mod control_flow;
 mod imports;
+mod redis_mro;
 mod resolve;
 mod visit;
 
@@ -60,6 +61,9 @@ pub(crate) struct CallCollector<'a, 'db> {
     pub(super) in_eager_offload_arg: bool,
     /// Locals bound by `async with <asyncio-redis> as name` → receiver type qual.
     pub(super) async_with_receivers: HashMap<String, String>,
+    /// Memo: receiver type qualname → redis client family (avoids repeat MRO walks).
+    pub(super) redis_family_memo:
+        HashMap<String, Option<crate::extract::helpers::RedisClientFamily>>,
     pub(super) occurrence_counter: HashMap<(FunctionId, String), u32>,
     /// Literals for the call currently being recorded (set by handle_call).
     pub(super) pending_literals: Vec<Option<LiteralArg>>,

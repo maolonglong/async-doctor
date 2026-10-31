@@ -647,6 +647,7 @@ pub(crate) fn extract_third_party_function(
         pending_with_enter: false,
         in_eager_offload_arg: false,
         async_with_receivers: HashMap::new(),
+        redis_family_memo: HashMap::new(),
         occurrence_counter: HashMap::new(),
         pending_literals: Vec::new(),
         pending_callables: Vec::new(),

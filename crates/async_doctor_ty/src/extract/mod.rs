@@ -5,10 +5,14 @@
 mod collector;
 mod constants;
 mod ctx;
+mod facts_dump;
+mod facts_merge;
+mod file_cache;
 mod files;
 mod follow;
 mod functions;
 mod helpers;
+mod pass2;
 mod path;
 
 use std::path::Path;

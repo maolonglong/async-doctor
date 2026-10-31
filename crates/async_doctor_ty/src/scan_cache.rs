@@ -97,7 +97,9 @@ pub fn scan_input_fingerprint(
         options.include_non_production as u8, options.show_unresolved as u8,
     ));
 
-    let root_canon = scan_root.canonicalize().unwrap_or_else(|_| scan_root.to_path_buf());
+    let root_canon = scan_root
+        .canonicalize()
+        .unwrap_or_else(|_| scan_root.to_path_buf());
     blob.push_str(&format!("root:{}\n", root_canon.display()));
 
     let mut files: Vec<(String, u64, u64)> = Vec::with_capacity(first_party_files.len());
@@ -169,6 +171,31 @@ fn mtime_secs(meta: &fs::Metadata) -> u64 {
         .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Compact fingerprint of the active venv's installed dist-info set.
+///
+/// Used by the per-file fact cache so a warm incremental extract invalidates
+/// when site-packages change even if first-party sources did not.
+pub fn venv_fingerprint(scan_root: &Path) -> String {
+    let root_canon = scan_root
+        .canonicalize()
+        .unwrap_or_else(|_| scan_root.to_path_buf());
+    let mut blob = String::from("venv-fp-v1\n");
+    match resolve_venv_prefix(&root_canon) {
+        Some(prefix) => {
+            let canon = prefix.canonicalize().unwrap_or_else(|_| prefix.clone());
+            blob.push_str(&format!("venv:{}\n", canon.display()));
+            let mut pkgs = fingerprint_site_packages(&canon);
+            pkgs.sort();
+            for line in pkgs {
+                blob.push_str(&line);
+                blob.push('\n');
+            }
+        }
+        None => blob.push_str("venv:\n"),
+    }
+    short_hash(blob.as_bytes())
 }
 
 /// Prefer `VIRTUAL_ENV`, then in-project / parent `.venv`/`venv`.
@@ -300,10 +327,8 @@ mod tests {
 
     #[test]
     fn stale_scan_schema_is_not_reused() {
-        let dir = std::env::temp_dir().join(format!(
-            "async-doctor-scan-stale-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("async-doctor-scan-stale-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let root = dir.join("async-doctor");
         let report = Report::empty_complete();

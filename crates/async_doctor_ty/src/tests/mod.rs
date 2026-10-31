@@ -5,6 +5,7 @@ mod budget;
 mod conditions;
 mod constants;
 mod entries;
+mod file_cache;
 mod helpers;
 mod m2;
 mod m3a;

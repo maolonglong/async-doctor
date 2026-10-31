@@ -53,12 +53,7 @@ pub(crate) fn scan_path_with_cache_budget(
     cache_dir: Option<&Path>,
     follow_budget: usize,
 ) -> anyhow::Result<Report> {
-    scan_path_with_options_cache_budget(
-        path,
-        AnalyzeOptions::default(),
-        cache_dir,
-        follow_budget,
-    )
+    scan_path_with_options_cache_budget(path, AnalyzeOptions::default(), cache_dir, follow_budget)
 }
 
 fn scan_path_with_options_cache_budget(
@@ -86,8 +81,7 @@ fn scan_path_with_options_cache_budget(
     timing.span("discovery", t_disc);
 
     let t_fp = Instant::now();
-    let fingerprint =
-        scan_input_fingerprint(&fingerprint_root, &files, options, follow_budget);
+    let fingerprint = scan_input_fingerprint(&fingerprint_root, &files, options, follow_budget);
     timing.span("fingerprint", t_fp);
 
     let t_load = Instant::now();

@@ -1,5 +1,9 @@
 //! async-doctor CLI — Your agent blocks the event loop. This catches it.
 
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 mod args;
 mod baseline;
 mod changed;

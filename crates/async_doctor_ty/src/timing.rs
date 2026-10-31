@@ -57,7 +57,10 @@ impl Drop for PhaseTiming {
             .spans
             .iter()
             .map(|(n, d)| format!("{n}={:.3}s", d.as_secs_f64()))
-            .chain(std::iter::once(format!("total={:.3}s", total.as_secs_f64())))
+            .chain(std::iter::once(format!(
+                "total={:.3}s",
+                total.as_secs_f64()
+            )))
             .collect();
         eprintln!("async-doctor timing: {}", parts.join(" "));
         self.spans.clear();
