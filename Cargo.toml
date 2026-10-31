@@ -37,6 +37,7 @@ salsa = { version = "0.28.5", default-features = false, features = [
 
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+flate2 = "1"
 ignore = "0.4"
 rayon = "1.10"
 serde = { version = "1", features = ["derive"] }

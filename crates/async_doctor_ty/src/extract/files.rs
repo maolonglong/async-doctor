@@ -22,10 +22,10 @@ use crate::sitepkgs::PackageMetaMemo;
 
 use super::file_cache::orchestrate::{FileRef, extract_with_optional_cache_hits};
 use super::file_cache::{
-    CachedFileFacts, DepCatalogEntry, build_deps_and_fps_parallel, build_module_to_rel,
-    cached_project_callees_resolvable, content_venv_stub_match, file_cache_slot_exists,
-    live_deps_fp, live_deps_fps_parallel, load_file_facts_unchecked, load_project_meta,
-    merge_cached_files, project_env_fingerprints, wide_miss_fallback,
+    CachedFileFacts, DepCatalogEntry, build_content_fps_parallel, build_deps_and_fps_parallel,
+    build_module_to_rel, cached_project_callees_resolvable, content_venv_stub_match,
+    file_cache_slot_exists, live_deps_fp, live_deps_fps_parallel, load_file_facts_unchecked,
+    load_project_meta, merge_cached_files, project_env_fingerprints, wide_miss_fallback,
 };
 use super::follow::follow_third_party;
 use super::path::{module_name_from_relative, relative_display};
@@ -67,6 +67,8 @@ pub(crate) fn extract_files(
     let mut cached_by_rel: HashMap<String, CachedFileFacts> = HashMap::new();
     let mut misses: Vec<usize> = Vec::new();
     let mut live_content_fps: HashMap<String, String> = HashMap::new();
+    // When true, extract may reuse hits and must persist miss slots.
+    let mut persist_file_cache = true;
 
     let any_slot = catalog
         .iter()
@@ -81,55 +83,93 @@ pub(crate) fn extract_files(
                 module: f.module.clone(),
             })
             .collect();
-        let module_to_rel = build_module_to_rel(&dep_catalog, project_std);
-        let (direct, absents_by_rel, fps) =
-            build_deps_and_fps_parallel(&dep_catalog, &module_to_rel, project_std);
-        live_content_fps = fps;
+
+        // Cheap preflight: content fingerprints only. If content misses alone
+        // are already wide, skip deps scrape + incremental bookkeeping.
+        let content_only = build_content_fps_parallel(&dep_catalog);
+        live_content_fps = content_only;
         for f in &mut catalog {
             if let Some(fp) = live_content_fps.get(&f.rel) {
                 f.content_fp = Some(fp.clone());
             }
         }
-
-        let slot_rels: Vec<String> = catalog
-            .iter()
-            .filter(|f| file_cache_slot_exists(&cache_root, project_std, &f.rel))
-            .map(|f| f.rel.clone())
-            .collect();
-        let live_deps_by_rel =
-            live_deps_fps_parallel(&slot_rels, &direct, &absents_by_rel, &live_content_fps);
-
-        for (i, f) in catalog.iter().enumerate() {
+        let mut content_misses = 0usize;
+        for f in &catalog {
             if !file_cache_slot_exists(&cache_root, project_std, &f.rel) {
-                misses.push(i);
+                content_misses += 1;
                 continue;
             }
             let Some(cached) = load_file_facts_unchecked(&cache_root, project_std, &f.rel) else {
-                misses.push(i);
+                content_misses += 1;
                 continue;
             };
             let Some(fp) = f.content_fp.as_deref() else {
-                complete = false;
-                skipped.push(format!("{}: cannot read for fingerprint", f.rel));
-                misses.push(i);
+                content_misses += 1;
                 continue;
             };
-            let live_deps = live_deps_by_rel.get(&f.rel).cloned().unwrap_or_else(|| {
-                live_deps_fp(&f.rel, &direct, &absents_by_rel, &live_content_fps)
-            });
-            if content_venv_stub_match(&cached, fp, &venv_fp, &stub_fp)
-                && !cached.deps_fp.is_empty()
-                && cached.deps_fp == live_deps
-            {
-                cached_by_rel.insert(f.rel.clone(), cached);
-            } else {
-                misses.push(i);
+            if !content_venv_stub_match(&cached, fp, &venv_fp, &stub_fp) {
+                content_misses += 1;
             }
         }
-
-        if wide_miss_fallback(misses.len(), catalog.len()) {
-            cached_by_rel.clear();
+        if wide_miss_fallback(content_misses, catalog.len()) {
+            persist_file_cache = false;
             misses = (0..catalog.len()).collect();
+        } else {
+            let module_to_rel = build_module_to_rel(&dep_catalog, project_std);
+            let (direct, absents_by_rel, fps) =
+                build_deps_and_fps_parallel(&dep_catalog, &module_to_rel, project_std);
+            // Prefer the deps-pass fps (same hashes; keeps one source of truth).
+            live_content_fps = fps;
+            for f in &mut catalog {
+                if let Some(fp) = live_content_fps.get(&f.rel) {
+                    f.content_fp = Some(fp.clone());
+                }
+            }
+
+            let slot_rels: Vec<String> = catalog
+                .iter()
+                .filter(|f| file_cache_slot_exists(&cache_root, project_std, &f.rel))
+                .map(|f| f.rel.clone())
+                .collect();
+            let live_deps_by_rel =
+                live_deps_fps_parallel(&slot_rels, &direct, &absents_by_rel, &live_content_fps);
+
+            for (i, f) in catalog.iter().enumerate() {
+                if !file_cache_slot_exists(&cache_root, project_std, &f.rel) {
+                    misses.push(i);
+                    continue;
+                }
+                let Some(cached) = load_file_facts_unchecked(&cache_root, project_std, &f.rel)
+                else {
+                    misses.push(i);
+                    continue;
+                };
+                let Some(fp) = f.content_fp.as_deref() else {
+                    complete = false;
+                    skipped.push(format!("{}: cannot read for fingerprint", f.rel));
+                    misses.push(i);
+                    continue;
+                };
+                let live_deps = live_deps_by_rel.get(&f.rel).cloned().unwrap_or_else(|| {
+                    live_deps_fp(&f.rel, &direct, &absents_by_rel, &live_content_fps)
+                });
+                if content_venv_stub_match(&cached, fp, &venv_fp, &stub_fp)
+                    && !cached.deps_fp.is_empty()
+                    && cached.deps_fp == live_deps
+                {
+                    cached_by_rel.insert(f.rel.clone(), cached);
+                } else {
+                    misses.push(i);
+                }
+            }
+
+            if wide_miss_fallback(misses.len(), catalog.len()) {
+                // Hub-package invalidation: fall back to a main-like cold and
+                // skip slot load/save so the edit is not slower than main.
+                cached_by_rel.clear();
+                misses = (0..catalog.len()).collect();
+                persist_file_cache = false;
+            }
         }
     } else {
         // Cold: skip full fingerprint until save; every file is a miss.
@@ -189,6 +229,7 @@ pub(crate) fn extract_files(
         &cache_root,
         cache_dir,
         follow_budget,
+        persist_file_cache,
     )?;
     facts.resolved_symbols =
         crate::twin_resolve::collect_resolved_twin_symbols(project_root.as_std_path());

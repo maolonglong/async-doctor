@@ -8,7 +8,7 @@ use async_doctor_core::{
     CallKind, CalleeRef, EntryLabel, FunctionFact, FunctionId, LiteralArg, ProjectFacts,
 };
 
-use crate::cache::{CACHE_SCHEMA_VERSION, CachedFollowTarget, TOOL_VERSION};
+use crate::cache::{CACHE_SCHEMA_VERSION, TOOL_VERSION};
 
 use super::{
     CachedFileEdge, CachedFileFacts, CachedFileFn, CachedFileUnresolvedImport, CachedProjectRef,
@@ -284,24 +284,7 @@ pub fn file_facts_from_project_with_indexes(
         })
         .collect();
 
-    let mut follow = BTreeMap::new();
-    for e in &edges {
-        if matches!(e.callee_kind.as_str(), "external" | "third_party")
-            && let Some(t) = follow_targets.get(&e.callee_qualname)
-        {
-            follow.insert(
-                e.callee_qualname.clone(),
-                CachedFollowTarget {
-                    qualname: t.qualname.clone(),
-                    path: t.path.as_str().to_string(),
-                    name_start: t.name_start,
-                    package_name: t.package_name.clone(),
-                    package_version: t.package_version.clone(),
-                    package_fingerprint: t.package_fingerprint.clone(),
-                },
-            );
-        }
-    }
+    let _ = (follow_targets, unresolved_third_party_modules);
 
     CachedFileFacts {
         schema_version: CACHE_SCHEMA_VERSION,
@@ -323,8 +306,9 @@ pub fn file_facts_from_project_with_indexes(
                 text: u.text.clone(),
             })
             .collect(),
-        unresolved_third_party_modules,
-        follow_targets: follow,
+        // v15: project meta + live follow; omit bulky per-file copies.
+        unresolved_third_party_modules: Vec::new(),
+        follow_targets: BTreeMap::new(),
         task_target_name_starts: task_targets
             .iter()
             .filter_map(|id| {
@@ -342,7 +326,6 @@ pub fn file_facts_from_project_with_indexes(
             .collect(),
     }
 }
-
 /// Encode and save miss files in parallel using shared read-only indexes.
 #[allow(clippy::too_many_arguments)]
 pub fn save_miss_file_facts_parallel(

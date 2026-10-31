@@ -19,16 +19,19 @@ mod pass2_run;
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use flate2::Compression;
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
 use serde::{Deserialize, Serialize};
 
 use crate::cache::{CACHE_SCHEMA_VERSION, CachedFollowTarget, TOOL_VERSION, sanitize_component};
 
 pub use deps::{
-    DepCatalogEntry, build_deps_and_fps_parallel, build_module_to_rel, live_deps_fp,
-    live_deps_fps_parallel,
+    DepCatalogEntry, build_content_fps_parallel, build_deps_and_fps_parallel, build_module_to_rel,
+    live_deps_fp, live_deps_fps_parallel,
 };
 pub use encode::{MissFileSpec, save_miss_file_facts_parallel};
 pub use graph::{content_venv_stub_match, project_env_fingerprints, wide_miss_fallback};
@@ -134,7 +137,11 @@ pub struct CachedFileFacts {
     pub functions: Vec<CachedFileFn>,
     pub edges: Vec<CachedFileEdge>,
     pub unresolved_imports: Vec<CachedFileUnresolvedImport>,
+    /// Deprecated in v15 (kept for serde default); live follow rediscovers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unresolved_third_party_modules: Vec<String>,
+    /// Deprecated in v15; empty on save. Seeded follow still works when present.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub follow_targets: BTreeMap<String, CachedFollowTarget>,
     pub task_target_name_starts: Vec<u32>,
     pub property_def_name_starts: Vec<u32>,
@@ -173,7 +180,8 @@ fn project_files_dir(root: &Path, project_root: &Path) -> PathBuf {
 
 fn file_cache_path(root: &Path, project_root: &Path, rel: &str) -> PathBuf {
     let rel_hash = short_hash(rel.as_bytes());
-    project_files_dir(root, project_root).join(format!("{}.json", sanitize_component(&rel_hash)))
+    // v15: gzip-compressed JSON (`.json.gz`).
+    project_files_dir(root, project_root).join(format!("{}.json.gz", sanitize_component(&rel_hash)))
 }
 
 fn project_meta_path(root: &Path, project_root: &Path) -> PathBuf {
@@ -223,7 +231,10 @@ pub fn load_file_facts_unchecked(
     rel: &str,
 ) -> Option<CachedFileFacts> {
     let path = file_cache_path(root, project_root, rel);
-    let data = fs::read_to_string(path).ok()?;
+    let raw = fs::read(path).ok()?;
+    let mut dec = GzDecoder::new(raw.as_slice());
+    let mut data = String::new();
+    dec.read_to_string(&mut data).ok()?;
     let cached: CachedFileFacts = serde_json::from_str(&data).ok()?;
     if cached.schema_version != CACHE_SCHEMA_VERSION || cached.tool_version != TOOL_VERSION {
         return None;
@@ -248,17 +259,18 @@ pub fn save_file_facts(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let data = serde_json::to_string(cached)
+    let data = serde_json::to_vec(cached)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
+    let tmp = path.with_extension(format!("gz.tmp.{}", std::process::id()));
     {
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(data.as_bytes())?;
+        let f = fs::File::create(&tmp)?;
+        let mut enc = GzEncoder::new(f, Compression::fast());
+        enc.write_all(&data)?;
+        enc.finish()?;
     }
     fs::rename(&tmp, &path)?;
     Ok(())
 }
-
 pub(super) fn short_hash(bytes: &[u8]) -> String {
     let mut hash: u64 = 0xcbf29ce484222325;
     for b in bytes {

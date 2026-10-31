@@ -79,6 +79,9 @@ pub(crate) fn extract_with_optional_cache_hits(
     cache_root: &Path,
     cache_dir: Option<&Path>,
     follow_budget: usize,
+    // When false (wide-miss fallback), skip deps scrape + slot writes so the
+    // run costs no more than a main cold extract.
+    persist_file_cache: bool,
 ) -> anyhow::Result<ProjectFacts> {
     let project_std = project_root.as_std_path();
     let mut miss_set: HashSet<usize> = initial_misses.iter().copied().collect();
@@ -258,99 +261,106 @@ pub(crate) fn extract_with_optional_cache_hits(
         }
     }
 
-    let t_deps = std::time::Instant::now();
-    let dep_catalog: Vec<DepCatalogEntry> = catalog
-        .iter()
-        .map(|e| DepCatalogEntry {
-            abs: e.abs.clone(),
-            rel: e.rel.clone(),
-            module: e.module.clone(),
-        })
-        .collect();
-    let module_to_rel = build_module_to_rel(&dep_catalog, project_std);
-    // One parallel pass: content fps + direct deps (avoids double-read on cold).
-    let (direct, absents_by_rel, scanned_fps) =
-        build_deps_and_fps_parallel(&dep_catalog, &module_to_rel, project_std);
-    let content_fps = if live_content_fps.is_empty() {
-        scanned_fps
-    } else {
-        live_content_fps.clone()
-    };
-    if timing {
-        eprintln!(
-            "async-doctor file_cache: deps_scrape={:.3}s files={}",
-            t_deps.elapsed().as_secs_f64(),
-            catalog.len()
-        );
-    }
+    if persist_file_cache {
+        let t_deps = std::time::Instant::now();
+        let dep_catalog: Vec<DepCatalogEntry> = catalog
+            .iter()
+            .map(|e| DepCatalogEntry {
+                abs: e.abs.clone(),
+                rel: e.rel.clone(),
+                module: e.module.clone(),
+            })
+            .collect();
+        let module_to_rel = build_module_to_rel(&dep_catalog, project_std);
+        // One parallel pass: content fps + direct deps (avoids double-read on cold).
+        let (direct, absents_by_rel, scanned_fps) =
+            build_deps_and_fps_parallel(&dep_catalog, &module_to_rel, project_std);
+        let content_fps = if live_content_fps.is_empty() {
+            scanned_fps
+        } else {
+            live_content_fps.clone()
+        };
+        if timing {
+            eprintln!(
+                "async-doctor file_cache: deps_scrape={:.3}s files={}",
+                t_deps.elapsed().as_secs_f64(),
+                catalog.len()
+            );
+        }
 
-    let mut miss_indices: Vec<usize> = miss_set.into_iter().collect();
-    miss_indices.sort_unstable();
-    let t_deps_fp = std::time::Instant::now();
-    let miss_rels: Vec<String> = miss_indices
-        .iter()
-        .map(|&idx| catalog[idx].rel.clone())
-        .collect();
-    let deps_fps = live_deps_fps_parallel(&miss_rels, &direct, &absents_by_rel, &content_fps);
-    let mut miss_specs: Vec<MissFileSpec> = Vec::with_capacity(miss_indices.len());
-    for &idx in &miss_indices {
-        let entry = &catalog[idx];
-        let fp = entry
-            .content_fp
-            .clone()
-            .or_else(|| content_fps.get(&entry.rel).cloned())
-            .or_else(|| file_content_fingerprint(&entry.abs))
-            .unwrap_or_else(|| String::from("0"));
-        let deps_fp = deps_fps
-            .get(&entry.rel)
-            .cloned()
-            .unwrap_or_else(|| String::from("0"));
-        let file_tp = tp_by_rel.remove(&entry.rel).unwrap_or_default();
-        miss_specs.push(MissFileSpec {
-            rel: entry.rel.clone(),
-            content_fp: fp,
-            deps_fp,
-            unresolved_tp: file_tp,
-            stub_fingerprint: stub_fp.to_string(),
-        });
-    }
-    if timing {
-        eprintln!(
-            "async-doctor file_cache: deps_fp_all={:.3}s",
-            t_deps_fp.elapsed().as_secs_f64()
+        let mut miss_indices: Vec<usize> = miss_set.into_iter().collect();
+        miss_indices.sort_unstable();
+        let t_deps_fp = std::time::Instant::now();
+        let miss_rels: Vec<String> = miss_indices
+            .iter()
+            .map(|&idx| catalog[idx].rel.clone())
+            .collect();
+        let deps_fps = live_deps_fps_parallel(&miss_rels, &direct, &absents_by_rel, &content_fps);
+        let mut miss_specs: Vec<MissFileSpec> = Vec::with_capacity(miss_indices.len());
+        for &idx in &miss_indices {
+            let entry = &catalog[idx];
+            let fp = entry
+                .content_fp
+                .clone()
+                .or_else(|| content_fps.get(&entry.rel).cloned())
+                .or_else(|| file_content_fingerprint(&entry.abs))
+                .unwrap_or_else(|| String::from("0"));
+            let deps_fp = deps_fps
+                .get(&entry.rel)
+                .cloned()
+                .unwrap_or_else(|| String::from("0"));
+            let file_tp = tp_by_rel.remove(&entry.rel).unwrap_or_default();
+            miss_specs.push(MissFileSpec {
+                rel: entry.rel.clone(),
+                content_fp: fp,
+                deps_fp,
+                unresolved_tp: file_tp,
+                stub_fingerprint: stub_fp.to_string(),
+            });
+        }
+        if timing {
+            eprintln!(
+                "async-doctor file_cache: deps_fp_all={:.3}s",
+                t_deps_fp.elapsed().as_secs_f64()
+            );
+        }
+        let t_save = std::time::Instant::now();
+        save_miss_file_facts_parallel(
+            cache_root,
+            project_std,
+            &facts,
+            &def_map,
+            &follow_targets,
+            &task_targets.0,
+            &property_defs,
+            venv_fp,
+            &miss_specs,
         );
-    }
-    let t_save = std::time::Instant::now();
-    save_miss_file_facts_parallel(
-        cache_root,
-        project_std,
-        &facts,
-        &def_map,
-        &follow_targets,
-        &task_targets.0,
-        &property_defs,
-        venv_fp,
-        &miss_specs,
-    );
-    let mut tp = facts.unresolved_third_party_modules.clone();
-    tp.sort();
-    tp.dedup();
-    let _ = save_project_meta(
-        cache_root,
-        project_std,
-        &CachedProjectMeta {
-            schema_version: CACHE_SCHEMA_VERSION,
-            tool_version: TOOL_VERSION.to_string(),
-            venv_fingerprint: venv_fp.to_string(),
-            stub_fingerprint: stub_fp.to_string(),
-            unresolved_third_party_modules: tp,
-        },
-    );
-    if timing {
+        let mut tp = facts.unresolved_third_party_modules.clone();
+        tp.sort();
+        tp.dedup();
+        let _ = save_project_meta(
+            cache_root,
+            project_std,
+            &CachedProjectMeta {
+                schema_version: CACHE_SCHEMA_VERSION,
+                tool_version: TOOL_VERSION.to_string(),
+                venv_fingerprint: venv_fp.to_string(),
+                stub_fingerprint: stub_fp.to_string(),
+                unresolved_third_party_modules: tp,
+            },
+        );
+        if timing {
+            eprintln!(
+                "async-doctor file_cache: save_slots={:.3}s misses={}",
+                t_save.elapsed().as_secs_f64(),
+                miss_specs.len()
+            );
+        }
+    } else if timing {
         eprintln!(
-            "async-doctor file_cache: save_slots={:.3}s misses={}",
-            t_save.elapsed().as_secs_f64(),
-            miss_specs.len()
+            "async-doctor file_cache: skip_persist misses={}",
+            miss_set.len()
         );
     }
 

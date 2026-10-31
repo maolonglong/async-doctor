@@ -45,7 +45,9 @@ use serde::{Deserialize, Serialize};
 /// v14: per-file incremental fact cache under `files/{project_hash}/`
 /// with transitive AST-import `deps_fp` invalidation; round-trips
 /// `positional_externals` / constructed-receiver / advice-tier edge facts.
-pub const CACHE_SCHEMA_VERSION: u32 = 14;
+/// v15: deps_fp search roots match ty (`src/`, config extras); gzip slots;
+/// omit per-file follow_targets / tp heads (project meta + live follow).
+pub const CACHE_SCHEMA_VERSION: u32 = 15;
 
 /// Tool version embedded in the cache path (from this crate's Cargo.toml).
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");

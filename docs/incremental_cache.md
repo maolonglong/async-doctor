@@ -1,9 +1,12 @@
 # Per-file incremental fact cache (design)
 
-Schema **v14**. Complements the whole-scan report cache (v13 / BUILD_ID): when
-some first-party files change, reuse extracted facts for the rest without a
-full ty pass-2. Round-trips `advice[]` edge facts (`positional_externals`,
-`no_running_loop_guard`) so incremental reports match cold byte-for-byte.
+Schema **v15**. Complements the whole-scan report cache (exe-hash `build_id()`):
+when some first-party files change, reuse extracted facts for the rest without
+a full ty pass-2. Round-trips `advice[]` edge facts (`positional_externals`,
+constructed receivers, `no_running_loop_guard`) so incremental reports match
+cold byte-for-byte. Import heads resolve under the same search roots ty uses
+(`src/`, config extras); wide misses skip slot persist so hub edits cost no
+more than main cold.
 
 ## Goals
 
@@ -23,8 +26,8 @@ full ty pass-2. Round-trips `advice[]` edge facts (`positional_externals`,
 ## Layout
 
 ```
-{cache_root}/v14/{tool}/files/{project_hash}/{rel_hash}.json
-{cache_root}/v14/{tool}/files/{project_hash}/_project_meta.json
+{cache_root}/v15/{tool}/files/{project_hash}/{rel_hash}.json.gz
+{cache_root}/v15/{tool}/files/{project_hash}/_project_meta.json
 ```
 
 Slots are scoped by project root hash so fixture trees cannot collide.
