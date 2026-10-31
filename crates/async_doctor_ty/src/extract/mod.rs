@@ -16,13 +16,12 @@ use std::path::Path;
 use async_doctor_core::ProjectFacts;
 use ruff_db::system::{SystemPath, SystemPathBuf};
 
-use crate::db::AsyncDoctorDb;
-
 use files::extract_files;
-use follow::DEFAULT_FOLLOW_BUDGET;
-use path::absolute_utf8;
 
 pub use path::discover_python_files;
+
+pub(crate) use follow::DEFAULT_FOLLOW_BUDGET;
+pub(crate) use path::absolute_utf8;
 
 /// Default third-party follow budget (test seam — not public API).
 #[cfg(test)]
@@ -58,18 +57,16 @@ pub(crate) fn extract_path_with_cache_budget(
             .parent()
             .map(SystemPath::to_path_buf)
             .unwrap_or_else(|| SystemPathBuf::from("."));
-        let db = AsyncDoctorDb::open(&parent, None)?;
         return extract_files(
-            &db,
+            &parent,
             vec![path.as_std_path().to_path_buf()],
             cache_dir,
             follow_budget,
         );
     }
 
-    let db = AsyncDoctorDb::open(&path, None)?;
     // Only walk the scan root for first-party entries. Outside editable roots
     // stay on the search path and are followed like site-packages when called.
-    let files = discover_python_files(db.project_root().as_std_path())?;
-    extract_files(&db, files, cache_dir, follow_budget)
+    let files = discover_python_files(path.as_std_path())?;
+    extract_files(&path, files, cache_dir, follow_budget)
 }

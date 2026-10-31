@@ -137,6 +137,28 @@ impl AsyncDoctorDb {
         Program::from_settings(self, &self.program_settings)
     }
 
+    /// New empty salsa storage with the same search paths / settings.
+    ///
+    /// Used to bound peak RSS across pass-2 batches: drop a saturated DB and
+    /// continue with a fresh one without re-running environment discovery.
+    pub(crate) fn fresh_empty(&self) -> Self {
+        let db = Self {
+            storage: salsa::Storage::new(None),
+            files: Files::default(),
+            system: self.system.clone(),
+            vendored: self.vendored.clone(),
+            rule_selection: Arc::clone(&self.rule_selection),
+            analysis_settings: Arc::clone(&self.analysis_settings),
+            program_settings: self.program_settings.clone(),
+            project_root: self.project_root.clone(),
+            extra_src_roots: self.extra_src_roots.clone(),
+        };
+        db.program_settings
+            .search_paths
+            .try_register_static_roots(&db);
+        db
+    }
+
     pub fn project_root(&self) -> &SystemPath {
         &self.project_root
     }
