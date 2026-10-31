@@ -47,6 +47,9 @@ pub(crate) fn fresh_cache_dir(label: &str) -> PathBuf {
 
 /// Copy a fixture tree into an isolated temp dir (pid + counter; safe under
 /// multi-process `cargo test`).
+///
+/// Advice fixtures share [`advice_shared_venv`] — attached here so checkouts
+/// without `core.symlinks` never depend on git symlinks under `fixtures/`.
 pub(crate) fn clone_fixture(name: &str) -> PathBuf {
     let src = fixtures_dir().join(name);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -54,7 +57,37 @@ pub(crate) fn clone_fixture(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("async-doctor-fx-{name}-{}-{n}", std::process::id()));
     let _ = fs::remove_dir_all(&dst);
     copy_dir(&src, &dst);
+    attach_shared_advice_venv(name, &dst);
     dst
+}
+
+/// Shared stub site-packages for advice_review_* / advice_offload_twin.
+pub(crate) fn advice_shared_venv() -> PathBuf {
+    fixtures_dir().join("advice_shared_venv")
+}
+
+fn attach_shared_advice_venv(name: &str, dst: &Path) {
+    let needs_shared = matches!(
+        name,
+        "advice_offload_twin"
+            | "advice_review_a"
+            | "advice_review_c"
+            | "advice_review_d"
+            | "advice_review_g"
+            | "advice_review_h"
+    );
+    if !needs_shared {
+        return;
+    }
+    let shared = advice_shared_venv();
+    if !shared.is_dir() {
+        return;
+    }
+    let venv_dst = dst.join(".venv");
+    if venv_dst.exists() {
+        return;
+    }
+    copy_dir(&shared, &venv_dst);
 }
 
 pub(crate) fn copy_dir(src: &Path, dst: &Path) {
@@ -63,8 +96,6 @@ pub(crate) fn copy_dir(src: &Path, dst: &Path) {
         let entry = entry.unwrap();
         let from = entry.path();
         let to = dst.join(entry.file_name());
-        // Follow directory symlinks (shared advice stub venv) into a real copy
-        // so each test gets an isolated tree under the temp dir.
         let meta = fs::metadata(&from).unwrap();
         if meta.is_dir() {
             copy_dir(&from, &to);
@@ -75,6 +106,48 @@ pub(crate) fn copy_dir(src: &Path, dst: &Path) {
 }
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Locate or create a venv that has the real `openai` package (for Azure advice).
+pub(crate) fn real_openai_venv() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("ASYNC_DOCTOR_TEST_OPENAI_VENV") {
+        let p = PathBuf::from(p);
+        if p.is_dir() {
+            return Some(p);
+        }
+    }
+    [
+        PathBuf::from("/tmp/async-doctor-real-openai-venv"),
+        PathBuf::from("/workspace/bench/.repos/litellm/.venv"),
+    ]
+    .into_iter()
+    .find(|candidate| {
+        candidate
+            .join("lib")
+            .join("python3.12")
+            .join("site-packages")
+            .join("openai")
+            .join("__init__.py")
+            .is_file()
+            || candidate
+                .join("lib")
+                .join("python3.13")
+                .join("site-packages")
+                .join("openai")
+                .join("__init__.py")
+                .is_file()
+    })
+}
+
+/// Attach a real-openai-bearing venv under `dir/.venv` (copy).
+pub(crate) fn attach_real_openai_venv(dir: &Path) -> bool {
+    let Some(src) = real_openai_venv() else {
+        return false;
+    };
+    let dst = dir.join(".venv");
+    let _ = fs::remove_dir_all(&dst);
+    copy_dir(&src, &dst);
+    true
+}
 
 pub(crate) fn temp_project(files: &[(&str, &str)]) -> PathBuf {
     // TempDir creates a unique path (pid+random); keep the PathBuf and leak the
