@@ -268,6 +268,7 @@ pub fn save_project_meta(
     {
         let mut f = fs::File::create(&tmp)?;
         f.write_all(data.as_bytes())?;
+        f.sync_all()?;
     }
     fs::rename(&tmp, &path)?;
     Ok(())
@@ -319,9 +320,12 @@ pub fn save_file_facts(
     let tmp = path.with_extension(format!("gz.tmp.{}", std::process::id()));
     {
         let f = fs::File::create(&tmp)?;
-        let mut enc = GzEncoder::new(f, Compression::default());
+        // Fast gzip: size wins come from lean serde, not level 6; keeps cold
+        // save off the concurrent package-cache race window.
+        let mut enc = GzEncoder::new(f, Compression::fast());
         enc.write_all(&data)?;
-        enc.finish()?;
+        let f = enc.finish()?;
+        f.sync_all()?;
     }
     fs::rename(&tmp, &path)?;
     Ok(())
@@ -356,9 +360,10 @@ pub fn save_fp_index(root: &Path, project_root: &Path, index: &FpIndex) -> std::
     let tmp = path.with_extension(format!("gz.tmp.{}", std::process::id()));
     {
         let f = fs::File::create(&tmp)?;
-        let mut enc = GzEncoder::new(f, Compression::default());
+        let mut enc = GzEncoder::new(f, Compression::fast());
         enc.write_all(&data)?;
-        enc.finish()?;
+        let f = enc.finish()?;
+        f.sync_all()?;
     }
     fs::rename(&tmp, &path)?;
     Ok(())

@@ -128,14 +128,28 @@ fn run_pair(bin: &Path, project: &Path, cache: &Path, widen_race: bool) -> [Stri
         children.push(cmd.spawn().expect("spawn async-doctor"));
     }
     let mut jsons = Vec::with_capacity(2);
+    let mut errs = Vec::with_capacity(2);
     for (proc_i, child) in children.into_iter().enumerate() {
         let out = child.wait_with_output().expect("wait async-doctor");
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
         assert!(
             out.status.success() || out.status.code() == Some(1),
-            "proc {proc_i} failed: {}",
-            String::from_utf8_lossy(&out.stderr)
+            "proc {proc_i} failed: {err}"
         );
         jsons.push(String::from_utf8(out.stdout).unwrap());
+        errs.push(err);
+    }
+    // Keep stderr available on the next assert via thread-local would be heavy;
+    // print when a sibling already mismatched length (empty findings is the
+    // sticky-miss smell).
+    for (i, json) in jsons.iter().enumerate() {
+        if json.len() < 80 {
+            eprintln!(
+                "concurrent proc {i} short stdout ({} bytes); stderr:\n{}",
+                json.len(),
+                errs[i]
+            );
+        }
     }
     [jsons.pop().unwrap(), jsons.pop().unwrap()]
 }
