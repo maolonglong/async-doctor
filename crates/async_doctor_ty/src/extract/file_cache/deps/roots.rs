@@ -58,7 +58,10 @@ pub fn search_roots_for_file(project_root: &Path, file_abs: &Path) -> Vec<PathBu
     let parent_buf = parent.to_path_buf();
     let already = roots.iter().any(|r| {
         r == &parent_buf
-            || r.canonicalize().ok().zip(parent.canonicalize().ok()).is_some_and(|(a, b)| a == b)
+            || r.canonicalize()
+                .ok()
+                .zip(parent.canonicalize().ok())
+                .is_some_and(|(a, b)| a == b)
     });
     if !already {
         roots.insert(0, parent_buf);

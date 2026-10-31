@@ -298,16 +298,16 @@ pub fn file_facts_from_project_with_indexes(
             continue;
         }
         if let Some(t) = follow_targets.get(&e.callee_qualname) {
-            file_follow.entry(e.callee_qualname.clone()).or_insert_with(|| {
-                crate::cache::CachedFollowTarget {
+            file_follow
+                .entry(e.callee_qualname.clone())
+                .or_insert_with(|| crate::cache::CachedFollowTarget {
                     qualname: t.qualname.clone(),
                     path: t.path.as_str().to_string(),
                     name_start: t.name_start,
                     package_name: t.package_name.clone(),
                     package_version: t.package_version.clone(),
                     package_fingerprint: t.package_fingerprint.clone(),
-                }
-            });
+                });
         }
     }
     CachedFileFacts {

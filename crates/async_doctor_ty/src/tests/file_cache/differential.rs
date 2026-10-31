@@ -152,7 +152,11 @@ fn apply_edit(root: &Path, rng: &mut Rng, edit_i: usize) -> String {
         EditKind::AddModule => {
             let name = format!("_diff_mod_{edit_i}");
             let pkg = root.join("pkg");
-            let dest_dir = if pkg.is_dir() { pkg } else { root.to_path_buf() };
+            let dest_dir = if pkg.is_dir() {
+                pkg
+            } else {
+                root.to_path_buf()
+            };
             fs::create_dir_all(&dest_dir).unwrap();
             let dest = dest_dir.join(format!("{name}.py"));
             fs::write(
@@ -235,7 +239,10 @@ fn apply_edit(root: &Path, rng: &mut Rng, edit_i: usize) -> String {
                     t = t.replace(&format!("import {old_stem}"), &format!("import {new_stem}"));
                     t = t.replace(&format!(".{old_stem} "), &format!(".{new_stem} "));
                     t = t.replace(&format!(".{old_stem}\n"), &format!(".{new_stem}\n"));
-                    t = t.replace(&format!(".{old_stem} import"), &format!(".{new_stem} import"));
+                    t = t.replace(
+                        &format!(".{old_stem} import"),
+                        &format!(".{new_stem} import"),
+                    );
                     if t != before {
                         let _ = fs::write(&py, t);
                     }

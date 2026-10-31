@@ -20,7 +20,9 @@ fn mk_bases(dir: &Path) {
 fn mk_factory(dir: &Path, pkg: &str, ret: &str) {
     fs::write(
         dir.join("factory.py"),
-        format!("from {pkg}.bases import Safe, Blocking\ndef make(x=None) -> {ret}:\n    return x\n"),
+        format!(
+            "from {pkg}.bases import Safe, Blocking\ndef make(x=None) -> {ret}:\n    return x\n"
+        ),
     )
     .unwrap();
 }
@@ -33,10 +35,7 @@ fn scen_shadow() {
         ("src/pkg/__init__.py", ""),
         ("pkg/__init__.py", ""),
         ("src/pkg/m.py", "def f():\n    pass\n"),
-        (
-            "app.py",
-            "from pkg.m import f\nasync def run():\n    f()\n",
-        ),
+        ("app.py", "from pkg.m import f\nasync def run():\n    f()\n"),
     ]);
     let cache = fresh_cache_dir("scen-shadow");
     let before = report_json_with_cache(&dir, &cache);
@@ -48,13 +47,11 @@ fn scen_shadow() {
     incremental_vs_cold(&dir, &cache, "shadow");
     let after = report_json_with_cache(&dir, &fresh_cache_dir("scen-shadow-cold"));
     // Cold after edit must report the new sleep (finding count rises).
-    let nb: usize = serde_json::from_str::<serde_json::Value>(&before)
-        .unwrap()["findings"]
+    let nb: usize = serde_json::from_str::<serde_json::Value>(&before).unwrap()["findings"]
         .as_array()
         .map(|a| a.len())
         .unwrap_or(0);
-    let na: usize = serde_json::from_str::<serde_json::Value>(&after)
-        .unwrap()["findings"]
+    let na: usize = serde_json::from_str::<serde_json::Value>(&after).unwrap()["findings"]
         .as_array()
         .map(|a| a.len())
         .unwrap_or(0);
@@ -86,7 +83,10 @@ fn scen_src_layout_ret() {
 fn scen_editable_annotation() {
     // Setuptools editable finder maps libcore → libcore/libcore.
     let nested = clone_fixture("m3c_nested_pkg_editable");
-    let dir = temp_project(&[("main.py", "from libcore.factory import make\nasync def run():\n    make().go()\n")]);
+    let dir = temp_project(&[(
+        "main.py",
+        "from libcore.factory import make\nasync def run():\n    make().go()\n",
+    )]);
     // Copy venv with editable finder into the temp project.
     let src_venv = nested.join(".venv");
     let dst_venv = dir.join(".venv");
@@ -309,4 +309,3 @@ fn scen_pyright() {
     .unwrap();
     incremental_vs_cold(&dir, &cache, "pyright");
 }
-
