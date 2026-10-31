@@ -470,3 +470,79 @@ fn m3c_editable_outside_scan_root_resolves() {
     let _ = fs::remove_dir_all(&scan);
     let _ = fs::remove_dir_all(&pkg);
 }
+
+#[test]
+fn m3c_relimport_pkg_root_zero_unresolved() {
+    // Scan root is the package: existing relative imports must not be FPs.
+    let dir = clone_fixture("m3c_relimport_pkg_root");
+    let hidden = scan_path(&dir).unwrap();
+    assert_eq!(
+        hidden.hidden_unresolved_candidates, 0,
+        "existing relative imports must not be unresolved: hidden={}",
+        hidden.hidden_unresolved_candidates
+    );
+    let shown = scan_path_with_options(
+        &dir,
+        AnalyzeOptions {
+            include_non_production: false,
+            show_unresolved: true,
+        },
+    )
+    .unwrap();
+    let import_cands: Vec<_> = shown
+        .candidates
+        .iter()
+        .filter(|c| c.rule == "unresolved-import")
+        .collect();
+    assert!(
+        import_cands.is_empty(),
+        "expected 0 unresolved-import, got {}: {:?}",
+        import_cands.len(),
+        import_cands
+    );
+    assert!(
+        shown
+            .unresolved_summary
+            .iter()
+            .all(|p| !p.pattern.starts_with("unresolved-import:")),
+        "{:?}",
+        shown.unresolved_summary
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn m3c_relimport_missing_is_true_positive() {
+    let dir = clone_fixture("m3c_relimport_missing");
+    let hidden = scan_path(&dir).unwrap();
+    assert_eq!(
+        hidden.hidden_unresolved_candidates, 1,
+        "missing relative import must still report: {}",
+        hidden.hidden_unresolved_candidates
+    );
+    let shown = scan_path_with_options(
+        &dir,
+        AnalyzeOptions {
+            include_non_production: false,
+            show_unresolved: true,
+        },
+    )
+    .unwrap();
+    assert!(
+        shown
+            .unresolved_summary
+            .iter()
+            .any(|p| { p.pattern == "unresolved-import:.missing_mod" && p.sites == 1 }),
+        "{:?}",
+        shown.unresolved_summary
+    );
+    assert!(
+        shown
+            .candidates
+            .iter()
+            .any(|c| c.rule == "unresolved-import" && c.entry.name.contains("missing_mod")),
+        "{:?}",
+        shown.candidates
+    );
+    let _ = fs::remove_dir_all(&dir);
+}

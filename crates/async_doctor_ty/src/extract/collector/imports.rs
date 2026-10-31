@@ -1,6 +1,6 @@
 //! Record unresolved `import` / `from … import` sites (bounded, first-party).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use async_doctor_core::UnresolvedImport;
 use ruff_python_ast::{self as ast, Stmt};
@@ -30,8 +30,29 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         if self.model.resolve_module(module, level).is_some() {
             return;
         }
+        // When scanning a package dir itself, ty often fails relative imports
+        // even though the target file exists. Check the filesystem against the
+        // importing file's package path before emitting unresolved-import.
+        if level > 0 && self.relative_import_exists_on_disk(level, module) {
+            return;
+        }
         let key = import_from_module_key(module, level);
         self.classify_failed_import(stmt.range(), &key, level > 0);
+    }
+
+    /// `from .…` / `from ..…` target present on disk relative to this file.
+    fn relative_import_exists_on_disk(&self, level: u32, module: Option<&str>) -> bool {
+        let Some(base) = relative_import_base(
+            Path::new(self.ctx.db.project_root().as_str()),
+            &self.ctx.rel,
+            level,
+        ) else {
+            return false;
+        };
+        match module {
+            None | Some("") => package_dir_exists(&base),
+            Some(m) => module_exists_under(&base, m),
+        }
     }
 
     fn classify_failed_import(
@@ -115,6 +136,42 @@ fn first_party_head_at(root: &Path, head: &str) -> bool {
     let as_dir = root.join(head);
     let as_py = root.join(format!("{head}.py"));
     as_dir.is_dir() || as_py.is_file()
+}
+
+/// Package directory that a relative import with `level` dots starts from,
+/// given the importing file's project-relative path.
+fn relative_import_base(project_root: &Path, file_rel: &str, level: u32) -> Option<PathBuf> {
+    if level == 0 {
+        return None;
+    }
+    let file = project_root.join(file_rel.replace('\\', "/"));
+    // Package containing this module = parent of the file (works for both
+    // `pkg/mod.py` and `pkg/__init__.py`).
+    let mut base = file.parent()?.to_path_buf();
+    // level=1 → stay; level=2 → one parent up; …
+    for _ in 1..level {
+        base = base.parent()?.to_path_buf();
+    }
+    Some(base)
+}
+
+fn package_dir_exists(dir: &Path) -> bool {
+    // Regular packages (`__init__.py`) and PEP 420 namespace packages (bare dirs).
+    dir.is_dir()
+}
+
+fn module_exists_under(base: &Path, dotted: &str) -> bool {
+    if dotted.is_empty() {
+        return package_dir_exists(base);
+    }
+    let rel = dotted.replace('.', "/");
+    let as_pkg = base.join(&rel);
+    if package_dir_exists(&as_pkg) {
+        return true;
+    }
+    let as_py = base.join(format!("{rel}.py"));
+    let as_pyi = base.join(format!("{rel}.pyi"));
+    as_py.is_file() || as_pyi.is_file()
 }
 
 fn import_from_module_key(module: Option<&str>, level: u32) -> String {

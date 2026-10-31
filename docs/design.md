@@ -249,7 +249,7 @@ langgraph, home-assistant core, plus small fixtures per rule/pattern.
   Sync `with Engine.begin()` records the context `Call` as `WithEnter`.
   Consume-only sinks (`redis.PubSub.listen`) fire only when iterated.
 - **Per-`(package, version, content-fingerprint)` disk cache** under the user
-  cache dir (`v8/{tool}/{pkg}/{version}-{fingerprint}.json`), keyed by
+  cache dir (`v9/{tool}/{pkg}/{version}-{fingerprint}.json`), keyed by
   External qualname. Package meta lookups are memoized in a **per-scan**
   `PackageMetaMemo` (no process-global state). Callers (and tests) may inject
   the cache root explicitly — do not rely on mutating process-wide
@@ -282,7 +282,8 @@ langgraph, home-assistant core, plus small fixtures per rule/pattern.
 - `--show-unresolved` aggregates by callee pattern (ranked by entries).
   Failed *first-party* imports surface once per file+module
   (`unresolved-import:…`); missing third-party packages collapse to one note.
-  Plain unresolved Name/Attribute *calls* stay silent.
+  Relative imports that exist on disk (common when the scan root *is* the
+  package) are not recorded. Plain unresolved Name/Attribute *calls* stay silent.
 - Venv discovery: ty + `.venv` / `venv` / `VIRTUAL_ENV` (uv/poetry in-project).
 - Zero-config extra search paths (appended after src roots; skip root dupes):
   `pyrightconfig` / `[tool.pyright] extraPaths`, `[tool.ty.environment]
