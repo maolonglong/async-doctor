@@ -15,7 +15,9 @@ async_doctor_rules = { workspace = true }
 ignore = { workspace = true }
 rayon = { workspace = true }
 ruff_db = { workspace = true }
+ruff_notebook = { workspace = true }
 ruff_python_ast = { workspace = true }
+ruff_python_parser = { workspace = true }
 ruff_source_file = { workspace = true }
 ruff_text_size = { workspace = true }
 salsa = { workspace = true }

@@ -5,6 +5,7 @@
 mod collector;
 mod constants;
 mod ctx;
+mod file_cache;
 mod files;
 mod follow;
 mod functions;
