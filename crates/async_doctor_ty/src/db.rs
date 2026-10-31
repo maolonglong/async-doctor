@@ -87,7 +87,14 @@ impl AsyncDoctorDb {
             src_roots.push(src_layout);
         }
 
+        // Nested packages (`pkg/pkg/`) + editable finders: pull IDE/tool search
+        // roots and setuptools `__editable__*_finder.py` MAPPING parents into
+        // ty `extra_paths` (before src_roots so they win over a conflicting
+        // namespace dir at the scan root).
+        let extra_paths = crate::search_paths::discover_extra_paths(project_root, &site_packages);
+
         let search_paths = SearchPathSettings {
+            extra_paths,
             src_roots,
             site_packages_paths: site_packages,
             ..SearchPathSettings::empty()
