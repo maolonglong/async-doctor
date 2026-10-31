@@ -9,7 +9,6 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use async_doctor_core::{AnalyzeOptions, Report};
 use serde::{Deserialize, Serialize};
@@ -79,8 +78,11 @@ pub fn save_scan_report(root: &Path, fingerprint: &str, report: &Report) -> std:
 /// Fingerprint everything that can change graded output for a scan root.
 ///
 /// Includes schema/tool versions, analyze options, follow budget, every
-/// first-party `.py` `(rel, len, mtime_secs)`, the active venv identity, and
+/// first-party `.py` `(rel, content-hash)`, the active venv identity, and
 /// each installed dist-info content fingerprint.
+///
+/// Content hashes (not whole-second mtime+size) so same-second same-size edits
+/// still invalidate the whole-scan cache.
 pub fn scan_input_fingerprint(
     scan_root: &Path,
     first_party_files: &[PathBuf],
@@ -88,7 +90,7 @@ pub fn scan_input_fingerprint(
     follow_budget: usize,
 ) -> String {
     let mut blob = String::with_capacity(64 * 1024);
-    blob.push_str("scan-cache-v1\n");
+    blob.push_str("scan-cache-v2\n");
     blob.push_str(&format!(
         "schema:{CACHE_SCHEMA_VERSION}\ntool:{TOOL_VERSION}\n"
     ));
@@ -97,25 +99,24 @@ pub fn scan_input_fingerprint(
         options.include_non_production as u8, options.show_unresolved as u8,
     ));
 
-    let root_canon = scan_root.canonicalize().unwrap_or_else(|_| scan_root.to_path_buf());
+    let root_canon = scan_root
+        .canonicalize()
+        .unwrap_or_else(|_| scan_root.to_path_buf());
     blob.push_str(&format!("root:{}\n", root_canon.display()));
 
-    let mut files: Vec<(String, u64, u64)> = Vec::with_capacity(first_party_files.len());
+    let mut files: Vec<(String, String)> = Vec::with_capacity(first_party_files.len());
     for path in first_party_files {
         let rel = path
             .strip_prefix(&root_canon)
             .or_else(|_| path.strip_prefix(scan_root))
             .unwrap_or(path);
         let rel = rel.to_string_lossy().replace('\\', "/");
-        let (len, mtime) = match fs::metadata(path) {
-            Ok(meta) => (meta.len(), mtime_secs(&meta)),
-            Err(_) => (0, 0),
-        };
-        files.push((rel, len, mtime));
+        let fp = content_fingerprint(path).unwrap_or_else(|| "0".to_string());
+        files.push((rel, fp));
     }
     files.sort();
-    for (rel, len, mtime) in &files {
-        blob.push_str(&format!("py:{rel}:{len}:{mtime}\n"));
+    for (rel, fp) in &files {
+        blob.push_str(&format!("py:{rel}:{fp}\n"));
     }
 
     // Config files that affect search-path discovery (extraPaths / editables).
@@ -126,9 +127,9 @@ pub fn scan_input_fingerprint(
         "ruff.toml",
         ".ruff.toml",
     ] {
-        push_file_meta(&mut blob, "cfg", &root_canon.join(name));
+        push_file_content(&mut blob, "cfg", &root_canon.join(name));
         if let Some(parent) = root_canon.parent() {
-            push_file_meta(&mut blob, "cfg", &parent.join(name));
+            push_file_content(&mut blob, "cfg", &parent.join(name));
         }
     }
 
@@ -150,25 +151,45 @@ pub fn scan_input_fingerprint(
     short_hash(blob.as_bytes())
 }
 
-fn push_file_meta(blob: &mut String, tag: &str, path: &Path) {
-    if let Ok(meta) = fs::metadata(path)
-        && meta.is_file()
-    {
+fn content_fingerprint(path: &Path) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    Some(short_hash(&bytes))
+}
+
+fn push_file_content(blob: &mut String, tag: &str, path: &Path) {
+    if let Some(fp) = content_fingerprint(path) {
         blob.push_str(&format!(
-            "{tag}:{}:{}:{}\n",
+            "{tag}:{}:{}\n",
             path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
-            meta.len(),
-            mtime_secs(&meta)
+            fp
         ));
     }
 }
 
-fn mtime_secs(meta: &fs::Metadata) -> u64 {
-    meta.modified()
-        .ok()
-        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+/// Compact fingerprint of the active venv's installed dist-info set.
+///
+/// Available for callers that need a standalone venv identity (the whole-scan
+/// fingerprint already embeds the same dist-info lines).
+#[allow(dead_code)]
+pub fn venv_fingerprint(scan_root: &Path) -> String {
+    let root_canon = scan_root
+        .canonicalize()
+        .unwrap_or_else(|_| scan_root.to_path_buf());
+    let mut blob = String::from("venv-fp-v1\n");
+    match resolve_venv_prefix(&root_canon) {
+        Some(prefix) => {
+            let canon = prefix.canonicalize().unwrap_or_else(|_| prefix.clone());
+            blob.push_str(&format!("venv:{}\n", canon.display()));
+            let mut pkgs = fingerprint_site_packages(&canon);
+            pkgs.sort();
+            for line in pkgs {
+                blob.push_str(&line);
+                blob.push('\n');
+            }
+        }
+        None => blob.push_str("venv:\n"),
+    }
+    short_hash(blob.as_bytes())
 }
 
 /// Prefer `VIRTUAL_ENV`, then in-project / parent `.venv`/`venv`.
@@ -295,15 +316,26 @@ mod tests {
         let fp3 = scan_input_fingerprint(&project, &files, AnalyzeOptions::default(), 256);
         assert_ne!(fp1, fp3);
 
+        // Same-size same-second edit must also miss (content hash, not mtime+len).
+        let before = "import time\n\nasync def h():\n    time.sleep(1)\n";
+        let after = "import time\n\nasync def h():\n    time.sleeq(1)\n";
+        assert_eq!(before.len(), after.len());
+        fs::write(&py, before).unwrap();
+        let fp_a = scan_input_fingerprint(&project, &files, AnalyzeOptions::default(), 256);
+        fs::write(&py, after).unwrap();
+        let fp_b = scan_input_fingerprint(&project, &files, AnalyzeOptions::default(), 256);
+        assert_ne!(
+            fp_a, fp_b,
+            "same-size edit must change content-hash fingerprint"
+        );
+
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn stale_scan_schema_is_not_reused() {
-        let dir = std::env::temp_dir().join(format!(
-            "async-doctor-scan-stale-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("async-doctor-scan-stale-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let root = dir.join("async-doctor");
         let report = Report::empty_complete();

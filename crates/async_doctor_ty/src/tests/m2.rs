@@ -677,6 +677,23 @@ fn m2_venv_cold_warm_warm_byte_identical() {
             .map(|f| &f.entry.name)
             .collect::<Vec<_>>()
     );
+    // agents.Agent.run holds a module-level `threading.Lock` via `_lock.acquire()`.
+    // StdlibSinkTable maps ty's `LockType.acquire` / `_thread.LockType.acquire`
+    // onto `threading.Lock.acquire` (acquire/release only — not `__enter__`,
+    // which would flood short-lock candidates). Independent of PASS2_BATCH;
+    // the finding entry is the first-party async caller `handler_agent`.
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| f.rule == "blocking-lock" && f.entry.name == "handler_agent"),
+        "expected blocking-lock on handler_agent from agents._lock.acquire (LockType mapping): {:?}",
+        report
+            .findings
+            .iter()
+            .map(|f| (&f.rule, &f.entry.name))
+            .collect::<Vec<_>>(),
+    );
     // Warm must not invent extra site-packages-only candidates vs cold.
     let site_cands = |r: &async_doctor_core::Report| {
         r.candidates

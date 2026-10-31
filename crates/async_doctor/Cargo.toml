@@ -21,6 +21,11 @@ clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+# Match ty: jemalloc on Linux/macOS (non-MSVC) cuts allocator overhead under
+# salsa memo churn; Windows MSVC keeps the default allocator.
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = { workspace = true }
+
 [dev-dependencies]
 jsonschema = "0.28"
 serde_json = { workspace = true }

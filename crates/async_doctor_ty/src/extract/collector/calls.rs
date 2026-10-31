@@ -108,7 +108,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
     }
 
     /// Resolve an asyncio-redis client/Pipeline type for `r.pipeline()` contexts.
-    pub(crate) fn asyncio_redis_pipeline_receiver(&self, expr: &Expr) -> Option<String> {
+    pub(crate) fn asyncio_redis_pipeline_receiver(&mut self, expr: &Expr) -> Option<String> {
         if let Some(ty) = self.type_instance_qualname(expr)
             && is_asyncio_redis_type(&ty)
         {
@@ -298,7 +298,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         self.pending_keyword_callables.clear();
     }
 
-    pub(crate) fn first_arg_is_in_memory_buffer(&self, call: &ast::ExprCall) -> bool {
+    pub(crate) fn first_arg_is_in_memory_buffer(&mut self, call: &ast::ExprCall) -> bool {
         let Some(arg) = call.arguments.args.first() else {
             // Also accept fp=/file= kwargs used by PIL.
             let kw = call.arguments.keywords.iter().find(|k| {
@@ -311,7 +311,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         self.expr_is_in_memory_buffer(arg)
     }
 
-    pub(crate) fn expr_is_in_memory_buffer(&self, expr: &Expr) -> bool {
+    pub(crate) fn expr_is_in_memory_buffer(&mut self, expr: &Expr) -> bool {
         if let Expr::Call(c) = expr {
             // BytesIO(...) / StringIO(...) constructor call.
             if let Some(q) = self.external_qualname(&c.func)
@@ -417,9 +417,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             return;
         };
         let is_prop = self
-            .def_map
+            .property_defs
             .iter()
-            .any(|(k, id)| *id == fid && self.property_defs.contains(k));
+            .any(|k| self.def_get(k) == Some(fid));
         if !is_prop {
             return;
         }
@@ -494,7 +494,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             file: self.ctx.rel.clone(),
             name_start: u32::from(lam.range.start()),
         };
-        if let Some(id) = self.def_map.get(&key).copied() {
+        if let Some(id) = self.def_get(&key) {
             return id;
         }
         let id = FunctionId(self.facts.functions.len() as u32);

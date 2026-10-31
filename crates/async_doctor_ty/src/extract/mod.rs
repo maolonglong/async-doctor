@@ -9,6 +9,7 @@ mod files;
 mod follow;
 mod functions;
 mod helpers;
+mod pass2;
 mod path;
 
 use std::path::Path;
