@@ -19,7 +19,7 @@ use ruff_db::system::{SystemPath, SystemPathBuf};
 
 use files::extract_files;
 
-pub use path::discover_python_files;
+pub use path::{discover_python_files, discover_python_stub_files};
 
 pub(crate) use follow::DEFAULT_FOLLOW_BUDGET;
 pub(crate) use path::absolute_utf8;
