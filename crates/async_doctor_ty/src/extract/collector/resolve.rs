@@ -20,6 +20,18 @@ fn is_under_followable_extra(path: &str, roots: &[std::path::PathBuf]) -> bool {
     roots.iter().any(|r| p.starts_with(r))
 }
 
+fn is_get_event_loop_qual(qualname: &str) -> bool {
+    matches!(
+        qualname,
+        "asyncio.get_running_loop"
+            | "asyncio.get_event_loop"
+            | "asyncio.events.get_running_loop"
+            | "asyncio.events.get_event_loop"
+            | "asyncio.runners.get_running_loop"
+    ) || qualname.ends_with(".get_running_loop")
+        || qualname.ends_with(".get_event_loop")
+}
+
 use super::CallCollector;
 use crate::extract::ctx::DefKey;
 use crate::extract::helpers::{
@@ -55,7 +67,12 @@ impl<'a, 'db> CallCollector<'a, 'db> {
 
         let key = match &callee {
             CalleeRef::Project(id) => format!("P{}", id.0),
-            CalleeRef::External { qualname } => format!("E{qualname}"),
+            CalleeRef::External { qualname } => {
+                if is_get_event_loop_qual(qualname) {
+                    self.try_saw_get_loop = true;
+                }
+                format!("E{qualname}")
+            }
             CalleeRef::Unresolved { reason } => format!("U{reason}"),
             CalleeRef::Offload(k) => format!("O{}", k.as_str()),
             CalleeRef::ParamInvoke { index } => format!("I{index}"),

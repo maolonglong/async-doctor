@@ -371,6 +371,7 @@ fn parse_condition(s: &str) -> Option<ConditionTag> {
         "loop" => Some(ConditionTag::Loop),
         "async-branch" => Some(ConditionTag::AsyncBranch),
         "cache_miss_dependent" => Some(ConditionTag::CacheMissDependent),
+        "no_running_loop_guard" => Some(ConditionTag::NoRunningLoopGuard),
         "sync_entry" => Some(ConditionTag::SyncEntry),
         _ => None,
     }

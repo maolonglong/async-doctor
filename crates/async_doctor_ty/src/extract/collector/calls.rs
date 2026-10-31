@@ -407,9 +407,11 @@ impl<'a, 'db> CallCollector<'a, 'db> {
 
     pub(crate) fn analyze_lambda_body(&mut self, lambda: &'a ast::ExprLambda) {
         let prev_in = self.in_lambda;
+        let depths = self.take_enclosing_depths();
         self.in_lambda = false;
         self.visit_expr(&lambda.body);
         self.in_lambda = prev_in;
+        self.restore_enclosing_depths(depths);
     }
 
     pub(crate) fn maybe_property_get(&mut self, attr: &ast::ExprAttribute) {
@@ -572,9 +574,12 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             is_offload_wrapper: false,
         });
         // Analyze lambda body as edges from the synthetic function.
+        // Judge body edges relative to the lambda itself — enclosing try/if/loop
+        // tags on the offload site must not make lambda sinks look conditional.
         let prev = self.current_fn;
         let prev_params = std::mem::take(&mut self.current_param_names);
         let prev_in = self.in_lambda;
+        let depths = self.take_enclosing_depths();
         self.current_fn = Some(id);
         self.current_param_names = self.facts.function(id).param_names.clone();
         self.in_lambda = false;
@@ -582,6 +587,33 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         self.in_lambda = prev_in;
         self.current_fn = prev;
         self.current_param_names = prev_params;
+        self.restore_enclosing_depths(depths);
         id
+    }
+
+    /// Snapshot + clear branch/loop depths so nested callable bodies are graded
+    /// relative to themselves (not the enclosing offload site's try/if/loop).
+    fn take_enclosing_depths(&mut self) -> (u32, u32, u32, u32, u32) {
+        let depths = (
+            self.dead_depth,
+            self.loop_depth,
+            self.branch_depth,
+            self.cache_miss_depth,
+            self.no_running_loop_depth,
+        );
+        self.dead_depth = 0;
+        self.loop_depth = 0;
+        self.branch_depth = 0;
+        self.cache_miss_depth = 0;
+        self.no_running_loop_depth = 0;
+        depths
+    }
+
+    fn restore_enclosing_depths(&mut self, depths: (u32, u32, u32, u32, u32)) {
+        self.dead_depth = depths.0;
+        self.loop_depth = depths.1;
+        self.branch_depth = depths.2;
+        self.cache_miss_depth = depths.3;
+        self.no_running_loop_depth = depths.4;
     }
 }

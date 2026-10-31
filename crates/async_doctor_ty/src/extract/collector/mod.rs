@@ -48,6 +48,10 @@ pub(crate) struct CallCollector<'a, 'db> {
     pub(super) loop_depth: u32,
     pub(super) branch_depth: u32,
     pub(super) cache_miss_depth: u32,
+    /// Depth under a "no running event loop" guard (see [`ConditionTag::NoRunningLoopGuard`]).
+    pub(super) no_running_loop_depth: u32,
+    /// Try-body saw `get_running_loop` / `get_event_loop` (for except-RuntimeError tagging).
+    pub(super) try_saw_get_loop: bool,
     pub(super) active_param_guard: Option<ParamGuard>,
     /// True while visiting an expression that consumes a generator.
     pub(super) consuming_generator: bool,

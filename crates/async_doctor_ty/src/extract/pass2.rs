@@ -189,6 +189,8 @@ fn extract_one_file(
         loop_depth: 0,
         branch_depth: 0,
         cache_miss_depth: 0,
+        no_running_loop_depth: 0,
+        try_saw_get_loop: false,
         active_param_guard: None,
         consuming_generator: false,
         in_lambda: false,

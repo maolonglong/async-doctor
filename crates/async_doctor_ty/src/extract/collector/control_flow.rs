@@ -23,7 +23,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             tags.push(ConditionTag::Loop);
         }
         // Prove-only: never emit unconditional/all-paths under any guard.
-        if self.cache_miss_depth > 0 {
+        if self.no_running_loop_depth > 0 {
+            tags.push(ConditionTag::NoRunningLoopGuard);
+        } else if self.cache_miss_depth > 0 {
             tags.push(ConditionTag::CacheMissDependent);
         } else if self.branch_depth > 0 {
             tags.push(ConditionTag::AsyncBranch);
@@ -200,6 +202,8 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         let dead = self.is_dead_branch_test(&if_stmt.test);
         let always = self.is_always_truthy(&if_stmt.test);
         let cache_miss = !dead && is_cache_miss_test(&if_stmt.test);
+        let no_loop = !dead && is_no_running_loop_test(&if_stmt.test);
+        let mut saw_running_loop_test = !dead && is_running_loop_test(&if_stmt.test);
         let param_guard = if dead {
             None
         } else {
@@ -215,6 +219,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             self.branch_depth += 1;
             if cache_miss {
                 self.cache_miss_depth += 1;
+            }
+            if no_loop {
+                self.no_running_loop_depth += 1;
             }
         }
         let prev_guard = self.active_param_guard;
@@ -232,6 +239,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
         self.active_param_guard = prev_guard;
         if !dead {
+            if no_loop {
+                self.no_running_loop_depth -= 1;
+            }
             if cache_miss {
                 self.cache_miss_depth -= 1;
             }
@@ -256,6 +266,21 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 .test
                 .as_ref()
                 .is_some_and(|t| !elif_dead && is_cache_miss_test(t));
+            let elif_no_loop = if elif_dead {
+                false
+            } else if is_else {
+                // `else` after a positive `loop.is_running()` / helper test means
+                // no running loop. Do *not* treat else of bare `loop is None` as
+                // a no-loop guard (that branch still has a loop).
+                saw_running_loop_test
+            } else if let Some(t) = clause.test.as_ref() {
+                if is_running_loop_test(t) {
+                    saw_running_loop_test = true;
+                }
+                is_no_running_loop_test(t)
+            } else {
+                false
+            };
             let elif_guard = clause.test.as_ref().and_then(|t| {
                 if elif_dead {
                     None
@@ -274,6 +299,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 if elif_cache {
                     self.cache_miss_depth += 1;
                 }
+                if elif_no_loop {
+                    self.no_running_loop_depth += 1;
+                }
             }
             let prev_guard = self.active_param_guard;
             if let Some(g) = elif_guard {
@@ -290,6 +318,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             }
             self.active_param_guard = prev_guard;
             if !elif_dead {
+                if elif_no_loop {
+                    self.no_running_loop_depth -= 1;
+                }
                 if elif_cache {
                     self.cache_miss_depth -= 1;
                 }
@@ -331,18 +362,29 @@ impl<'a, 'db> CallCollector<'a, 'db> {
 
     pub(crate) fn visit_try(&mut self, try_stmt: &'a ast::StmtTry) {
         // Any try/except/else/finally path is guarded — not unconditional.
+        let prev_saw = self.try_saw_get_loop;
+        self.try_saw_get_loop = false;
         self.branch_depth += 1;
         self.visit_body_seq(&try_stmt.body);
+        let saw_get_loop = self.try_saw_get_loop;
         self.branch_depth -= 1;
         for handler in &try_stmt.handlers {
             let ast::ExceptHandler::ExceptHandler(h) = handler;
             if let Some(type_) = &h.type_ {
                 self.visit_expr(type_);
             }
+            let runtime_error = saw_get_loop && except_is_runtime_error(h.type_.as_deref());
             self.branch_depth += 1;
+            if runtime_error {
+                self.no_running_loop_depth += 1;
+            }
             self.visit_body_seq(&h.body);
+            if runtime_error {
+                self.no_running_loop_depth -= 1;
+            }
             self.branch_depth -= 1;
         }
+        self.try_saw_get_loop = prev_saw;
         self.branch_depth += 1;
         self.visit_body_seq(&try_stmt.orelse);
         self.branch_depth -= 1;
@@ -454,5 +496,97 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             }
         }
         self.visit_body_seq(&with_stmt.body);
+    }
+}
+
+/// `if loop is None` / `not loop.is_running()` / `not is_event_loop_running()` / …
+fn is_no_running_loop_test(test: &Expr) -> bool {
+    match test {
+        Expr::Compare(cmp) if cmp.ops.len() == 1 && cmp.operands.len() == 2 => {
+            let op = cmp.ops[0];
+            let left = &cmp.operands[0];
+            let right = &cmp.operands[1];
+            match op {
+                ast::CmpOp::Is | ast::CmpOp::Eq => {
+                    (looks_like_loop_name(left) && matches!(right, Expr::NoneLiteral(_)))
+                        || (matches!(left, Expr::NoneLiteral(_)) && looks_like_loop_name(right))
+                        || (is_running_loop_call(left)
+                            && matches!(right, Expr::BooleanLiteral(b) if !b.value))
+                        || (matches!(left, Expr::BooleanLiteral(b) if !b.value)
+                            && is_running_loop_call(right))
+                }
+                ast::CmpOp::IsNot | ast::CmpOp::NotEq => {
+                    (is_running_loop_call(left)
+                        && matches!(right, Expr::BooleanLiteral(b) if b.value))
+                        || (matches!(left, Expr::BooleanLiteral(b) if b.value)
+                            && is_running_loop_call(right))
+                }
+                _ => false,
+            }
+        }
+        Expr::UnaryOp(u) if matches!(u.op, ast::UnaryOp::Not) => {
+            is_running_loop_test(u.operand.as_ref())
+        }
+        _ => false,
+    }
+}
+
+/// `if loop.is_running()` / `is_event_loop_running()` / optional `is_async`.
+fn is_running_loop_test(test: &Expr) -> bool {
+    is_running_loop_call(test) || matches!(test, Expr::Name(n) if is_async_flag_name(n.id.as_str()))
+}
+
+fn is_running_loop_call(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call(call) => match call.func.as_ref() {
+            Expr::Attribute(attr) if attr.attr.as_str() == "is_running" => true,
+            Expr::Name(n) => is_event_loop_running_helper(n.id.as_str()),
+            Expr::Attribute(attr) if is_event_loop_running_helper(attr.attr.as_str()) => true,
+            _ => false,
+        },
+        Expr::Attribute(attr) if attr.attr.as_str() == "is_running" => true,
+        _ => false,
+    }
+}
+
+fn looks_like_loop_name(expr: &Expr) -> bool {
+    match expr {
+        Expr::Name(n) => {
+            let s = n.id.as_str();
+            s == "loop" || s.ends_with("_loop") || s.contains("event_loop")
+        }
+        Expr::Attribute(attr) => {
+            let s = attr.attr.as_str();
+            s == "loop" || s.ends_with("_loop") || s.contains("event_loop")
+        }
+        _ => false,
+    }
+}
+
+fn is_event_loop_running_helper(name: &str) -> bool {
+    matches!(
+        name,
+        "is_event_loop_running"
+            | "is_running_event_loop"
+            | "event_loop_is_running"
+            | "has_running_loop"
+            | "running_loop_exists"
+    ) || (name.contains("event_loop") && name.contains("running"))
+}
+
+fn is_async_flag_name(name: &str) -> bool {
+    matches!(name, "is_async" | "in_async" | "async_mode")
+}
+
+fn except_is_runtime_error(type_expr: Option<&Expr>) -> bool {
+    let Some(expr) = type_expr else {
+        // bare `except:` — too broad; do not treat as loop-state guard.
+        return false;
+    };
+    match expr {
+        Expr::Name(n) => n.id.as_str() == "RuntimeError",
+        Expr::Attribute(attr) => attr.attr.as_str() == "RuntimeError",
+        Expr::Tuple(t) => t.elts.iter().any(|e| except_is_runtime_error(Some(e))),
+        _ => false,
     }
 }
