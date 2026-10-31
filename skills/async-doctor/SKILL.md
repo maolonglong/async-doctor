@@ -1,10 +1,10 @@
 ---
 name: async-doctor
 description: >-
-  Use when finishing Python asyncio work, before committing async Python, or when
-  the user asks to scan for blocking IO / event-loop stalls. Detects sync IO
-  reachable from async def (sleep, HTTP, DB, file, subprocess, locks) across
-  call chains. Prefer --changed in agent loops; use explain/why to fix findings.
+  Use after changing async Python code or before committing. Run
+  `async-doctor --changed` for a regression check; run `async-doctor .` for a
+  full audit. Detects sync/blocking IO reachable from async def (sleep, HTTP,
+  DB, file, subprocess, locks). Use explain/why to fix findings.
 version: "1.0.0"
 ---
 
