@@ -170,16 +170,16 @@ fn push_file_content(blob: &mut String, tag: &str, path: &Path) {
     }
 }
 
-/// Compact fingerprint of the active venv's installed dist-info set.
+/// Compact fingerprint of the active venv + import-path environment.
 ///
-/// Available for callers that need a standalone venv identity (the whole-scan
-/// fingerprint already embeds the same dist-info lines).
-#[allow(dead_code)]
+/// Includes dist-info, setuptools `__editable__*_finder.py` MAPPING bodies,
+/// and `.pth` file contents under site-packages — so editable / path changes
+/// invalidate per-file slots without relying on mtime.
 pub fn venv_fingerprint(scan_root: &Path) -> String {
     let root_canon = scan_root
         .canonicalize()
         .unwrap_or_else(|_| scan_root.to_path_buf());
-    let mut blob = String::from("venv-fp-v1\n");
+    let mut blob = String::from("venv-fp-v2\n");
     match resolve_venv_prefix(&root_canon) {
         Some(prefix) => {
             let canon = prefix.canonicalize().unwrap_or_else(|_| prefix.clone());
@@ -190,10 +190,47 @@ pub fn venv_fingerprint(scan_root: &Path) -> String {
                 blob.push_str(&line);
                 blob.push('\n');
             }
+            let mut path_files = fingerprint_venv_path_hooks(&canon);
+            path_files.sort();
+            for line in path_files {
+                blob.push_str(&line);
+                blob.push('\n');
+            }
         }
         None => blob.push_str("venv:\n"),
     }
     short_hash(blob.as_bytes())
+}
+
+/// Content hashes of editable finders and `.pth` files under the venv.
+fn fingerprint_venv_path_hooks(venv_prefix: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let lib = venv_prefix.join("lib");
+    let Ok(rd) = fs::read_dir(&lib) else {
+        return out;
+    };
+    for ent in rd.flatten() {
+        let sp = ent.path().join("site-packages");
+        if !sp.is_dir() {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(&sp) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            let is_editable = name.starts_with("__editable__") && name.ends_with("_finder.py");
+            let is_pth = name.ends_with(".pth");
+            if !(is_editable || is_pth) {
+                continue;
+            }
+            if let Some(fp) = content_fingerprint(&e.path()) {
+                out.push(format!("pathhook:{name}:{fp}"));
+            }
+        }
+    }
+    out
 }
 
 /// Prefer `VIRTUAL_ENV`, then in-project / parent `.venv`/`venv`.
@@ -245,15 +282,26 @@ fn fingerprint_site_packages(venv_prefix: &Path) -> Vec<String> {
         let Ok(entries) = fs::read_dir(&site) else {
             continue;
         };
-        let mut dists: Vec<PathBuf> = entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.ends_with(".dist-info"))
-            })
-            .collect();
+        let mut top_names: Vec<String> = Vec::new();
+        let mut dists: Vec<PathBuf> = Vec::new();
+        for e in entries.flatten() {
+            let path = e.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if name.ends_with(".dist-info") {
+                dists.push(path);
+                continue;
+            }
+            // Top-level importables (no dist-info yet, editable dirs, loose modules).
+            if name.ends_with(".py")
+                || name.ends_with(".pth")
+                || (path.is_dir() && !name.starts_with('_') && name != "tmp" && !name.contains('.'))
+                || (path.is_dir() && name.starts_with('_') && !name.starts_with("__"))
+            {
+                top_names.push(name.to_string());
+            }
+        }
         dists.sort();
         for dist in dists {
             let name = dist
@@ -263,6 +311,11 @@ fn fingerprint_site_packages(venv_prefix: &Path) -> Vec<String> {
                 .to_string();
             let fp = package_content_fingerprint(&dist);
             out.push(format!("pkg:{name}:{fp}"));
+        }
+        top_names.sort();
+        top_names.dedup();
+        for name in top_names {
+            out.push(format!("top:{name}"));
         }
     }
     out

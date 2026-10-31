@@ -6,9 +6,54 @@ use std::path::Path;
 use super::fingerprint::{live_deps_fps_parallel, transitive_deps_fp};
 use super::roots::{
     absent_probe_rels, build_module_to_rel, first_party_search_roots, resolve_head_to_rel,
+    resolve_head_with_precedence, search_roots_for_file,
 };
 use super::scrape::scrape_import_heads_ast;
 use super::{DepCatalogEntry, build_deps_and_fps_parallel};
+
+#[test]
+fn file_parent_resolves_same_dir_helpers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let tests = root.join("tests");
+    std::fs::create_dir_all(&tests).unwrap();
+    std::fs::write(tests.join("helpers.py"), "def mk():\n    pass\n").unwrap();
+    std::fs::write(
+        tests.join("test_c.py"),
+        "from helpers import mk\nasync def test_z():\n    mk()\n",
+    )
+    .unwrap();
+    let catalog = vec![
+        DepCatalogEntry {
+            abs: tests.join("helpers.py"),
+            rel: "tests/helpers.py".into(),
+            module: "tests.helpers".into(),
+        },
+        DepCatalogEntry {
+            abs: tests.join("test_c.py"),
+            rel: "tests/test_c.py".into(),
+            module: "tests.test_c".into(),
+        },
+    ];
+    let map = build_module_to_rel(&catalog, root);
+    let roots = search_roots_for_file(root, &tests.join("test_c.py"));
+    assert!(
+        roots.first().is_some_and(|r| r.ends_with("tests")),
+        "file parent must be first search root, got {roots:?}"
+    );
+    let (resolved, _) = resolve_head_with_precedence("helpers", &map, root, &roots);
+    assert_eq!(
+        resolved.as_deref(),
+        Some("tests/helpers.py"),
+        "same-dir helpers must resolve"
+    );
+    let (direct, _, _) = build_deps_and_fps_parallel(&catalog, &map, root);
+    let deps = direct.get("tests/test_c.py").cloned().unwrap_or_default();
+    assert!(
+        deps.iter().any(|d| d == "tests/helpers.py"),
+        "test_c deps_fp closure must include tests/helpers.py, got {deps:?}"
+    );
+}
 
 #[test]
 fn from_pkg_import_util_heads() {

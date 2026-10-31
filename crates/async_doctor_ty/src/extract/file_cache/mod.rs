@@ -244,6 +244,7 @@ fn project_meta_path(root: &Path, project_root: &Path) -> PathBuf {
 }
 
 /// Load project-level meta (unresolved third-party heads + venv/stub echo).
+#[allow(dead_code)] // saved for tooling / future invalidation; v17 never restores globals
 pub fn load_project_meta(root: &Path, project_root: &Path) -> Option<CachedProjectMeta> {
     let data = fs::read_to_string(project_meta_path(root, project_root)).ok()?;
     let meta: CachedProjectMeta = serde_json::from_str(&data).ok()?;

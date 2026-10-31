@@ -45,12 +45,14 @@ use serde::{Deserialize, Serialize};
 /// v14: per-file incremental fact cache under `files/{project_hash}/`
 /// with transitive AST-import `deps_fp` invalidation; round-trips
 /// `positional_externals` / constructed-receiver / advice-tier edge facts.
-/// v15: deps_fp search roots match ty (`src/`, config extras); gzip slots;
-/// omit per-file follow_targets / tp heads (project meta + live follow).
-/// v16: lean edge/fn serde (skip empty defaults); project `_fp_index.json.gz`
-/// so wide-miss fallback decides without loading full slots; skip persist on
-/// wide miss.
-pub const CACHE_SCHEMA_VERSION: u32 = 16;
+/// v15: deps_fp search roots match ty (`src/`, config extras); gzip slots.
+/// v16: lean edge/fn serde; `_fp_index.json.gz` for cheap wide-miss classify.
+/// v17: pass-1-only contract — per-file slots store extract facts *including*
+/// follow_targets discovered for that file (pure fn of file+env); always
+/// re-run third-party follow + analyze from merged facts. Precedence probes
+/// in deps_fp; persist slots even on wide-miss fallback; env fp covers
+/// editable finders + `.pth`.
+pub const CACHE_SCHEMA_VERSION: u32 = 17;
 
 /// Tool version embedded in the cache path (from this crate's Cargo.toml).
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");

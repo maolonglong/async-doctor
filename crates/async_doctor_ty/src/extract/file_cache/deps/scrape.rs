@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use ruff_python_ast::Stmt;
 use ruff_python_parser::parse_module;
 
-use super::roots::{absent_probe_rels, resolve_head_to_rel};
+use super::roots::{absent_probe_rels, resolve_head_with_precedence};
 
 /// Import module heads scraped via AST (sorted unique).
 ///
@@ -157,6 +157,11 @@ fn resolve_relative_import(file_module: &str, level: u32, module: Option<&str>) 
 }
 
 /// Resolve scraped heads to first-party rels + absent probes for misses.
+///
+/// When a head resolves under a later search root, higher-precedence candidate
+/// paths that were missing are still recorded as absent probes so a new file
+/// that shadows the winner invalidates importers (e.g. root `pkg/m.py` over
+/// `src/pkg/m.py`).
 pub fn direct_deps_for_source(
     source: &str,
     file_module: &str,
@@ -169,7 +174,14 @@ pub fn direct_deps_for_source(
     let mut seen_dep = HashSet::new();
     let mut seen_absent = HashSet::new();
     for head in scrape_import_heads_ast(source, file_module) {
-        if let Some(rel) = resolve_head_to_rel(&head, module_to_rel, scan_root) {
+        let (resolved, precedence_misses) =
+            resolve_head_with_precedence(&head, module_to_rel, scan_root, search_roots);
+        for probe in precedence_misses {
+            if seen_absent.insert(probe.clone()) {
+                absents.push(probe);
+            }
+        }
+        if let Some(rel) = resolved {
             if seen_dep.insert(rel.clone()) {
                 deps.push(rel);
             }

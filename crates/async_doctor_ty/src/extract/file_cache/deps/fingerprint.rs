@@ -6,12 +6,12 @@ use std::path::Path;
 use rayon::prelude::*;
 
 use super::super::short_hash;
-use super::roots::{first_party_search_roots, importable_module};
+use super::roots::{first_party_search_roots, importable_module, search_roots_for_file};
 use super::scrape::direct_deps_for_source;
 use super::{ABSENT_DEP_FP, DepCatalogEntry};
 
 /// `(direct_deps, absent_probes, content_fps)` keyed by relative path.
-pub type DepsAndFps = (
+type DepsAndFps = (
     HashMap<String, Vec<String>>,
     HashMap<String, Vec<String>>,
     HashMap<String, String>,
@@ -37,15 +37,17 @@ pub fn build_deps_and_fps_parallel(
     module_to_rel: &HashMap<String, String>,
     scan_root: &Path,
 ) -> DepsAndFps {
-    let search_roots = first_party_search_roots(scan_root);
+    let project_roots = first_party_search_roots(scan_root);
     let pairs: Vec<(String, Vec<String>, Vec<String>, String)> = catalog
         .par_iter()
         .filter_map(|e| {
             let bytes = std::fs::read(&e.abs).ok()?;
             let fp = short_hash(&bytes);
             let source = String::from_utf8_lossy(&bytes);
+            // File-parent first, then project/src/extras — mirrors ty resolution.
+            let search_roots = search_roots_for_file(scan_root, &e.abs);
             let file_module = {
-                let m = importable_module(&e.abs, &search_roots);
+                let m = importable_module(&e.abs, &project_roots);
                 if m.is_empty() { e.module.clone() } else { m }
             };
             let (deps, absents) = direct_deps_for_source(

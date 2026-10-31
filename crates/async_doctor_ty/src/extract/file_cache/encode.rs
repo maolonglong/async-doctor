@@ -289,8 +289,27 @@ pub fn file_facts_from_project_with_indexes(
         })
         .collect();
 
-    let _ = (follow_targets, unresolved_third_party_modules);
-
+    // Pass-1 fact: follow targets discovered while extracting *this* file's
+    // External edges. Required so hit-path merge can re-run third-party follow
+    // without re-extracting the file (global follow/analyze still recomputed).
+    let mut file_follow: BTreeMap<String, crate::cache::CachedFollowTarget> = BTreeMap::new();
+    for e in &edges {
+        if e.callee_kind != "external" {
+            continue;
+        }
+        if let Some(t) = follow_targets.get(&e.callee_qualname) {
+            file_follow.entry(e.callee_qualname.clone()).or_insert_with(|| {
+                crate::cache::CachedFollowTarget {
+                    qualname: t.qualname.clone(),
+                    path: t.path.as_str().to_string(),
+                    name_start: t.name_start,
+                    package_name: t.package_name.clone(),
+                    package_version: t.package_version.clone(),
+                    package_fingerprint: t.package_fingerprint.clone(),
+                }
+            });
+        }
+    }
     CachedFileFacts {
         schema_version: CACHE_SCHEMA_VERSION,
         tool_version: TOOL_VERSION.to_string(),
@@ -311,9 +330,9 @@ pub fn file_facts_from_project_with_indexes(
                 text: u.text.clone(),
             })
             .collect(),
-        // v15: project meta + live follow; omit bulky per-file copies.
-        unresolved_third_party_modules: Vec::new(),
-        follow_targets: BTreeMap::new(),
+        // Pass-1: third-party heads noted while extracting this file (e.g. pytest).
+        unresolved_third_party_modules,
+        follow_targets: file_follow,
         task_target_name_starts: task_targets
             .iter()
             .filter_map(|id| {

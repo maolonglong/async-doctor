@@ -25,8 +25,8 @@ use super::file_cache::{
     CachedFileFacts, DepCatalogEntry, build_content_fps_parallel, build_deps_and_fps_parallel,
     build_module_to_rel, cached_project_callees_resolvable, content_venv_stub_match,
     file_cache_slot_exists, index_content_venv_stub_match, live_deps_fp, live_deps_fps_parallel,
-    load_file_facts_unchecked, load_fp_index, load_project_meta, merge_cached_files,
-    project_env_fingerprints, wide_miss_fallback,
+    load_file_facts_unchecked, load_fp_index, merge_cached_files, project_env_fingerprints,
+    wide_miss_fallback,
 };
 use super::follow::follow_third_party;
 use super::path::{module_name_from_relative, relative_display};
@@ -69,7 +69,7 @@ pub(crate) fn extract_files(
     let mut misses: Vec<usize> = Vec::new();
     let mut live_content_fps: HashMap<String, String> = HashMap::new();
     // When true, extract may reuse hits and must persist miss slots.
-    let mut persist_file_cache = true;
+    let persist_file_cache = true;
 
     let any_slot = catalog
         .iter()
@@ -123,7 +123,7 @@ pub(crate) fn extract_files(
             }
         }
         if wide_miss_fallback(content_misses, catalog.len()) {
-            persist_file_cache = false;
+            // Still persist so the next edit can hit; skip only the *hit* path.
             misses = (0..catalog.len()).collect();
         } else {
             let module_to_rel = build_module_to_rel(&dep_catalog, project_std);
@@ -201,11 +201,10 @@ pub(crate) fn extract_files(
             }
 
             if wide_miss_fallback(misses.len(), catalog.len()) {
-                // Hub-package invalidation: fall back to a main-like cold and
-                // skip slot load/save so the edit is not slower than main.
+                // Hub-package invalidation: full extract, but still persist so
+                // subsequent leaf edits can reuse slots.
                 cached_by_rel.clear();
                 misses = (0..catalog.len()).collect();
-                persist_file_cache = false;
             }
         }
     } else {
@@ -236,11 +235,8 @@ pub(crate) fn extract_files(
                 &mut cached_by_rel,
                 complete,
                 skipped,
-                &cache_root,
                 cache_dir,
                 follow_budget,
-                &venv_fp,
-                &stub_fp,
             )?;
             facts.resolved_symbols =
                 crate::twin_resolve::collect_resolved_twin_symbols(project_root.as_std_path());
@@ -281,24 +277,16 @@ fn extract_all_cache_hits(
     cached_by_rel: &mut HashMap<String, CachedFileFacts>,
     complete: bool,
     skipped: Vec<String>,
-    cache_root: &Path,
     cache_dir: Option<&Path>,
     follow_budget: usize,
-    venv_fp: &str,
-    stub_fp: &str,
 ) -> anyhow::Result<ProjectFacts> {
     let cached: Vec<CachedFileFacts> = catalog
         .iter()
         .map(|f| cached_by_rel.remove(&f.rel).expect("all hit"))
         .collect();
     let mut follow_targets = HashMap::new();
+    // Merge per-file pass-1 facts only — no global project-meta restore (v17).
     let (mut facts, mut def_map, mut qual_map) = merge_cached_files(&cached, &mut follow_targets);
-    if let Some(meta) = load_project_meta(cache_root, project_root.as_std_path())
-        && meta.venv_fingerprint == venv_fp
-        && (meta.stub_fingerprint.is_empty() || meta.stub_fingerprint == stub_fp)
-    {
-        facts.unresolved_third_party_modules = meta.unresolved_third_party_modules;
-    }
     facts.complete = complete;
     facts.skipped.extend(skipped);
     let db = AsyncDoctorDb::open(project_root, None)?;
