@@ -164,7 +164,12 @@ at cut offload sites so nothing is double-reported with blocking findings.",
         summary: "`asyncio.run` / `run_until_complete` / `anyio.run` / `trio.run` inside async code.",
         body: "\
 These APIs expect to own the event loop. Calling them from a running loop raises\n\
-`RuntimeError` at runtime. Offloaded (thread) calls are not reported.",
+`RuntimeError` at runtime. Offloaded (thread) calls are not reported.\n\
+\n\
+Sites under a proven \"no running loop\" guard are dropped (not even candidates):\n\
+`if loop is None`, `except RuntimeError` after `get_running_loop` / `get_event_loop`,\n\
+`not loop.is_running()`, and similar helpers. Other conditional nested-loop sites\n\
+remain findings with normal branch conditions.",
         fix: "\
 - Await the coroutine directly instead of nesting a runner.\n\
 - Or confine a sync nested-run helper to `asyncio.to_thread` if you must.",

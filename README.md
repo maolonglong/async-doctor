@@ -48,7 +48,7 @@ time.sleep(1)  # async-doctor: ignore[blocking-sleep]: brief sync boundary in CL
 
 Unused ignores fail the run. Exit `0` = clean, `1` = findings (or unused
 suppressions), `2` = tool error. Incomplete analysis sets `complete=false` and
-does **not** use exit 2. Candidates never affect the exit code.
+does **not** use exit 2. Candidates and **advice** never affect the exit code.
 
 By default, entries under `tests/` / `docs/` / `examples/` / `scripts/` /
 hidden dirs are skipped (`--include-non-production` to include).
@@ -60,8 +60,14 @@ hidden dirs are skipped (`--include-non-production` to include).
   locks) with prove-only conditions and entry labels
 - Site-packages follow down to stdlib sinks; third-party hops marked in JSON
 - Third-party rules: `requests`, sync `httpx`, redis, SQLAlchemy, psycopg,
-  boto3, sync OpenAI/Anthropic, and more — async twins never fire
+  boto3, sync OpenAI/Anthropic, and more — async twins never fire as findings
 - Higher-order / offload: `asyncio.to_thread`, executors, inferred wrappers
+- **Advice** (`offload-has-async-twin`): offload cuts that only reach sinks with
+  a high-confidence same-package async twin installed in the scanned venv
+  (non-blocking; SARIF `note`; text **Advice** section, capped unless `--expand`)
+- **Errors:** `nested-event-loop` (`asyncio.run` / … from async without offload;
+  loop-state guards like `if loop is None` are dropped), `offload-coroutine`
+  (offload target is `async def`)
 
 ## Benchmark
 
