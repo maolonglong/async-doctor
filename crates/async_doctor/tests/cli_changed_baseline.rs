@@ -445,7 +445,7 @@ fn changed_rejects_basename_suffix_across_scan_root() {
 #[test]
 fn changed_on_main_clean_reports_zero() {
     // HEAD on the default branch with a clean tree → uncommitted-only filter,
-    // not a full backlog scan (stop hooks must not block forever on main).
+    // not a full backlog scan (--changed must stay fast on a clean main).
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
     git(root, &["init", "-b", "main"]);

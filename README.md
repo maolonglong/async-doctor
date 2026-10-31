@@ -70,10 +70,11 @@ Public cold/warm numbers on pinned asyncio corpora:
 
 ## Agent integrations
 
-- [`integrations/skill/SKILL.md`](integrations/skill/SKILL.md) — teach agents
-  when/how to run async-doctor
-- [`integrations/stop-hook/`](integrations/stop-hook/) — Claude Code / Cursor
-  stop-hooks that run `async-doctor --changed`
+```bash
+npx skills add maolonglong/async-doctor
+```
+
+Works once the repo is public. For GitHub code scanning, see `--format sarif` above.
 
 ## License
 

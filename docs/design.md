@@ -147,7 +147,7 @@ Default output is human text; `--format json` for agents; `--format sarif` for S
   additive `docsAnchor`, and runnable `why`
 - `--changed [base]` and `--baseline` — CI / agent loops
 - Inline ignore: `# async-doctor: ignore[rule]: <reason>` (reason required)
-- Stop-hook snippets (Claude Code / Cursor), thin `SKILL.md`
+- Thin agent skill at `skills/async-doctor/SKILL.md` (`npx skills add`)
 - MCP only after M4 if needed
 
 ## Performance targets (to calibrate)
@@ -178,7 +178,7 @@ langgraph, home-assistant core, plus small fixtures per rule/pattern.
 | **M0** | Skeleton | Cargo workspace; pin ty `=0.0.20`; own Db; report direct `time.sleep` in `async def`; maturin packaging so `uvx` works |
 | M1 | Call graph + propagation | Typed receivers, shortest chain, offload cuts, stdlib rules, JSON + text |
 | M2 | Follow dependencies | site-packages graph + version cache, third-party rules, findings/candidates + conditions |
-| M3 | Agent integration | `why`, `--changed`, `--baseline`, inline ignore, SARIF, Skill, Stop hooks |
+| M3 | Agent integration | `why`, `--changed`, `--baseline`, inline ignore, SARIF, Skill |
 | M4 | Benchmarks + 0.1 | Public corpora, precision tuning, PyPI; then evaluate MCP |
 
 ## M0 delivered
