@@ -280,7 +280,11 @@ langgraph, home-assistant core, plus small fixtures per rule/pattern.
 - Nested defs keyed by full scope; lambda assign+call; `@property` gets;
   genexpr consumption; imperative FastAPI/Starlette routes / `include_router`.
 - `--show-unresolved` aggregates by callee pattern (ranked by entries).
+  Unresolved Name/Attribute callees emit candidates (never silently dropped).
 - Venv discovery: ty + `.venv` / `venv` / `VIRTUAL_ENV` (uv/poetry in-project).
+- Zero-config extra search paths: `pyrightconfig` / `[tool.pyright] extraPaths`,
+  `[tool.ty.environment] extra-paths`, `[tool.ruff] src`, and setuptools
+  editable finder `MAPPING` parents (finder `.pth` is not path-style).
 - Precision notes: `docs/precision_m2.md`.
 
 ### API notes (ty 0.0.20)
