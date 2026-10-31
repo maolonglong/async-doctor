@@ -114,7 +114,11 @@ fn collect_from_editable_finders(
     }
 }
 
-fn push_string_list(project_root: &Path, value: Option<&serde_json::Value>, out: &mut BTreeSet<PathBuf>) {
+fn push_string_list(
+    project_root: &Path,
+    value: Option<&serde_json::Value>,
+    out: &mut BTreeSet<PathBuf>,
+) {
     let Some(serde_json::Value::Array(items)) = value else {
         return;
     };
@@ -125,7 +129,11 @@ fn push_string_list(project_root: &Path, value: Option<&serde_json::Value>, out:
     }
 }
 
-fn push_toml_string_list(project_root: &Path, value: Option<&toml::Value>, out: &mut BTreeSet<PathBuf>) {
+fn push_toml_string_list(
+    project_root: &Path,
+    value: Option<&toml::Value>,
+    out: &mut BTreeSet<PathBuf>,
+) {
     let Some(toml::Value::Array(items)) = value else {
         return;
     };
@@ -315,10 +323,8 @@ extra-paths = ["other"]
         .unwrap();
 
         let root = SystemPathBuf::from_path_buf(dir.clone()).unwrap();
-        let site = SystemPathBuf::from_path_buf(
-            dir.join(".venv/lib/python3.12/site-packages"),
-        )
-        .unwrap();
+        let site =
+            SystemPathBuf::from_path_buf(dir.join(".venv/lib/python3.12/site-packages")).unwrap();
         let paths = discover_extra_paths(&root, &[site]);
         let as_str: Vec<_> = paths.iter().map(|p| p.as_str().to_string()).collect();
         assert!(
