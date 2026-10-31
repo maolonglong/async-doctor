@@ -310,16 +310,11 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             return Some(CalleeRef::External { qualname: q });
         }
 
-        // Clearly dynamic / registry-style callables → candidates.
-        // Plain unresolved Name/Attribute: omit the edge (cannot prove a sink).
-        match func {
-            Expr::Subscript(_) | Expr::Call(_) | Expr::BoolOp(_) | Expr::If(_) => {
-                Some(CalleeRef::Unresolved {
-                    reason: "unresolved".into(),
-                })
-            }
-            _ => None,
-        }
+        // Unresolved callees must surface as candidates (never silently drop).
+        // Dynamic shapes and plain Name/Attribute import/attr misses alike.
+        Some(CalleeRef::Unresolved {
+            reason: "unresolved".into(),
+        })
     }
 
     pub(crate) fn note_follow_target(&mut self, func: &Expr, qualname: &str) {

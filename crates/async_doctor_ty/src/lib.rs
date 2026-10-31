@@ -4,6 +4,7 @@ mod cache;
 mod db;
 mod extract;
 mod scan;
+mod search_paths;
 mod sitepkgs;
 
 pub use db::AsyncDoctorDb;
