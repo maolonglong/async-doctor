@@ -25,12 +25,11 @@ pub fn import_fps_for_source(
     let mut out = BTreeMap::new();
     for head in scrape_import_modules(source, file_module) {
         if let Some((alias_key, fp)) = resolve_import_head(module_fps, &head) {
-            let canon = canonicalize_module_name(&alias_key, canon_modules, scan_root)
-                .unwrap_or(alias_key);
+            let canon =
+                canonicalize_module_name(&alias_key, canon_modules, scan_root).unwrap_or(alias_key);
             out.insert(canon, fp);
         } else if looks_first_party(&head, module_fps) {
-            let canon =
-                canonicalize_module_name(&head, canon_modules, scan_root).unwrap_or(head);
+            let canon = canonicalize_module_name(&head, canon_modules, scan_root).unwrap_or(head);
             out.insert(canon, UNRESOLVED_IMPORT_FP.to_string());
         }
     }
@@ -42,10 +41,12 @@ pub fn import_fps_still_valid(
     cached: &BTreeMap<String, String>,
     module_fps: &BTreeMap<String, String>,
 ) -> bool {
-    cached.iter().all(|(mod_name, fp)| match resolve_import_head(module_fps, mod_name) {
-        Some((_, cur)) => &cur == fp,
-        None => fp == UNRESOLVED_IMPORT_FP,
-    })
+    cached.iter().all(
+        |(mod_name, fp)| match resolve_import_head(module_fps, mod_name) {
+            Some((_, cur)) => &cur == fp,
+            None => fp == UNRESOLVED_IMPORT_FP,
+        },
+    )
 }
 
 /// Expand direct import fingerprints to the first-party import closure.
@@ -93,8 +94,7 @@ pub fn direct_import_deps(
     for head in scrape_import_modules(source, file_module) {
         if let Some((alias_key, _)) = resolve_import_head(module_fps, &head) {
             out.push(
-                canonicalize_module_name(&alias_key, canon_modules, scan_root)
-                    .unwrap_or(alias_key),
+                canonicalize_module_name(&alias_key, canon_modules, scan_root).unwrap_or(alias_key),
             );
         } else if looks_first_party(&head, module_fps) {
             out.push(canonicalize_module_name(&head, canon_modules, scan_root).unwrap_or(head));
@@ -282,11 +282,7 @@ pub fn scrape_import_modules(source: &str, file_module: &str) -> Vec<String> {
 
 fn strip_line_comment(line: &str) -> &str {
     // Naive but matches the prior scraper: ignore full-line comments only.
-    if line.starts_with('#') {
-        ""
-    } else {
-        line
-    }
+    if line.starts_with('#') { "" } else { line }
 }
 
 fn import_module_token(part: &str) -> String {
@@ -385,10 +381,8 @@ mod scrape_tests {
 
     #[test]
     fn package_root_alias_resolves_pkg_util_to_util() {
-        let dir = std::env::temp_dir().join(format!(
-            "async-doctor-pkg-alias-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("async-doctor-pkg-alias-{}", std::process::id()));
         let root = dir.join("pkg");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&root).unwrap();
@@ -397,7 +391,8 @@ mod scrape_tests {
         fps.insert("util".into(), "fp".into());
         fps.insert("pkg.util".into(), "fp".into());
         let canon: HashSet<String> = ["util".into(), "other".into()].into_iter().collect();
-        let got = import_fps_for_source("from pkg.util import work\n", "other", &fps, &canon, &root);
+        let got =
+            import_fps_for_source("from pkg.util import work\n", "other", &fps, &canon, &root);
         assert_eq!(
             got.get("util").map(String::as_str),
             Some("fp"),

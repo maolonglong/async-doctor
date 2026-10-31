@@ -498,8 +498,13 @@ fn extract_with_optional_cache_hits(
     let mut direct_deps: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for entry in catalog {
         let source = std::fs::read_to_string(&entry.abs).unwrap_or_default();
-        let deps =
-            direct_import_deps(&source, &entry.module, module_fps, &canon_modules, project_std);
+        let deps = direct_import_deps(
+            &source,
+            &entry.module,
+            module_fps,
+            &canon_modules,
+            project_std,
+        );
         direct_deps.insert(entry.module.clone(), deps);
     }
 

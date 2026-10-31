@@ -94,7 +94,11 @@ pub fn file_facts_from_project_with_indexes(
     task_targets: &HashSet<FunctionId>,
     property_defs: &HashSet<DefKey>,
 ) -> CachedFileFacts {
-    let file_fns = indexes.fns_by_file.get(rel).map(Vec::as_slice).unwrap_or(&[]);
+    let file_fns = indexes
+        .fns_by_file
+        .get(rel)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
     let id_set: HashSet<FunctionId> = file_fns.iter().map(|f| f.id).collect();
 
     let functions: Vec<CachedFileFn> = file_fns
@@ -345,19 +349,21 @@ pub fn save_miss_file_facts_parallel(
     }
     let indexes = Arc::new(EncodeIndexes::build(facts, def_map));
     use rayon::prelude::*;
-    miss_specs.par_iter().for_each(|(rel, fp, import_fps, file_tp)| {
-        let cached = file_facts_from_project_with_indexes(
-            facts,
-            &indexes,
-            rel,
-            fp,
-            venv_fp,
-            import_fps.clone(),
-            file_tp.clone(),
-            follow_targets,
-            task_targets,
-            property_defs,
-        );
-        let _ = super::save_file_facts(cache_root, project_root, &cached);
-    });
+    miss_specs
+        .par_iter()
+        .for_each(|(rel, fp, import_fps, file_tp)| {
+            let cached = file_facts_from_project_with_indexes(
+                facts,
+                &indexes,
+                rel,
+                fp,
+                venv_fp,
+                import_fps.clone(),
+                file_tp.clone(),
+                follow_targets,
+                task_targets,
+                property_defs,
+            );
+            let _ = super::save_file_facts(cache_root, project_root, &cached);
+        });
 }

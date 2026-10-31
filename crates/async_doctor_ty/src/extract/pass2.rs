@@ -224,7 +224,8 @@ fn extract_one_file(
         if f.is_sync_route {
             sync_route_ids.insert(f.id);
         }
-        if f.is_offload_wrapper != base.is_offload_wrapper || f.invokes_params != base.invokes_params
+        if f.is_offload_wrapper != base.is_offload_wrapper
+            || f.invokes_params != base.invokes_params
         {
             base_patches.push(BaseFnPatch {
                 id: f.id,

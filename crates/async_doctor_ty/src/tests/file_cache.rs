@@ -186,10 +186,7 @@ fn package_dir_root_offset_shift_matches_cold() {
     // a def so name_starts shift in the callee file.
     let dir = temp_project(&[
         ("__init__.py", ""),
-        (
-            "util.py",
-            "import time\n\ndef work():\n    time.sleep(1)\n",
-        ),
+        ("util.py", "import time\n\ndef work():\n    time.sleep(1)\n"),
         (
             "app.py",
             "from pkg.util import work\n\nasync def handler():\n    work()\n",
@@ -228,10 +225,7 @@ fn package_dir_root_offset_shift_matches_cold() {
 #[test]
 fn same_second_same_size_edit_invalidates_scan_cache() {
     // Repro 5: same-size same-second edit must not return a stale whole-scan hit.
-    let dir = temp_project(&[(
-        "a.py",
-        "import time\n\nasync def h():\n    time.sleep(1)\n",
-    )]);
+    let dir = temp_project(&[("a.py", "import time\n\nasync def h():\n    time.sleep(1)\n")]);
     let cache = fresh_cache_dir("file-cache-same-sec");
     let cold = report_json_with_cache(&dir, &cache);
     let cold_r: async_doctor_core::Report = serde_json::from_str(&cold).unwrap();
@@ -263,10 +257,7 @@ fn same_second_same_size_edit_invalidates_scan_cache() {
 
 #[test]
 fn stale_file_cache_schema_is_not_reused() {
-    let dir = temp_project(&[(
-        "a.py",
-        "import time\n\ndef sync_a():\n    time.sleep(1)\n",
-    )]);
+    let dir = temp_project(&[("a.py", "import time\n\ndef sync_a():\n    time.sleep(1)\n")]);
     let cache = fresh_cache_dir("file-cache-stale-schema");
     let _ = report_json_with_cache(&dir, &cache);
 
