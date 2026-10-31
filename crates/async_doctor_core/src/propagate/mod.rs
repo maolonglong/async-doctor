@@ -403,6 +403,54 @@ pub fn analyze_with_options(
         }
     }
 
+    // Failed imports: once per import site (never per call).
+    for imp in &facts.unresolved_imports {
+        let pattern = format!("unresolved-import:{}", imp.module);
+        let agg = unresolved_agg.entry(pattern.clone()).or_default();
+        agg.0 += 1;
+        if !options.show_unresolved {
+            report.hidden_unresolved_candidates += 1;
+            continue;
+        }
+        let sink_key = pattern.clone();
+        let id = finding_id(FindingIdParts {
+            rule: "unresolved-import",
+            entry_qualname: &format!("{}:{}", imp.file, imp.module),
+            sink_qualname: &sink_key,
+            chain_qualnames: &[&sink_key],
+            occurrence: 0,
+        });
+        if !emitted.insert(id.clone()) {
+            continue;
+        }
+        raw_candidates.push(Candidate {
+            id,
+            rule: "unresolved-import".to_string(),
+            entry: Entry {
+                file: imp.file.clone(),
+                line: imp.line,
+                name: imp.module.clone(),
+                label: crate::report::EntryLabel::Other,
+            },
+            chain: vec![ChainStep::project(
+                imp.file.clone(),
+                imp.line,
+                imp.text.clone(),
+            )
+            .with_resolution(format!("unresolved import `{}`", imp.module))],
+            conditions: Vec::new(),
+            reason: format!("unresolved import `{}`", imp.module),
+            fix: Fix {
+                hint: "Could not resolve import; check package layout / editable install."
+                    .to_string(),
+                fix_group_id: fix_group_id("unresolved-import", &sink_key),
+            },
+            why: format!("async-doctor why {}:{}", imp.file, imp.line),
+            docs_anchor: "#unresolved-call".into(),
+            docs_url: "https://github.com/maolonglong/async-doctor/blob/main/docs/rules.md#unresolved-call".into(),
+        });
+    }
+
     report.omitted_non_production_entries = omitted_entries.len() as u32;
     report.findings = merge_file_io_findings(raw_findings);
     report.candidates = raw_candidates;

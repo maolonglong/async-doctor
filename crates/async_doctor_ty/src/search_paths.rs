@@ -5,6 +5,11 @@
 //! honors path-style `.pth` editables under site-packages; finder-based
 //! installs (`__editable__*_finder.py` + `MAPPING`) and config `extraPaths`
 //! need this module.
+//!
+//! Discovered roots are appended *after* existing `src_roots` (never as
+//! front-loaded `extra_paths`) and duplicates of the project root / already
+//! present roots are skipped — e.g. `[tool.ruff] src = ["."]` must not shadow
+//! file-relative resolution.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -12,13 +17,15 @@ use std::path::{Path, PathBuf};
 
 use ruff_db::system::{SystemPath, SystemPathBuf};
 
-/// Collect extra search roots for `project_root`, given known site-packages dirs.
+/// Collect additional search roots for `project_root`.
 ///
-/// Order is stable (BTreeSet) but callers treat the set as unordered for
-/// resolution — ty searches all `extra_paths` before `src_roots`.
+/// Callers must append the result after existing `src_roots`. Paths equal to
+/// `project_root` or any entry in `existing_roots` (by string or canonicalize)
+/// are omitted.
 pub(crate) fn discover_extra_paths(
     project_root: &SystemPath,
     site_packages: &[SystemPathBuf],
+    existing_roots: &[SystemPathBuf],
 ) -> Vec<SystemPathBuf> {
     let root = PathBuf::from(project_root.as_str());
     let mut out: BTreeSet<PathBuf> = BTreeSet::new();
@@ -29,10 +36,35 @@ pub(crate) fn discover_extra_paths(
         collect_from_editable_finders(Path::new(sp.as_str()), &root, &mut out);
     }
 
+    let mut skip: BTreeSet<PathBuf> = existing_roots
+        .iter()
+        .map(|p| PathBuf::from(p.as_str()))
+        .collect();
+    skip.insert(root.clone());
+    if let Ok(canon) = root.canonicalize() {
+        skip.insert(canon);
+    }
+    for p in existing_roots {
+        if let Ok(c) = PathBuf::from(p.as_str()).canonicalize() {
+            skip.insert(c);
+        }
+    }
+
     out.into_iter()
         .filter(|p| p.is_dir())
+        .filter(|p| !should_skip(p, &skip))
         .filter_map(|p| SystemPathBuf::from_path_buf(p).ok())
         .collect()
+}
+
+fn should_skip(path: &Path, skip: &BTreeSet<PathBuf>) -> bool {
+    if skip.contains(path) {
+        return true;
+    }
+    if let Ok(c) = path.canonicalize() {
+        return skip.contains(&c);
+    }
+    false
 }
 
 fn collect_from_pyrightconfig(project_root: &Path, out: &mut BTreeSet<PathBuf>) {
@@ -70,7 +102,6 @@ fn collect_from_pyproject(project_root: &Path, out: &mut BTreeSet<PathBuf>) {
         push_toml_string_list(project_root, pyright.get("extra_paths"), out);
     }
 
-    // `[tool.ty.environment] extra-paths = [...]`
     if let Some(ty) = tool.get("ty").and_then(|v| v.as_table())
         && let Some(env) = ty.get("environment").and_then(|v| v.as_table())
     {
@@ -78,7 +109,6 @@ fn collect_from_pyproject(project_root: &Path, out: &mut BTreeSet<PathBuf>) {
         push_toml_string_list(project_root, env.get("extraPaths"), out);
     }
 
-    // `[tool.ruff] src = ["src", "libcore"]`
     if let Some(ruff) = tool.get("ruff").and_then(|v| v.as_table()) {
         push_toml_string_list(project_root, ruff.get("src"), out);
     }
@@ -95,7 +125,6 @@ fn collect_from_editable_finders(
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        // setuptools: `__editable___pkg_ver_finder.py`
         if !(name.starts_with("__editable__") && name.ends_with("_finder.py")) {
             continue;
         }
@@ -104,9 +133,8 @@ fn collect_from_editable_finders(
         };
         for (_pkg, mapped) in parse_editable_mapping(&text) {
             let mapped_path = resolve_path(project_root, &mapped);
-            // MAPPING values point at the package directory itself (the folder
-            // with `__init__.py`). ty search paths need the parent so
-            // `import pkg` finds `parent/pkg`.
+            // MAPPING values point at the package directory itself. ty search
+            // paths need the parent so `import pkg` finds `parent/pkg`.
             if let Some(parent) = mapped_path.parent() {
                 out.insert(parent.to_path_buf());
             }
@@ -163,7 +191,6 @@ fn parse_editable_mapping(source: &str) -> Vec<(String, String)> {
     let bytes = rest.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        // skip whitespace and commas
         while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r' | b',') {
             i += 1;
         }
@@ -194,7 +221,6 @@ fn parse_editable_mapping(source: &str) -> Vec<(String, String)> {
 }
 
 fn mapping_dict_body(source: &str) -> Option<&str> {
-    // Prefer an assignment `MAPPING = {`.
     let bytes = source.as_bytes();
     let needle = b"MAPPING";
     let mut search = 0;
@@ -204,7 +230,6 @@ fn mapping_dict_body(source: &str) -> Option<&str> {
             while j < bytes.len() && matches!(bytes[j], b' ' | b'\t') {
                 j += 1;
             }
-            // optional annotation `: dict[...]`
             if j < bytes.len() && bytes[j] == b':' {
                 while j < bytes.len() && bytes[j] != b'=' {
                     j += 1;
@@ -229,11 +254,24 @@ fn parse_py_string(bytes: &[u8], start: usize) -> Option<(String, usize)> {
     if start >= bytes.len() {
         return None;
     }
-    let quote = bytes[start];
+    let mut i = start;
+    // Optional prefixes: r/u/b/f and combinations (setuptools may emit r'…').
+    while i < bytes.len()
+        && matches!(
+            bytes[i],
+            b'r' | b'R' | b'u' | b'U' | b'b' | b'B' | b'f' | b'F'
+        )
+    {
+        i += 1;
+    }
+    if i >= bytes.len() {
+        return None;
+    }
+    let quote = bytes[i];
     if quote != b'\'' && quote != b'"' {
         return None;
     }
-    let mut i = start + 1;
+    i += 1;
     let mut out = String::new();
     while i < bytes.len() {
         let c = bytes[i];
@@ -241,7 +279,6 @@ fn parse_py_string(bytes: &[u8], start: usize) -> Option<(String, usize)> {
             return Some((out, i + 1));
         }
         if c == b'\\' && i + 1 < bytes.len() {
-            // Enough for path strings: keep the escaped char.
             out.push(bytes[i + 1] as char);
             i += 2;
             continue;
@@ -268,6 +305,13 @@ mod tests {
     }
 
     #[test]
+    fn parse_mapping_raw_string() {
+        let src = "MAPPING = {'libcore': r'/tmp/ed/libcore'}\n";
+        let got = parse_editable_mapping(src);
+        assert_eq!(got, vec![("libcore".into(), "/tmp/ed/libcore".into())]);
+    }
+
+    #[test]
     fn parse_mapping_multiline_double_quotes() {
         let src = r#"
 MAPPING = {
@@ -280,6 +324,35 @@ MAPPING = {
             got,
             vec![("a".into(), "/x/a".into()), ("b".into(), "/y/b".into())]
         );
+    }
+
+    #[test]
+    fn discover_skips_project_root_dot() {
+        let dir = std::env::temp_dir().join(format!(
+            "async-doctor-search-dot-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("pyproject.toml"),
+            r#"
+[tool.ruff]
+src = ["."]
+"#,
+        )
+        .unwrap();
+        let root = SystemPathBuf::from_path_buf(dir.clone()).unwrap();
+        let paths = discover_extra_paths(&root, &[], std::slice::from_ref(&root));
+        assert!(
+            paths.is_empty(),
+            "src=['.'] must not re-add project root: {paths:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -325,7 +398,7 @@ extra-paths = ["other"]
         let root = SystemPathBuf::from_path_buf(dir.clone()).unwrap();
         let site =
             SystemPathBuf::from_path_buf(dir.join(".venv/lib/python3.12/site-packages")).unwrap();
-        let paths = discover_extra_paths(&root, &[site]);
+        let paths = discover_extra_paths(&root, &[site], std::slice::from_ref(&root));
         let as_str: Vec<_> = paths.iter().map(|p| p.as_str().to_string()).collect();
         assert!(
             as_str.iter().any(|p| p.ends_with("libcore")),

@@ -36,6 +36,9 @@ pub struct AsyncDoctorDb {
     program_settings: ProgramSettings,
     /// Project directory used as the first-party search root.
     project_root: SystemPathBuf,
+    /// Extra src roots discovered from config / editable finders (appended
+    /// after `project_root`). May point outside the scan root.
+    extra_src_roots: Vec<SystemPathBuf>,
 }
 
 impl AsyncDoctorDb {
@@ -64,6 +67,7 @@ impl AsyncDoctorDb {
             }),
             program_settings: ProgramSettings::empty(ty_vendored::file_system()),
             project_root: project_root.to_path_buf(),
+            extra_src_roots: Vec::new(),
         };
 
         let environment = resolve_environment(&db.system, project_root, python)?;
@@ -88,13 +92,15 @@ impl AsyncDoctorDb {
         }
 
         // Nested packages (`pkg/pkg/`) + editable finders: pull IDE/tool search
-        // roots and setuptools `__editable__*_finder.py` MAPPING parents into
-        // ty `extra_paths` (before src_roots so they win over a conflicting
-        // namespace dir at the scan root).
-        let extra_paths = crate::search_paths::discover_extra_paths(project_root, &site_packages);
+        // roots and setuptools `__editable__*_finder.py` MAPPING parents.
+        // Append after existing src_roots (never as front-loaded extra_paths)
+        // and skip duplicates of roots already present (e.g. ruff `src = ["."]`).
+        let discovered =
+            crate::search_paths::discover_extra_paths(project_root, &site_packages, &src_roots);
+        db.extra_src_roots = discovered.clone();
+        src_roots.extend(discovered);
 
         let search_paths = SearchPathSettings {
-            extra_paths,
             src_roots,
             site_packages_paths: site_packages,
             ..SearchPathSettings::empty()
@@ -119,6 +125,12 @@ impl AsyncDoctorDb {
 
     pub fn project_root(&self) -> &SystemPath {
         &self.project_root
+    }
+
+    /// Extra search roots from config / editable finders (may be outside the
+    /// scan root). Used to extract editable packages installed elsewhere.
+    pub fn extra_src_roots(&self) -> &[SystemPathBuf] {
+        &self.extra_src_roots
     }
 }
 

@@ -2,6 +2,7 @@
 
 mod calls;
 mod control_flow;
+mod imports;
 mod resolve;
 mod visit;
 

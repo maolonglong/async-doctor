@@ -68,6 +68,21 @@ pub(crate) fn extract_path_with_cache_budget(
     }
 
     let db = AsyncDoctorDb::open(&path, None)?;
-    let files = discover_python_files(db.project_root().as_std_path())?;
+    let mut files = discover_python_files(db.project_root().as_std_path())?;
+    // Editable packages installed outside the scan root (MAPPING → elsewhere)
+    // are on the search path but would otherwise never be extracted. Walk those
+    // extra roots too so calls into them resolve as project functions.
+    let project = db.project_root().as_std_path();
+    for extra in db.extra_src_roots() {
+        let extra_path = std::path::Path::new(extra.as_str());
+        if extra_path.starts_with(project) {
+            continue;
+        }
+        if let Ok(more) = discover_python_files(extra_path) {
+            files.extend(more);
+        }
+    }
+    files.sort();
+    files.dedup();
     extract_files(&db, files, cache_dir, follow_budget)
 }

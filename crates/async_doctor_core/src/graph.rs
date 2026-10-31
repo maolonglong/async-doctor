@@ -216,6 +216,16 @@ pub struct AnalyzeOptions {
     pub show_unresolved: bool,
 }
 
+/// A first-party import that ty could not resolve (one site, never per-call).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnresolvedImport {
+    pub file: String,
+    pub line: u32,
+    /// Imported module key (e.g. `libcore.cfg`, `missing_pkg`).
+    pub module: String,
+    pub text: String,
+}
+
 /// All facts for one project scan (first-party + reachable third-party for M2).
 #[derive(Debug, Clone, Default)]
 pub struct ProjectFacts {
@@ -223,6 +233,9 @@ pub struct ProjectFacts {
     pub edges: Vec<CallEdge>,
     pub complete: bool,
     pub skipped: Vec<String>,
+    /// Failed `import` / `from … import` sites (deduped). Surfaced as
+    /// unresolved candidates / summary — not silent drops.
+    pub unresolved_imports: Vec<UnresolvedImport>,
 }
 
 impl ProjectFacts {

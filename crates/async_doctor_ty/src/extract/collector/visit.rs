@@ -64,6 +64,10 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
             Stmt::With(with_stmt) => self.visit_with(with_stmt),
             Stmt::Try(try_stmt) => self.visit_try(try_stmt),
             Stmt::Match(match_stmt) => self.visit_match(match_stmt),
+            Stmt::Import(_) | Stmt::ImportFrom(_) => {
+                super::imports::note_if_import(self, stmt);
+                walk_stmt(self, stmt);
+            }
             other => walk_stmt(self, other),
         }
     }
