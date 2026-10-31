@@ -8,10 +8,10 @@ use crate::graph::{
 use crate::id::{FindingIdParts, finding_id, fix_group_id};
 use crate::report::{Entry, Finding, Fix};
 
+use super::SinkHit;
 use super::grade::{
     chain_step_for, reconcile_conditions, resolution_for_edge, shortest_paths_to_async_entries,
 };
-use super::SinkHit;
 
 pub(super) const RULE_NESTED_EVENT_LOOP: &str = "nested-event-loop";
 pub(super) const RULE_OFFLOAD_COROUTINE: &str = "offload-coroutine";

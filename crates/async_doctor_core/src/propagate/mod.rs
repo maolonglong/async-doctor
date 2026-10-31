@@ -561,12 +561,8 @@ pub fn analyze_with_options(
         &mut emitted,
     ));
     report.candidates = raw_candidates;
-    report.advice = collect_offload_twin_advice(
-        facts,
-        sinks,
-        &reverse,
-        options.include_non_production,
-    );
+    report.advice =
+        collect_offload_twin_advice(facts, sinks, &reverse, options.include_non_production);
 
     if options.show_unresolved {
         let mut summary: Vec<UnresolvedPattern> = unresolved_agg

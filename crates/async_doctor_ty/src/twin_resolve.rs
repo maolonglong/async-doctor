@@ -198,10 +198,8 @@ mod tests {
 
     #[test]
     fn detects_httpx_async_client_in_fixture_layout() {
-        let dir = std::env::temp_dir().join(format!(
-            "async-doctor-twin-resolve-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("async-doctor-twin-resolve-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let sp = dir
             .join(".venv")
@@ -210,7 +208,11 @@ mod tests {
             .join("site-packages")
             .join("httpx");
         fs::create_dir_all(&sp).unwrap();
-        fs::write(sp.join("__init__.py"), "from ._client import AsyncClient, Client\n").unwrap();
+        fs::write(
+            sp.join("__init__.py"),
+            "from ._client import AsyncClient, Client\n",
+        )
+        .unwrap();
         fs::write(
             sp.join("_client.py"),
             "class Client: ...\nclass AsyncClient: ...\n",
@@ -226,10 +228,8 @@ mod tests {
 
     #[test]
     fn needs_aiohttp_absent() {
-        let dir = std::env::temp_dir().join(format!(
-            "async-doctor-twin-needs-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("async-doctor-twin-needs-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let sp = dir
             .join(".venv")
