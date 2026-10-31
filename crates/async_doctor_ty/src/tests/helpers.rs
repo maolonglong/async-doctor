@@ -2,9 +2,31 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tempfile::TempDir;
+
+/// Serialize mutations of `VIRTUAL_ENV` across parallel tests.
+static VIRTUAL_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+/// Run `f` with `VIRTUAL_ENV` cleared so in-project `.venv` wins discovery.
+pub(crate) fn with_cleared_virtual_env<R>(f: impl FnOnce() -> R) -> R {
+    let _guard = VIRTUAL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let prev = std::env::var_os("VIRTUAL_ENV");
+    // SAFETY: test-only; lock held for the duration; restored below.
+    unsafe {
+        std::env::remove_var("VIRTUAL_ENV");
+    }
+    let out = f();
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var("VIRTUAL_ENV", v),
+            None => std::env::remove_var("VIRTUAL_ENV"),
+        }
+    }
+    out
+}
 
 use crate::scan::scan_path_with_cache_budget;
 use crate::{scan_path, scan_path_with_cache};

@@ -3,7 +3,9 @@
 use std::fs;
 use std::time::Instant;
 
-use super::super::helpers::{clone_fixture, fresh_cache_dir, report_json_with_cache, temp_project};
+use super::super::helpers::{
+    clone_fixture, fresh_cache_dir, report_json_with_cache, temp_project, with_cleared_virtual_env,
+};
 use super::helpers::{
     files_cache_dir, incremental_vs_cold, read_slot_json, walkdir_json, wipe_scan_cache,
 };
@@ -231,24 +233,26 @@ fn package_dir_root_offset_shift_matches_cold() {
 /// per-file cache (schema v14 `positional_externals` / loop-guard tags).
 #[test]
 fn advice_fixtures_incremental_matches_cold() {
-    for name in [
-        "advice_review_d",
-        "advice_review_h",
-        "advice_review_g",
-        "advice_review_a",
-        "advice_review_c",
-        "advice_offload_twin",
-    ] {
-        let dir = clone_fixture(name);
-        let cache = fresh_cache_dir(&format!("file-cache-{name}"));
-        let _ = report_json_with_cache(&dir, &cache);
-        // Touch a leaf so scan-cache misses but file slots stay hits where sound.
-        let app = dir.join("app.py");
-        if app.is_file() {
-            let mut text = fs::read_to_string(&app).unwrap();
-            text.push_str("\n# incremental bump\n");
-            fs::write(&app, &text).unwrap();
+    with_cleared_virtual_env(|| {
+        for name in [
+            "advice_review_d",
+            "advice_review_h",
+            "advice_review_g",
+            "advice_review_a",
+            "advice_review_c",
+            "advice_offload_twin",
+        ] {
+            let dir = clone_fixture(name);
+            let cache = fresh_cache_dir(&format!("file-cache-{name}"));
+            let _ = report_json_with_cache(&dir, &cache);
+            // Touch a leaf so scan-cache misses but file slots stay hits where sound.
+            let app = dir.join("app.py");
+            if app.is_file() {
+                let mut text = fs::read_to_string(&app).unwrap();
+                text.push_str("\n# incremental bump\n");
+                fs::write(&app, &text).unwrap();
+            }
+            incremental_vs_cold(&dir, &cache, name);
         }
-        incremental_vs_cold(&dir, &cache, name);
-    }
+    });
 }
