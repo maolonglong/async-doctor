@@ -277,10 +277,8 @@ fn functions_reachable_from_async_entries(
     let mut reach = HashSet::new();
     let mut queue = VecDeque::new();
     for f in &facts.functions {
-        if f.is_async && !f.is_sync_route && !f.is_third_party {
-            if reach.insert(f.id) {
-                queue.push_back(f.id);
-            }
+        if f.is_async && !f.is_sync_route && !f.is_third_party && reach.insert(f.id) {
+            queue.push_back(f.id);
         }
     }
     while let Some(id) = queue.pop_front() {
@@ -333,10 +331,8 @@ fn target_has_sync_only_caller(
             continue;
         }
         match &edge.callee {
-            CalleeRef::Project(fid) if *fid == *target_id => {
-                if sync_only.contains(&edge.caller) {
-                    return true;
-                }
+            CalleeRef::Project(fid) if *fid == *target_id && sync_only.contains(&edge.caller) => {
+                return true;
             }
             _ => {}
         }

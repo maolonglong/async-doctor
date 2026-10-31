@@ -38,7 +38,7 @@ fn advice_offload_twin_positives_and_negatives() {
         "advice_asgiref_sync_to_async",
     ] {
         assert!(
-            advice.iter().any(|n| *n == expected),
+            advice.contains(&expected),
             "missing advice for {expected}: {advice:?} full={:?}",
             report
                 .advice
@@ -56,7 +56,7 @@ fn advice_offload_twin_positives_and_negatives() {
         "nested_behind_offload_ok",
     ] {
         assert!(
-            !advice.iter().any(|n| *n == banned),
+            !advice.contains(&banned),
             "advice must not fire for {banned}: {advice:?}"
         );
     }
