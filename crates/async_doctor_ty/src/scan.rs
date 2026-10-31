@@ -1,13 +1,20 @@
 //! Public scan entry: extract facts, then grade with the builtin sink table.
+//!
+//! Warm path: when the whole-scan input fingerprint matches a cached report,
+//! skip ty extract/analyze and return the prior [`Report`] unchanged.
 
 use std::path::Path;
+use std::time::Instant;
 
 use async_doctor_core::{AnalyzeOptions, Report, analyze_with_options};
 use async_doctor_rules::BuiltinSinkTable;
 
-#[cfg(test)]
-use crate::extract::extract_path_with_cache_budget;
-use crate::extract::{extract_path, extract_path_with_cache};
+use crate::cache::effective_cache_root;
+use crate::extract::{
+    DEFAULT_FOLLOW_BUDGET, absolute_utf8, discover_python_files, extract_path_with_cache_budget,
+};
+use crate::scan_cache::{load_scan_report, save_scan_report, scan_input_fingerprint};
+use crate::timing::PhaseTiming;
 
 /// Scan a project directory or a single `.py` file with default options.
 pub fn scan_path(path: &Path) -> anyhow::Result<Report> {
@@ -16,12 +23,7 @@ pub fn scan_path(path: &Path) -> anyhow::Result<Report> {
 
 /// Scan with explicit grading/reporting options (CLI flags).
 pub fn scan_path_with_options(path: &Path, options: AnalyzeOptions) -> anyhow::Result<Report> {
-    let facts = extract_path(path)?;
-    Ok(analyze_with_options(
-        &facts,
-        &BuiltinSinkTable::new(),
-        options,
-    ))
+    scan_path_with_options_and_cache(path, options, None)
 }
 
 /// Scan with an explicit third-party package cache directory.
@@ -38,12 +40,7 @@ pub fn scan_path_with_options_and_cache(
     options: AnalyzeOptions,
     cache_dir: Option<&Path>,
 ) -> anyhow::Result<Report> {
-    let facts = extract_path_with_cache(path, cache_dir)?;
-    Ok(analyze_with_options(
-        &facts,
-        &BuiltinSinkTable::new(),
-        options,
-    ))
+    scan_path_with_options_cache_budget(path, options, cache_dir, DEFAULT_FOLLOW_BUDGET)
 }
 
 /// Scan with an explicit cache directory and injectable follow budget.
@@ -56,10 +53,62 @@ pub(crate) fn scan_path_with_cache_budget(
     cache_dir: Option<&Path>,
     follow_budget: usize,
 ) -> anyhow::Result<Report> {
-    let facts = extract_path_with_cache_budget(path, cache_dir, follow_budget)?;
-    Ok(analyze_with_options(
-        &facts,
-        &BuiltinSinkTable::new(),
+    scan_path_with_options_cache_budget(
+        path,
         AnalyzeOptions::default(),
-    ))
+        cache_dir,
+        follow_budget,
+    )
+}
+
+fn scan_path_with_options_cache_budget(
+    path: &Path,
+    options: AnalyzeOptions,
+    cache_dir: Option<&Path>,
+    follow_budget: usize,
+) -> anyhow::Result<Report> {
+    let mut timing = PhaseTiming::from_env();
+    let cache_root = effective_cache_root(cache_dir);
+
+    let t_disc = Instant::now();
+    let abs = absolute_utf8(path)?;
+    let (fingerprint_root, files) = if abs.as_std_path().is_file() {
+        let parent = abs
+            .parent()
+            .map(|p| p.as_std_path().to_path_buf())
+            .unwrap_or_else(|| Path::new(".").to_path_buf());
+        (parent, vec![abs.as_std_path().to_path_buf()])
+    } else {
+        let root = abs.as_std_path().to_path_buf();
+        let files = discover_python_files(&root)?;
+        (root, files)
+    };
+    timing.span("discovery", t_disc);
+
+    let t_fp = Instant::now();
+    let fingerprint =
+        scan_input_fingerprint(&fingerprint_root, &files, options, follow_budget);
+    timing.span("fingerprint", t_fp);
+
+    let t_load = Instant::now();
+    if let Some(report) = load_scan_report(&cache_root, &fingerprint) {
+        timing.span("scan_cache_load", t_load);
+        timing.finish("scan_cache=hit");
+        return Ok(report);
+    }
+    timing.span("scan_cache_miss", t_load);
+
+    let t_extract = Instant::now();
+    let facts = extract_path_with_cache_budget(path, cache_dir, follow_budget)?;
+    timing.span("extract", t_extract);
+
+    let t_analyze = Instant::now();
+    let report = analyze_with_options(&facts, &BuiltinSinkTable::new(), options);
+    timing.span("analyze", t_analyze);
+
+    let t_save = Instant::now();
+    let _ = save_scan_report(&cache_root, &fingerprint, &report);
+    timing.span("scan_cache_save", t_save);
+    timing.finish("scan_cache=miss");
+    Ok(report)
 }

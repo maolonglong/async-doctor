@@ -31,7 +31,9 @@ use serde::{Deserialize, Serialize};
 /// imports bounded to first-party head misses + one third-party aggregate.
 /// v9: relative imports that exist on disk (esp. when scan root is the package)
 /// are not recorded as unresolved-import.
-pub const CACHE_SCHEMA_VERSION: u32 = 9;
+/// v10: whole-scan report cache under `scan/{fingerprint}.json` (warm fast
+/// path when first-party + venv inputs are unchanged).
+pub const CACHE_SCHEMA_VERSION: u32 = 10;
 
 /// Tool version embedded in the cache path (from this crate's Cargo.toml).
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -151,7 +153,7 @@ pub fn effective_cache_root(explicit: Option<&Path>) -> PathBuf {
         .unwrap_or_else(default_cache_root)
 }
 
-fn sanitize(component: &str) -> String {
+pub(crate) fn sanitize_component(component: &str) -> String {
     component
         .chars()
         .map(|c| {
@@ -166,12 +168,12 @@ fn sanitize(component: &str) -> String {
 
 fn package_cache_path(root: &Path, package: &str, version: &str, fingerprint: &str) -> PathBuf {
     root.join(format!("v{CACHE_SCHEMA_VERSION}"))
-        .join(sanitize(TOOL_VERSION))
-        .join(sanitize(package))
+        .join(sanitize_component(TOOL_VERSION))
+        .join(sanitize_component(package))
         .join(format!(
             "{}-{}.json",
-            sanitize(version),
-            sanitize(fingerprint)
+            sanitize_component(version),
+            sanitize_component(fingerprint)
         ))
 }
 
@@ -415,7 +417,7 @@ mod tests {
 
     #[test]
     fn stale_schema_cache_is_not_reused() {
-        // v4–v8 must not load under v9.
+        // v4–v9 must not load under v10.
         let dir =
             std::env::temp_dir().join(format!("async-doctor-cache-stale-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -424,7 +426,7 @@ mod tests {
         let mut cache = PackageCache::new("demo", "1.0.0");
         assert_eq!(cache.schema_version, CACHE_SCHEMA_VERSION);
         assert!(cache.is_compatible());
-        for stale in [3u32, 4u32, 5u32, 6u32, 7u32, 8u32] {
+        for stale in [3u32, 4u32, 5u32, 6u32, 7u32, 8u32, 9u32] {
             cache.schema_version = stale;
             assert!(
                 !cache.is_compatible(),
@@ -436,7 +438,7 @@ mod tests {
         cache.schema_version = CACHE_SCHEMA_VERSION;
         save_package_cache(&root, &cache, "fpstale").unwrap();
         let path = package_cache_path(&root, "demo", "1.0.0", "fpstale");
-        for stale in [3u32, 4u32, 5u32, 6u32, 7u32, 8u32] {
+        for stale in [3u32, 4u32, 5u32, 6u32, 7u32, 8u32, 9u32] {
             let mut spoofed: serde_json::Value =
                 serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
             spoofed["schema_version"] = serde_json::json!(stale);
@@ -448,16 +450,16 @@ mod tests {
         }
 
         // Legacy directory layouts must also miss.
-        for stale in [3u32, 4u32, 5u32, 6u32, 7u32, 8u32] {
+        for stale in [3u32, 4u32, 5u32, 6u32, 7u32, 8u32, 9u32] {
             let stale_dir = root
                 .join(format!("v{stale}"))
-                .join(sanitize(TOOL_VERSION))
-                .join(sanitize("demo"));
+                .join(sanitize_component(TOOL_VERSION))
+                .join(sanitize_component("demo"));
             fs::create_dir_all(&stale_dir).unwrap();
             let stale_path = stale_dir.join(format!(
                 "{}-{}.json",
-                sanitize("1.0.0"),
-                sanitize("fpstale")
+                sanitize_component("1.0.0"),
+                sanitize_component("fpstale")
             ));
             let mut stale_doc = PackageCache::new("demo", "1.0.0");
             stale_doc.schema_version = stale;
