@@ -34,6 +34,11 @@ pub(crate) fn extract_files(
     };
     let mut package_meta = PackageMetaMemo::new();
     let program = db.program();
+    let followable_extra_roots: Vec<std::path::PathBuf> = db
+        .followable_extra_roots()
+        .iter()
+        .map(|p| std::path::PathBuf::from(p.as_str()))
+        .collect();
 
     // Open + parse all first-party files first.
     let mut opened: Vec<(SystemPathBuf, File, ProgramFile<'_>, String, String)> = Vec::new();
@@ -151,6 +156,8 @@ pub(crate) fn extract_files(
             task_targets: &mut task_targets,
             follow_targets: &mut follow_targets,
             package_meta: &mut package_meta,
+            followable_extra_roots: &followable_extra_roots,
+            record_unresolved_imports: true,
             module_constants: &module_constants,
             current_fn: None,
             current_param_names: Vec::new(),
@@ -190,7 +197,7 @@ pub(crate) fn extract_files(
         }
     }
 
-    // M2: follow reachable third-party `.py` callees under site-packages.
+    // M2: follow reachable third-party / outside-editable `.py` callees.
     follow_third_party(
         db,
         &mut facts,
@@ -198,6 +205,7 @@ pub(crate) fn extract_files(
         &mut qual_map,
         &mut follow_targets,
         &mut package_meta,
+        &followable_extra_roots,
         cache_dir,
         follow_budget,
     );
@@ -205,7 +213,9 @@ pub(crate) fn extract_files(
     // Stable unresolved-import order (cold == warm JSON).
     facts
         .unresolved_imports
-        .sort_by(|a, b| (&a.file, a.line, &a.module).cmp(&(&b.file, b.line, &b.module)));
+        .sort_by(|a, b| (&a.file, &a.module, a.line).cmp(&(&b.file, &b.module, b.line)));
+    facts.unresolved_third_party_modules.sort();
+    facts.unresolved_third_party_modules.dedup();
 
     // Stable edge order so cold extract vs warm cache materialization agree.
     // Never key on raw FunctionId — those differ between cold follow and warm

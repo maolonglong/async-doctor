@@ -161,6 +161,7 @@ fn param_guard_unknown_becomes_candidate() {
         complete: true,
         skipped: vec![],
         unresolved_imports: vec![],
+        unresolved_third_party_modules: vec![],
     };
     let report = analyze(&facts, &TestSinks);
     assert!(report.findings.is_empty(), "{:?}", report.findings);
@@ -194,6 +195,7 @@ fn entry_local_param_guard_stays_finding() {
         complete: true,
         skipped: vec![],
         unresolved_imports: vec![],
+        unresolved_third_party_modules: vec![],
     };
     let report = analyze(&facts, &TestSinks);
     assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
@@ -244,6 +246,7 @@ fn param_guard_false_literal_skipped() {
         complete: true,
         skipped: vec![],
         unresolved_imports: vec![],
+        unresolved_third_party_modules: vec![],
     };
     let report = analyze(&facts, &TestSinks);
     assert!(report.findings.is_empty());
@@ -266,6 +269,7 @@ fn skips_test_entries_by_default() {
         complete: true,
         skipped: vec![],
         unresolved_imports: vec![],
+        unresolved_third_party_modules: vec![],
     };
     let report = analyze(&facts, &TestSinks);
     assert!(report.findings.is_empty());
@@ -298,6 +302,7 @@ fn hides_unresolved_by_default() {
         complete: true,
         skipped: vec![],
         unresolved_imports: vec![],
+        unresolved_third_party_modules: vec![],
     };
     let report = analyze(&facts, &TestSinks);
     assert!(report.candidates.is_empty());
@@ -341,6 +346,7 @@ fn merges_open_and_read() {
         complete: true,
         skipped: vec![],
         unresolved_imports: vec![],
+        unresolved_third_party_modules: vec![],
     };
     let report = analyze(&facts, &TestSinks);
     assert_eq!(report.findings.len(), 1, "{:?}", report.findings);

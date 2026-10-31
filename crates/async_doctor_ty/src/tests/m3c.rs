@@ -88,10 +88,11 @@ fn m3c_sitepkgs_cold_warm_hidden_unresolved_identical() {
 }
 
 #[test]
-fn m3c_unresolved_import_surfaces_once() {
+fn m3c_missing_third_party_is_one_aggregate_note() {
+    // Missing third-party packages never emit per-import records.
     let dir = temp_project(&[(
         "main.py",
-        "from missing_pkg.cfg import load_config\n\nasync def handler():\n    return load_config()\n",
+        "from missing_pkg.cfg import load_config\nimport also_missing\n\nasync def handler():\n    return load_config()\n",
     )]);
     let hidden = scan_path(&dir).unwrap();
     assert!(
@@ -99,12 +100,11 @@ fn m3c_unresolved_import_surfaces_once() {
         "unresolved must not be a finding: {:?}",
         hidden.findings
     );
-    assert!(
-        hidden.hidden_unresolved_candidates >= 1,
-        "expected hidden unresolved import, got {}",
+    assert_eq!(
+        hidden.hidden_unresolved_candidates, 1,
+        "exactly one aggregated third-party note, got {}",
         hidden.hidden_unresolved_candidates
     );
-    // Call-level Name misses must not explode into candidates.
     assert!(
         hidden.candidates.is_empty(),
         "plain unresolved calls must stay hidden without --show-unresolved: {:?}",
@@ -123,19 +123,20 @@ fn m3c_unresolved_import_surfaces_once() {
         shown
             .unresolved_summary
             .iter()
-            .any(|p| p.pattern.starts_with("unresolved-import:")),
-        "expected unresolved-import in summary: {:?}",
+            .any(|p| { p.pattern.contains("third-party modules not installed") && p.sites == 2 }),
+        "expected one aggregate note covering 2 modules: {:?}",
         shown.unresolved_summary
     );
-    assert!(
+    assert_eq!(
         shown
             .candidates
             .iter()
-            .any(|c| c.rule == "unresolved-import"),
-        "expected unresolved-import candidate: {:?}",
+            .filter(|c| c.rule == "unresolved-import")
+            .count(),
+        1,
+        "one aggregate candidate, not per-import: {:?}",
         shown.candidates
     );
-    // No per-call unresolved-call candidate for load_config().
     assert!(
         shown
             .candidates
@@ -145,6 +146,178 @@ fn m3c_unresolved_import_surfaces_once() {
         shown.candidates
     );
     let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn m3c_first_party_unresolved_import_surfaces() {
+    // Head module exists under scan root but sub-module fails → real silent-drop case.
+    let dir = temp_project(&[
+        ("mypkg/__init__.py", ""),
+        (
+            "main.py",
+            "from mypkg.missing_sub import load\n\nasync def handler():\n    return load()\n",
+        ),
+    ]);
+    let hidden = scan_path(&dir).unwrap();
+    assert_eq!(
+        hidden.hidden_unresolved_candidates, 1,
+        "expected one first-party unresolved-import, got {}",
+        hidden.hidden_unresolved_candidates
+    );
+    let shown = scan_path_with_options(
+        &dir,
+        AnalyzeOptions {
+            include_non_production: false,
+            show_unresolved: true,
+        },
+    )
+    .unwrap();
+    assert!(
+        shown
+            .unresolved_summary
+            .iter()
+            .any(|p| { p.pattern == "unresolved-import:mypkg.missing_sub" && p.sites == 1 }),
+        "{:?}",
+        shown.unresolved_summary
+    );
+    assert!(
+        shown
+            .candidates
+            .iter()
+            .any(|c| c.rule == "unresolved-import" && c.entry.name.contains("mypkg.missing_sub")),
+        "{:?}",
+        shown.candidates
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn m3c_unresolved_import_dedupes_per_file_module() {
+    // Same missing first-party module at top-level + inside a function → count 1.
+    let dir = temp_project(&[
+        ("mypkg/__init__.py", ""),
+        (
+            "main.py",
+            "from mypkg.missing import foo\n\nasync def handler():\n    from mypkg.missing import foo as bar\n    return foo() or bar()\n",
+        ),
+    ]);
+    let hidden = scan_path(&dir).unwrap();
+    assert_eq!(
+        hidden.hidden_unresolved_candidates, 1,
+        "dedupe per file+module: got {}",
+        hidden.hidden_unresolved_candidates
+    );
+    let shown = scan_path_with_options(
+        &dir,
+        AnalyzeOptions {
+            include_non_production: false,
+            show_unresolved: true,
+        },
+    )
+    .unwrap();
+    let import_cands: Vec<_> = shown
+        .candidates
+        .iter()
+        .filter(|c| c.rule == "unresolved-import")
+        .collect();
+    assert_eq!(
+        import_cands.len(),
+        1,
+        "display must match count: {:?}",
+        shown.candidates
+    );
+    assert!(
+        shown
+            .unresolved_summary
+            .iter()
+            .any(|p| p.pattern == "unresolved-import:mypkg.missing" && p.sites == 1),
+        "{:?}",
+        shown.unresolved_summary
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn m3c_first_party_unresolved_cold_warm_identical() {
+    // Cold==warm including hiddenUnresolvedCandidates when unresolved-import
+    // records are present (ordering / materialization must be deterministic).
+    let dir = temp_project(&[
+        ("mypkg/__init__.py", ""),
+        (
+            "main.py",
+            "from mypkg.a_missing import a\nfrom mypkg.z_missing import z\n\nasync def handler():\n    return a() or z()\n",
+        ),
+        (
+            "other.py",
+            "from mypkg.a_missing import a\n\nasync def other():\n    return a()\n",
+        ),
+    ]);
+    let cache = fresh_cache_dir("m3c-fp-unresolved-cw");
+    let cold = report_json_with_cache(&dir, &cache);
+    let warm = report_json_with_cache(&dir, &cache);
+    assert_eq!(
+        cold, warm,
+        "cold/warm must match including hidden unresolved-import counts"
+    );
+    let report: async_doctor_core::Report = serde_json::from_str(&cold).unwrap();
+    assert_eq!(
+        report.hidden_unresolved_candidates, 3,
+        "a_missing×2 files + z_missing×1 = 3, got {}",
+        report.hidden_unresolved_candidates
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&cache);
+}
+
+#[test]
+fn m3c_outside_editable_never_called_not_entry() {
+    // Outside editable roots are follow-only: never-called async workers there
+    // must not become findings.
+    let dir = clone_fixture("m3c_editable_outside_no_entry");
+    let app = dir.join("app");
+    let report = scan_path(&app).unwrap();
+    assert!(
+        report.findings.is_empty(),
+        "unrelated_worker outside scan root must not be an entry: {:?}",
+        report.findings
+    );
+    assert!(
+        !report
+            .findings
+            .iter()
+            .any(|f| f.entry.name.contains("unrelated_worker")),
+        "{:?}",
+        report.findings
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn m3c_package_root_self_import_resolves() {
+    // Scanning a package dir (has __init__.py): parent is on the search path
+    // so `import <pkg>.…` self-imports resolve.
+    let outer = temp_project(&[
+        ("mypkg/__init__.py", ""),
+        (
+            "mypkg/jobs.py",
+            "import time\n\ndef work():\n    time.sleep(1)\n",
+        ),
+        (
+            "mypkg/app.py",
+            "from mypkg.jobs import work\n\nasync def handler():\n    work()\n",
+        ),
+    ]);
+    let pkg = outer.join("mypkg");
+    let report = scan_path(&pkg).unwrap();
+    assert_eq!(
+        report.findings.len(),
+        1,
+        "self-import mypkg.jobs must resolve when scanning package root: {:?}",
+        report.findings
+    );
+    assert_eq!(report.findings[0].rule, "blocking-sleep");
+    assert_eq!(report.findings[0].entry.name, "handler");
+    let _ = fs::remove_dir_all(&outer);
 }
 
 #[test]
