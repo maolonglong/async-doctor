@@ -8,6 +8,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 pub enum Format {
     Text,
     Json,
+    /// SARIF 2.1.0 (GitHub code scanning).
+    Sarif,
 }
 
 #[derive(Parser, Debug)]

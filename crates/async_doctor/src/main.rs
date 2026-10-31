@@ -5,6 +5,7 @@ mod baseline;
 mod changed;
 mod help_cmd;
 mod paths;
+mod sarif;
 mod suppress;
 mod text;
 
@@ -79,7 +80,6 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
     };
     let scan_root = scan_root.canonicalize().unwrap_or(scan_root);
 
-    // Inline suppressions (always on — zero-config escape hatch).
     let suppress_out = suppress::apply(report, &scan_root)?;
     for m in &suppress_out.missing_reason {
         eprintln!(
@@ -91,7 +91,9 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
     let suppressed_by_ignore = suppress_out.suppressed_findings;
     let mut report = suppress_out.report;
 
-    // --changed: full analysis, filtered reporting (graceful fallback).
+    // Prefer git toplevel for SARIF %SRCROOT%; fall back to scan root.
+    let mut repo_root_for_sarif = changed::repo_root_for(&cli.path).ok();
+
     if let Some(ref_spec) = &cli.changed {
         let git_ref = if ref_spec.is_empty() || ref_spec == "AUTO" {
             None
@@ -107,6 +109,7 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
                 if let Some(note) = note {
                     eprintln!("note: {note}");
                 }
+                repo_root_for_sarif = Some(repo_root.clone());
                 report = changed::filter_report(report, &files, &scan_root, &repo_root);
             }
             ChangedSet::FullScan { note } => {
@@ -115,7 +118,6 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
         }
     }
 
-    // Write baseline from the post-suppression set (never after --changed).
     let writing_baseline = cli.write_baseline.is_some();
     if let Some(path) = &cli.write_baseline {
         baseline::write_baseline(path, &report)?;
@@ -126,7 +128,6 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
         );
     }
 
-    // --baseline: suppress known stable ids; only new findings fail.
     let mut suppressed_by_baseline = 0u32;
     if let Some(path) = &cli.baseline {
         let bl = baseline::read_baseline(path)?;
@@ -150,9 +151,18 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
             serde_json::to_writer_pretty(&mut out, &report)?;
             writeln!(out)?;
         }
+        Format::Sarif => {
+            let src_root = repo_root_for_sarif
+                .as_deref()
+                .unwrap_or(scan_root.as_path());
+            let doc = sarif::report_to_sarif(&report, &scan_root, src_root);
+            let stdout = std::io::stdout();
+            let mut out = stdout.lock();
+            serde_json::to_writer_pretty(&mut out, &doc)?;
+            writeln!(out)?;
+        }
     }
 
-    // Recording a baseline is a bookkeeping action — always exit 0 on success.
     if writing_baseline {
         return Ok(ExitCode::from(EXIT_OK as u8));
     }
@@ -160,8 +170,7 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::from(report.exit_code() as u8))
 }
 
-/// Make each finding's `why` field runnable as-is from any cwd.
-fn rewrite_why_commands(report: &mut Report, scan_path: &Path) {
+pub(crate) fn rewrite_why_commands(report: &mut Report, scan_path: &Path) {
     let path_arg = cli_path_arg(scan_path);
     let rewrite = |why: &mut String| {
         if let Some(rest) = why.strip_prefix("async-doctor why ") {
