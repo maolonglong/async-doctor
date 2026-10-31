@@ -3,6 +3,7 @@
 mod calls;
 mod control_flow;
 mod imports;
+mod redis_mro;
 mod resolve;
 mod visit;
 
@@ -25,7 +26,11 @@ pub(crate) struct CallCollector<'a, 'db> {
     pub(super) model: &'a SemanticModel<'db>,
     pub(super) facts: &'a mut ProjectFacts,
     pub(super) def_map: &'a mut HashMap<DefKey, FunctionId>,
+    /// Optional shared base for parallel pass-2: lookups fall through here so
+    /// `def_map` only holds this file's inserts (no per-file full-map clone).
+    pub(super) def_map_base: Option<&'a HashMap<DefKey, FunctionId>>,
     pub(super) qual_map: &'a mut HashMap<(String, String), FunctionId>,
+    pub(super) qual_map_base: Option<&'a HashMap<(String, String), FunctionId>>,
     pub(super) property_defs: &'a HashSet<DefKey>,
     pub(super) task_targets: &'a mut TaskTargets,
     pub(super) follow_targets: &'a mut HashMap<String, FollowTarget>,
@@ -60,6 +65,9 @@ pub(crate) struct CallCollector<'a, 'db> {
     pub(super) in_eager_offload_arg: bool,
     /// Locals bound by `async with <asyncio-redis> as name` → receiver type qual.
     pub(super) async_with_receivers: HashMap<String, String>,
+    /// Memo: receiver type qualname → redis client family (avoids repeat MRO walks).
+    pub(super) redis_family_memo:
+        HashMap<String, Option<crate::extract::helpers::RedisClientFamily>>,
     pub(super) occurrence_counter: HashMap<(FunctionId, String), u32>,
     /// Literals for the call currently being recorded (set by handle_call).
     pub(super) pending_literals: Vec<Option<LiteralArg>>,
@@ -73,4 +81,20 @@ pub(crate) struct CallCollector<'a, 'db> {
     pub(super) local_lambdas: HashMap<String, &'a ast::ExprLambda>,
     /// Local name → generator expression assigned in the current function.
     pub(super) local_genexprs: HashMap<String, &'a ast::ExprGenerator>,
+}
+
+impl<'a, 'db> CallCollector<'a, 'db> {
+    pub(super) fn def_get(&self, key: &DefKey) -> Option<FunctionId> {
+        self.def_map
+            .get(key)
+            .copied()
+            .or_else(|| self.def_map_base.and_then(|b| b.get(key).copied()))
+    }
+
+    pub(super) fn qual_get(&self, key: &(String, String)) -> Option<FunctionId> {
+        self.qual_map
+            .get(key)
+            .copied()
+            .or_else(|| self.qual_map_base.and_then(|b| b.get(key).copied()))
+    }
 }

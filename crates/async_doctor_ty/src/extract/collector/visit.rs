@@ -15,10 +15,7 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
             Stmt::FunctionDef(func) => {
                 let qualname =
                     scope_qualname(&self.class_stack, &self.fn_stack, func.name.as_str());
-                let fid = self
-                    .qual_map
-                    .get(&(self.ctx.module.clone(), qualname))
-                    .copied();
+                let fid = self.qual_get(&(self.ctx.module.clone(), qualname));
                 let prev = self.current_fn;
                 let prev_params = std::mem::take(&mut self.current_param_names);
                 let prev_lambdas = std::mem::take(&mut self.local_lambdas);

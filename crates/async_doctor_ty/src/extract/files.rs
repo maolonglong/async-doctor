@@ -1,9 +1,10 @@
 //! Orchestrate multi-pass extraction over first-party Python files.
 //!
-//! Pass 1 (function discovery) and pass 2 (typed call edges) use separate
-//! [`AsyncDoctorDb`] lifetimes. Pass 2 opens the DB in batches so salsa/ty
-//! memory from earlier batches can be released — peak RSS tracks one batch
-//! plus on-demand imports, not the whole corpus at once.
+//! `ASYNC_DOCTOR_PASS2_BATCH` controls salsa resets during pass 2:
+//! - unset / `0` (default): never reset; parallel per-file salsa clones
+//!   with work-stealing
+//! - `locality`: reset between top-level package groups
+//! - `N>0`: reset every N files (lower peak RSS, slower cold)
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -24,16 +25,33 @@ use super::constants::collect_module_constants;
 use super::ctx::{DefKey, FileCtx, TaskTargets};
 use super::follow::follow_third_party;
 use super::functions::{collect_functions, twin_name};
+use super::pass2::{Pass2FileSpec, Pass2Shared, merge_pass2_results, run_pass2_parallel};
 use super::path::{module_name_from_relative, relative_display};
 
-/// Files per pass-2 DB before the salsa database is dropped and reopened.
-///
-/// Tuned so litellm-sized corpora stay well under ~1 GiB peak RSS while keeping
-/// cold/warm JSON byte-identical on the public corpora and fixtures.
-/// Larger batches reset salsa less often (faster cold) but retain more state.
-/// 280 keeps litellm peak RSS under ~1 GiB on this agent VM while staying
-/// byte-identical to the single-DB extract.
-const PASS2_DB_BATCH: usize = 280;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pass2BatchMode {
+    None,
+    Fixed(usize),
+    Locality,
+}
+
+fn pass2_batch_mode() -> Pass2BatchMode {
+    match std::env::var("ASYNC_DOCTOR_PASS2_BATCH") {
+        Ok(s) if s.eq_ignore_ascii_case("locality") => Pass2BatchMode::Locality,
+        Ok(s) => s
+            .parse::<usize>()
+            .ok()
+            .map(|n| {
+                if n == 0 {
+                    Pass2BatchMode::None
+                } else {
+                    Pass2BatchMode::Fixed(n)
+                }
+            })
+            .unwrap_or(Pass2BatchMode::None),
+        Err(_) => Pass2BatchMode::None,
+    }
+}
 
 struct FileRef {
     system_path: SystemPathBuf,
@@ -52,16 +70,15 @@ pub(crate) fn extract_files(
         ..ProjectFacts::default()
     };
 
-    // Catalog paths without a DB; relative names match `project_root`.
     let mut catalog: Vec<FileRef> = Vec::with_capacity(files.len());
     for path in files {
-        let system_path = match SystemPathBuf::from_path_buf(path.clone()) {
+        let system_path = match SystemPathBuf::from_path_buf(path) {
             Ok(p) => p,
-            Err(_) => {
+            Err(p) => {
                 facts.complete = false;
                 facts
                     .skipped
-                    .push(format!("{}: path is not valid UTF-8", path.display()));
+                    .push(format!("{}: path is not valid UTF-8", p.display()));
                 continue;
             }
         };
@@ -73,13 +90,14 @@ pub(crate) fn extract_files(
             module,
         });
     }
+    catalog.sort_by(|a, b| a.rel.cmp(&b.rel));
 
     let mut package_meta = PackageMetaMemo::new();
     let mut def_map: HashMap<DefKey, FunctionId> = HashMap::new();
     let mut qual_map: HashMap<(String, String), FunctionId> = HashMap::new();
     let mut property_defs: HashSet<DefKey> = HashSet::new();
+    let mut class_methods: HashMap<(String, String), Vec<String>> = HashMap::new();
 
-    // One environment discovery; later batches reuse settings via `fresh_empty`.
     let mut db = AsyncDoctorDb::open(project_root, None)?;
     let followable_extra_roots: Vec<PathBuf> = db
         .followable_extra_roots()
@@ -90,9 +108,7 @@ pub(crate) fn extract_files(
     // Pass 1: collect functions (parse only — no SemanticModel).
     {
         let program = db.program();
-        let mut class_methods: HashMap<(String, String), Vec<String>> = HashMap::new();
         let mut kept: Vec<FileRef> = Vec::with_capacity(catalog.len());
-
         for entry in catalog {
             let file = match system_path_to_file(&db, &entry.system_path) {
                 Ok(f) => f,
@@ -139,46 +155,134 @@ pub(crate) fn extract_files(
             kept.push(entry);
         }
         catalog = kept;
+    }
 
-        for func in &mut facts.functions {
-            if let Some((class, method)) = func.qualname.rsplit_once('.') {
-                let key = (func.module.clone(), class.to_string());
-                if let Some(methods) = class_methods.get(&key) {
-                    let twin = twin_name(method, methods);
-                    if let Some(t) = twin {
-                        func.async_twins.push((method.to_string(), t));
-                    }
-                }
+    for func in &mut facts.functions {
+        if let Some((class, method)) = func.qualname.rsplit_once('.') {
+            let key = (func.module.clone(), class.to_string());
+            if let Some(methods) = class_methods.get(&key)
+                && let Some(t) = twin_name(method, methods)
+            {
+                func.async_twins.push((method.to_string(), t));
             }
         }
     }
 
-    // Pass 2: typed edges in DB batches (fresh salsa storage each batch).
     let mut task_targets = TaskTargets::default();
     let mut follow_targets: HashMap<String, FollowTarget> = HashMap::new();
-    // Drop pass-1 salsa state before the first SemanticModel batch.
+    let entries: Vec<&FileRef> = catalog.iter().collect();
+    let batch_mode = pass2_batch_mode();
+    if matches!(batch_mode, Pass2BatchMode::None) && !entries.is_empty() {
+        let base_fn_len = facts.functions.len();
+        let shared = Pass2Shared {
+            functions: std::sync::Arc::new(facts.functions.clone()),
+            def_map: std::sync::Arc::new(def_map.clone()),
+            qual_map: std::sync::Arc::new(qual_map.clone()),
+            property_defs: std::sync::Arc::new(property_defs.clone()),
+            followable_extra_roots: std::sync::Arc::new(followable_extra_roots.clone()),
+        };
+        let specs: Vec<Pass2FileSpec> = entries
+            .iter()
+            .map(|e| Pass2FileSpec {
+                system_path: e.system_path.clone(),
+                rel: e.rel.clone(),
+                module: e.module.clone(),
+            })
+            .collect();
+        let results = run_pass2_parallel(&db, &specs, &shared);
+        merge_pass2_results(
+            &mut facts,
+            &mut def_map,
+            &mut qual_map,
+            &mut follow_targets,
+            &mut task_targets,
+            base_fn_len,
+            results,
+        );
+    } else {
+        run_pass2_batched(
+            &mut db,
+            &entries,
+            batch_mode,
+            &mut facts,
+            &mut def_map,
+            &mut qual_map,
+            &property_defs,
+            &mut task_targets,
+            &mut follow_targets,
+            &mut package_meta,
+            &followable_extra_roots,
+        );
+    }
+
+    for &fid in &task_targets.0 {
+        let f = &mut facts.functions[fid.index()];
+        if f.label == EntryLabel::Other {
+            f.label = EntryLabel::Task;
+        }
+    }
+
+    // Drop first-party SemanticModel memos before follow for stable RSS/identity.
     db = db.fresh_empty();
 
-    for (batch_idx, chunk) in catalog.chunks(PASS2_DB_BATCH).enumerate() {
+    follow_third_party(
+        &db,
+        &mut facts,
+        &mut def_map,
+        &mut qual_map,
+        &mut follow_targets,
+        &mut package_meta,
+        &followable_extra_roots,
+        cache_dir,
+        follow_budget,
+    );
+
+    stabilize_facts(&mut facts);
+    Ok(facts)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_pass2_batched(
+    db: &mut AsyncDoctorDb,
+    entries: &[&FileRef],
+    batch_mode: Pass2BatchMode,
+    facts: &mut ProjectFacts,
+    def_map: &mut HashMap<DefKey, FunctionId>,
+    qual_map: &mut HashMap<(String, String), FunctionId>,
+    property_defs: &HashSet<DefKey>,
+    task_targets: &mut TaskTargets,
+    follow_targets: &mut HashMap<String, FollowTarget>,
+    package_meta: &mut PackageMetaMemo,
+    followable_extra_roots: &[PathBuf],
+) {
+    let chunks = pass2_chunks(entries, batch_mode);
+    let reset_between = matches!(
+        batch_mode,
+        Pass2BatchMode::Fixed(_) | Pass2BatchMode::Locality
+    );
+    if reset_between && !chunks.is_empty() {
+        *db = db.fresh_empty();
+    }
+    for (batch_idx, chunk) in chunks.iter().enumerate() {
         if batch_idx > 0 {
-            db = db.fresh_empty();
+            *db = db.fresh_empty();
         }
         let program = db.program();
-        for entry in chunk {
-            let file = match system_path_to_file(&db, &entry.system_path) {
+        for entry in chunk.iter() {
+            let file = match system_path_to_file(db, &entry.system_path) {
                 Ok(f) => f,
                 Err(_) => continue,
             };
-            let program_file = program.program_file(&db, file);
-            let source = source_text(&db, file);
-            let index = line_index(&db, file);
-            let parsed = parsed_module(&db, program_file.python_file(&db)).load(&db);
+            let program_file = program.program_file(db, file);
+            let source = source_text(db, file);
+            let index = line_index(db, file);
+            let parsed = parsed_module(db, program_file.python_file(db)).load(db);
             if parsed.has_invalid_syntax() {
                 continue;
             }
-            let model = SemanticModel::new(&db, program_file);
+            let model = SemanticModel::new(db, program_file);
             let ctx = FileCtx {
-                db: &db,
+                db,
                 program_file,
                 file,
                 rel: entry.rel.clone(),
@@ -190,14 +294,16 @@ pub(crate) fn extract_files(
             let mut visitor = CallCollector {
                 ctx: &ctx,
                 model: &model,
-                facts: &mut facts,
-                def_map: &mut def_map,
-                qual_map: &mut qual_map,
-                property_defs: &property_defs,
-                task_targets: &mut task_targets,
-                follow_targets: &mut follow_targets,
-                package_meta: &mut package_meta,
-                followable_extra_roots: &followable_extra_roots,
+                facts,
+                def_map,
+                def_map_base: None,
+                qual_map,
+                qual_map_base: None,
+                property_defs,
+                task_targets,
+                follow_targets,
+                package_meta,
+                followable_extra_roots,
                 record_unresolved_imports: true,
                 module_constants: &module_constants,
                 current_fn: None,
@@ -217,6 +323,7 @@ pub(crate) fn extract_files(
                 pending_with_enter: false,
                 in_eager_offload_arg: false,
                 async_with_receivers: HashMap::new(),
+                redis_family_memo: HashMap::new(),
                 occurrence_counter: HashMap::new(),
                 pending_literals: Vec::new(),
                 pending_callables: Vec::new(),
@@ -230,30 +337,40 @@ pub(crate) fn extract_files(
             }
         }
     }
+}
 
-    for fid in task_targets.0 {
-        let f = &mut facts.functions[fid.index()];
-        if f.label == EntryLabel::Other {
-            f.label = EntryLabel::Task;
+fn pass2_chunks<'a>(entries: &[&'a FileRef], mode: Pass2BatchMode) -> Vec<Vec<&'a FileRef>> {
+    if entries.is_empty() {
+        return Vec::new();
+    }
+    match mode {
+        Pass2BatchMode::None => vec![entries.to_vec()],
+        Pass2BatchMode::Fixed(n) => entries.chunks(n.max(1)).map(|c| c.to_vec()).collect(),
+        Pass2BatchMode::Locality => {
+            let mut out: Vec<Vec<&FileRef>> = Vec::new();
+            let mut cur: Vec<&FileRef> = Vec::new();
+            let mut cur_key: Option<&str> = None;
+            for entry in entries {
+                let key = locality_key(&entry.rel);
+                if cur_key.is_some_and(|k| k != key) && !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+                cur_key = Some(key);
+                cur.push(entry);
+            }
+            if !cur.is_empty() {
+                out.push(cur);
+            }
+            out
         }
     }
+}
 
-    // Follow on a fresh DB so third-party extract does not inherit pass-2 peak.
-    let db = db.fresh_empty();
-    follow_third_party(
-        &db,
-        &mut facts,
-        &mut def_map,
-        &mut qual_map,
-        &mut follow_targets,
-        &mut package_meta,
-        &followable_extra_roots,
-        cache_dir,
-        follow_budget,
-    );
-
-    stabilize_facts(&mut facts);
-    Ok(facts)
+fn locality_key(rel: &str) -> &str {
+    rel.split(['/', '\\'])
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(rel)
 }
 
 fn stabilize_facts(facts: &mut ProjectFacts) {
@@ -274,15 +391,13 @@ fn stabilize_facts(facts: &mut ProjectFacts) {
             CalleeRef::Unresolved { reason } => format!("U:{reason}"),
             CalleeRef::Offload(k) => format!("O:{}", k.as_str()),
             CalleeRef::ParamInvoke { index } => format!("I:{index}"),
-            CalleeRef::Project(id) => {
-                format!(
-                    "P:{}",
-                    project_keys
-                        .get(id.index())
-                        .map(String::as_str)
-                        .unwrap_or("")
-                )
-            }
+            CalleeRef::Project(id) => format!(
+                "P:{}",
+                project_keys
+                    .get(id.index())
+                    .map(String::as_str)
+                    .unwrap_or("")
+            ),
         }
     };
     facts.edges.sort_by(|a, b| {
