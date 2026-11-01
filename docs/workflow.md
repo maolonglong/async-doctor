@@ -59,10 +59,10 @@ It warns (does not fail) on active plans untouched in git for 14 days: finish, u
 
 When a check fails, its message says how to fix it. When a rule keeps getting broken by hand, add it to this script or to the project's linters instead of adding prose.
 
-CI step (already in `.github/workflows/ci.yml`; `fetch-depth: 0` so plan-staleness warnings can read git dates):
+CI step (already in the `lint` job of `.github/workflows/ci.yml`; `fetch-depth: 0` so plan-staleness warnings can read git dates):
 
 ```yaml
-- uses: actions/checkout@v4
+- uses: actions/checkout@v6
   with: { fetch-depth: 0 }
 - run: python3 scripts/check_docs.py
 ```

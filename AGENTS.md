@@ -17,11 +17,14 @@ ship a false positive as a finding, and never add a project config file.
 ## Commands
 
 ```sh
-cargo test --workspace                              # default before every push
+cargo nextest run --workspace                       # default before every push (parallel; skips ignored)
+cargo test --workspace                              # also fine; serial binaries
 cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings
 ./scripts/check_rust_file_length.sh                 # crates/**/*.rs <= 800 lines
 python3 scripts/check_docs.py                       # doc links, size budgets, plan/decision structure
-cargo test -p async_doctor --test concurrent_cache -- --ignored   # cold-cache race stress (opt-in)
+cargo nextest run -p async_doctor --test concurrent_cache --profile stress \
+  --run-ignored only -E 'test(concurrent_cold_scans) and not test(/_stress$/)'  # main-sized stress
+cargo test -p async_doctor --test concurrent_cache -- --ignored   # N=15/20 + N=100 (opt-in)
 ```
 
 ## Standing orders
