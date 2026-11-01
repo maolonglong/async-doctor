@@ -363,9 +363,11 @@ pub(super) fn merge_same_line_ctor_call_findings(findings: Vec<Finding>) -> Vec<
         if let Some(ctors) = absorb_into.get(&i) {
             for &ci in ctors {
                 for step in &ctor_chains[&ci] {
-                    if !f.chain.iter().any(|s| {
-                        s.file == step.file && s.line == step.line && s.text == step.text
-                    }) {
+                    if !f
+                        .chain
+                        .iter()
+                        .any(|s| s.file == step.file && s.line == step.line && s.text == step.text)
+                    {
                         f.chain.push(step.clone());
                     }
                 }

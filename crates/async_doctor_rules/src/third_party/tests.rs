@@ -181,12 +181,19 @@ fn boto_dynamic_client_methods_match_aioboto_advice() {
     assert_eq!(hit.rule, RULE_BLOCKING_HTTP);
     assert!(hit.fix_hint.contains("aioboto3"));
     assert!(t.lookup("botocore.client.BaseClient.meta").is_none());
-    assert!(t.lookup("botocore.client.BaseClient.get_paginator").is_none());
+    assert!(
+        t.lookup("botocore.client.BaseClient.get_paginator")
+            .is_none()
+    );
     assert!(t.lookup("botocore.client.BaseClient.get_waiter").is_none());
-    assert!(t.lookup("botocore.client.BaseClient.can_paginate").is_none());
-    assert!(t
-        .lookup("botocore.client.BaseClient.generate_presigned_url")
-        .is_none());
+    assert!(
+        t.lookup("botocore.client.BaseClient.can_paginate")
+            .is_none()
+    );
+    assert!(
+        t.lookup("botocore.client.BaseClient.generate_presigned_url")
+            .is_none()
+    );
     assert!(t.lookup("boto3.client").is_some());
 }
 

@@ -83,7 +83,8 @@ fn p1_inmemory_archive_and_ctor_call_collapse() {
         .filter(|f| f.entry.name == "zip_path_blocks")
         .count();
     assert_eq!(
-        zip_n, 1,
+        zip_n,
+        1,
         "path ZipFile + writestr must merge to one finding: {:?}",
         report
             .findings
