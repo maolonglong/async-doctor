@@ -7,7 +7,7 @@ building from source, after pre-release audit fixes and owner confirmation.
 
 ## Progress
 
-- [x] 2026-11-01: Pre-release audit fixes merged — https://redirect.github.com/maolonglong/async-doctor/pull/32, https://redirect.github.com/maolonglong/async-doctor/pull/33, https://redirect.github.com/maolonglong/async-doctor/pull/34.
+- [x] 2026-11-01: Pre-release audit fixes merged — https://github.com/maolonglong/async-doctor/pull/32, https://github.com/maolonglong/async-doctor/pull/33, https://github.com/maolonglong/async-doctor/pull/34.
 - [ ] P1 recall fixes (see debt rows in [../../quality.md](../../quality.md): boto3 client calls, `concurrent.futures.Future.result()`, smtplib/ftplib, zipfile/tarfile, glob/`Path.iterdir`, `input()`, chain-through-sinks).
 - [ ] PyPI trusted publisher + `pypi` environment configured for the release workflow.
 - [ ] Resolve vendored `fast-rust` skill license (no upstream license) before open-sourcing / public release.
