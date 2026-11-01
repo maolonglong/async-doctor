@@ -149,8 +149,9 @@ Claude Code reaches them via symlinks under `.claude/skills/`.
 
 ### `.github/`
 
-CI (`ci.yml`: fmt, file length, clippy, test, `check_docs.py`) and the
-maturin/PyPI release workflow.
+CI (`ci.yml`: parallel `lint` + `test` jobs; main-only `stress` for concurrent
+cold-cache; `check_docs.py` on lint) and the maturin/PyPI release workflow.
+Strategy: [docs/quality.md](docs/quality.md) (CI / test strategy).
 
 ## Cross-cutting concerns
 
@@ -161,8 +162,9 @@ maturin/PyPI release workflow.
   `crates/async_doctor_rules/src/third_party/tests.rs`.
 - CLI: `crates/async_doctor/tests/` (`cli_*`, `concurrent_cache`,
   `file_length`).
-- Default `cargo test --workspace` stays fast. Longer stress loops use
-  `#[ignore]` (see [docs/notes/2026-10-concurrent-cache-stress.md](docs/notes/2026-10-concurrent-cache-stress.md)).
+- Default `cargo nextest run --workspace` / `cargo test --workspace` stays
+  fast: all `concurrent_cold_scans*` are `#[ignore]` (main `stress` job runs
+  N=15/20; see [docs/notes/2026-10-concurrent-cache-stress.md](docs/notes/2026-10-concurrent-cache-stress.md)).
 
 ### Error handling
 

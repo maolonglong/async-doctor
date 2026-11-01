@@ -4,6 +4,34 @@ Grades show where the codebase is solid and where agents should tread carefully.
 The debt tracker lists known shortcuts so they get paid down in small steps
 instead of piling up.
 
+## CI / test strategy
+
+PR wall-clock target: under ~3 minutes on a warm Actions cache (ideally under
+2). Coverage that matters must still run somewhere.
+
+| Job | When | What |
+|---|---|---|
+| `lint` | every PR / main push | `fmt`, file-length, `check_docs.py`, `clippy` |
+| `test` | every PR / main push | `cargo nextest run --workspace` (skips `#[ignore]`), then `cargo test --workspace --doc` |
+| `stress` | main push, `workflow_dispatch`, weekly schedule | concurrent cold-cache N=15/20 via `--run-ignored only` |
+
+Local equivalents:
+
+```bash
+cargo nextest run --workspace
+cargo nextest run -p async_doctor --test concurrent_cache --profile stress \
+  --run-ignored only \
+  -E 'test(concurrent_cold_scans) and not test(/_stress$/)'
+cargo test -p async_doctor --test concurrent_cache -- --ignored   # N=15/20 + N=100
+```
+
+Build profile: workspace crates use `opt-level = 1` in `dev`/`test`; all
+non-workspace packages use `opt-level = 3` so ty/ruff analysis in tests is not
+pathologically slow. Cache: `Swatinem/rust-cache` with `shared-key: ci` and
+`save-if` only on `main` (PRs restore, never save) so the 10GB Actions cache
+quota is not filled by per-PR entries. Concurrent cold-cache detail:
+[notes/2026-10-concurrent-cache-stress.md](notes/2026-10-concurrent-cache-stress.md).
+
 ## Grades
 
 | Area | Grade | Why | Updated |
