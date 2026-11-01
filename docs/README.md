@@ -1,8 +1,8 @@
 # Docs index
 
-<!-- guide: The table of contents for docs/. Every top-level docs/*.md file is linked here (scripts/check_docs.py fails on orphans). Folders list their own contents in their README, so this file links folders, not each file in them. Delete guide comments once filled. -->
-
-Repository docs are the system of record: if a fact lives only in chat, a PR thread, or someone's memory, agents cannot see it. Move it here.
+Repository docs are the system of record: if a fact lives only in chat, a PR
+thread, or someone's memory, agents cannot see it. Move it here. All repo docs
+are English only.
 
 ## Where each fact lives
 
@@ -22,7 +22,9 @@ One home per fact; everywhere else links to it.
 
 ## Topic docs
 
-<!-- guide: Project reference docs that do not fit a folder above (rule catalogue, CLI reference, benchmark method, product spec). One line each: link + what question it answers. -->
-
 - [workflow.md](workflow.md): how a task flows through plans, code, and docs, and which checks enforce it.
 - [quality.md](quality.md): per-area quality grades and the tech-debt tracker.
+- [rules.md](rules.md): stable rule ids, suppressions, and fix guidance (`async-doctor explain`).
+- [json-contract.md](json-contract.md): JSON report fields and exit-code contract for agents.
+- [cli.md](cli.md): commands, flags, suppressions, and skill install path.
+- [benchmark.md](benchmark.md): public cold/warm timings, method, and reproduce steps.

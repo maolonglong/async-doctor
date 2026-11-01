@@ -80,6 +80,6 @@ async def listen_bare_ok():
 
 async def unsafe_async_mutation(cache: dict, key: str, value: str):
     # Out of scope: shared-state mutation without blocking IO.
-    # Documented in docs/precision_m3a.md — async-doctor reports blocking IO,
+    # Documented in docs/plans/completed/2026-10-m3a-precision.md — async-doctor reports blocking IO,
     # not general concurrency / race hazards.
     cache[key] = value

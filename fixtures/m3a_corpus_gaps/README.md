@@ -10,6 +10,6 @@ Covers the known M3a recall cases (and matching negatives):
 | `begin_not_entered_ok` | no finding |
 | `listen_consumed` / `listen_comprehension` | findings |
 | `listen_bare_ok` | no finding |
-| `unsafe_async_mutation` | **out of scope** (no finding; see `docs/precision_m3a.md`) |
+| `unsafe_async_mutation` | **out of scope** (no finding; see `docs/plans/completed/2026-10-m3a-precision.md`) |
 
 Stub `redis` + `sqlalchemy` live under `.venv/.../site-packages`.

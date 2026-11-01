@@ -1,8 +1,9 @@
 //! Structured async-twin table for high-confidence offload advice.
 //!
-//! Design exception (see `docs/design.md`): twins appear as a dedicated advice
-//! rule at offload cut sites — not as findings, and not double-reported with
-//! blocking-* findings (those sites are already cut).
+//! Design exception (see `docs/decisions/2026-10-31-advice-tier.md`): twins
+//! appear as a dedicated advice rule at offload cut sites — not as findings,
+//! and not double-reported with blocking-* findings (those sites are already
+//! cut).
 
 use async_doctor_core::{AsyncTwinHit, TwinConfidence};
 

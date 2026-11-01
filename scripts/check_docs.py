@@ -20,7 +20,11 @@ SOURCE_WARN_LINES = 800
 STALE_PLAN_DAYS = 14
 PLAN_SECTIONS = ["Purpose", "Progress", "Surprises", "Decision log", "Validation", "Outcomes"]
 DECISION_STATUS = re.compile(r"^Status: (proposed|accepted|rejected|superseded)\b", re.M)
-SKIP_DIRS = {".git", "node_modules", "target", "vendor", "third_party", ".venv", "venv", "dist", "build", "fixtures", "snapshots"}
+# Directory *names* skipped anywhere in a path. Keep this list free of names that
+# also appear as real source modules (this repo has crates/.../third_party/).
+SKIP_DIRS = {".git", "node_modules", "target", "vendor", ".venv", "venv", "dist", "build", "fixtures", "snapshots"}
+# Top-level only (path part 0): vendored trees that are not project docs/sources.
+SKIP_ROOTS = {"third_party"}
 SOURCE_EXTS = {".py", ".rs", ".go", ".ts", ".tsx", ".js", ".jsx", ".java", ".kt", ".swift", ".c", ".cc", ".cpp", ".h"}
 PATH_EXTS = {".md", ".py", ".rs", ".go", ".ts", ".tsx", ".js", ".toml", ".json", ".yml", ".yaml", ".sh", ".txt", ".lock", ".cfg", ".ini"}
 
@@ -51,7 +55,17 @@ def repo_files(root: Path) -> list[Path]:
         for dirpath, dirnames, filenames in os.walk(root):
             dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
             files += [Path(dirpath, f).relative_to(root) for f in filenames]
-    return [f for f in files if not SKIP_DIRS.intersection(f.parts[:-1]) and (root / f).is_file()]
+    out = []
+    for f in files:
+        if SKIP_DIRS.intersection(f.parts[:-1]):
+            continue
+        if f.parts and f.parts[0] in SKIP_ROOTS:
+            continue
+        p = root / f
+        # Symlinks to skill dirs are real repo paths agents document; include them.
+        if p.is_file() or p.is_symlink():
+            out.append(f)
+    return out
 
 
 def prose_lines(text: str):
@@ -95,7 +109,9 @@ def _anchors(path: Path) -> set[str]:
 
 
 def is_doc(f: Path) -> bool:
-    return f.suffix == ".md" and (len(f.parts) == 1 or f.parts[0] == "docs" or f.name == "AGENTS.md")
+    # Root maps (AGENTS.md, ARCHITECTURE.md, README.md, …) and everything under docs/.
+    # Nested copies inside vendored skills (e.g. template/AGENTS.md) are not project docs.
+    return f.suffix == ".md" and (len(f.parts) == 1 or f.parts[0] == "docs")
 
 
 def check_links(root: Path, f: Path, text: str) -> None:
