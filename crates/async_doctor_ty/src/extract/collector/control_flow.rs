@@ -9,7 +9,10 @@ use ty_python_core::definition::DefinitionKind;
 use ty_python_semantic::{ImportAliasResolution, definitions_for_name};
 
 use super::CallCollector;
-use super::loop_guards::except_is_runtime_error;
+use super::loop_guards::{
+    except_is_runtime_error, futures_proven_done_in_test, is_off_loop_thread_test,
+    is_on_loop_thread_test,
+};
 use crate::extract::constants::{
     EarlyExitKind, ModuleConst, body_always_exits, is_cache_hit_test, is_cache_miss_test,
     param_guard_from_test,
@@ -229,7 +232,15 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         let no_loop = !dead
             && (self.is_no_running_loop_test_ctx(&if_stmt.test)
                 || self.is_idle_loop_local_guard(&if_stmt.test));
+        let off_loop = !dead && is_off_loop_thread_test(&if_stmt.test);
+        let on_loop_thread = !dead && is_on_loop_thread_test(&if_stmt.test);
         let mut saw_running_loop_test = !dead && self.is_running_loop_test_ctx(&if_stmt.test);
+        let mut saw_on_loop_thread_test = on_loop_thread;
+        let done_names = if dead {
+            Vec::new()
+        } else {
+            futures_proven_done_in_test(&if_stmt.test)
+        };
         let param_guard = if dead {
             None
         } else {
@@ -241,6 +252,15 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         } else {
             self.visit_expr(&if_stmt.test);
         }
+        let prev_done = if !dead && !done_names.is_empty() {
+            let prev = self.future_done_locals.clone();
+            for n in &done_names {
+                self.future_done_locals.insert(n.clone());
+            }
+            Some(prev)
+        } else {
+            None
+        };
         if !dead {
             self.branch_depth += 1;
             if cache_miss {
@@ -248,6 +268,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             }
             if no_loop {
                 self.no_running_loop_depth += 1;
+            }
+            if off_loop {
+                self.off_loop_thread_depth += 1;
             }
         }
         let prev_guard = self.active_param_guard;
@@ -264,7 +287,13 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             self.narrowed_locals.remove(&key);
         }
         self.active_param_guard = prev_guard;
+        if let Some(prev) = prev_done {
+            self.future_done_locals = prev;
+        }
         if !dead {
+            if off_loop {
+                self.off_loop_thread_depth -= 1;
+            }
             if no_loop {
                 self.no_running_loop_depth -= 1;
             }
@@ -307,6 +336,28 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             } else {
                 false
             };
+            let elif_off_loop = if elif_dead {
+                false
+            } else if is_else {
+                // else of `current_thread() is main_thread()` → off-loop body.
+                saw_on_loop_thread_test
+            } else if let Some(t) = clause.test.as_ref() {
+                if is_on_loop_thread_test(t) {
+                    saw_on_loop_thread_test = true;
+                }
+                is_off_loop_thread_test(t)
+            } else {
+                false
+            };
+            let elif_done = if elif_dead {
+                Vec::new()
+            } else {
+                clause
+                    .test
+                    .as_ref()
+                    .map(futures_proven_done_in_test)
+                    .unwrap_or_default()
+            };
             let elif_guard = clause.test.as_ref().and_then(|t| {
                 if elif_dead {
                     None
@@ -319,6 +370,15 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             } else if let Some(test) = &clause.test {
                 self.visit_expr(test);
             }
+            let prev_done = if !elif_dead && !elif_done.is_empty() {
+                let prev = self.future_done_locals.clone();
+                for n in &elif_done {
+                    self.future_done_locals.insert(n.clone());
+                }
+                Some(prev)
+            } else {
+                None
+            };
             // else / elif always counts as a branch when live — never unconditional.
             if !elif_dead {
                 self.branch_depth += 1;
@@ -327,6 +387,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 }
                 if elif_no_loop {
                     self.no_running_loop_depth += 1;
+                }
+                if elif_off_loop {
+                    self.off_loop_thread_depth += 1;
                 }
             }
             let prev_guard = self.active_param_guard;
@@ -343,7 +406,13 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 self.narrowed_locals.remove(&key);
             }
             self.active_param_guard = prev_guard;
+            if let Some(prev) = prev_done {
+                self.future_done_locals = prev;
+            }
             if !elif_dead {
+                if elif_off_loop {
+                    self.off_loop_thread_depth -= 1;
+                }
                 if elif_no_loop {
                     self.no_running_loop_depth -= 1;
                 }
@@ -516,6 +585,10 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             } else if !matches!(item.context_expr, Expr::Call(_)) {
                 // Sync `with Call(...)` already recorded above as WithEnter.
                 self.visit_expr(&item.context_expr);
+            }
+            // Bind `with ZipFile(buf) as zf` / buffer receivers for later method skips.
+            if let Some(Expr::Name(n)) = item.optional_vars.as_deref() {
+                self.note_local_binding(n.id.as_str(), &item.context_expr);
             }
             if let Some(opt) = &item.optional_vars {
                 self.visit_expr(opt);

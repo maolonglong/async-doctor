@@ -11,8 +11,8 @@ use super::CallCollector;
 use crate::extract::constants::{is_generator_consumer, literal_arg};
 use crate::extract::ctx::DefKey;
 use crate::extract::helpers::{
-    is_asyncio_redis_type, is_callable_ref, is_getattr_call, is_in_memory_buffer_type,
-    is_partial_call, is_path_or_file_open_qual, is_task_spawn_callee, normalize_asyncio_redis_type,
+    is_asyncio_redis_type, is_callable_ref, is_getattr_call, is_partial_call,
+    is_path_or_file_open_qual, is_task_spawn_callee, normalize_asyncio_redis_type,
     qualname_from_definition, route_handler_arg, twin_relevant_client_root,
 };
 
@@ -208,7 +208,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         let Some(caller) = self.current_fn else {
             return;
         };
-        if self.dead_depth > 0 || self.in_lambda {
+        if self.dead_depth > 0 || self.in_lambda || self.off_loop_thread_depth > 0 {
             return;
         }
 
@@ -236,6 +236,20 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             && is_path_or_file_open_qual(&q)
             && self.first_arg_is_in_memory_buffer(call)
         {
+            self.clear_pending_call_args();
+            self.pending_is_awaited = false;
+            return;
+        }
+
+        // zipfile/tarfile on BytesIO/StringIO (ctor or subsequent receiver ops).
+        if self.call_is_in_memory_archive(call) {
+            self.clear_pending_call_args();
+            self.pending_is_awaited = false;
+            return;
+        }
+
+        // `if fut.done(): fut.result()` — result does not block.
+        if self.call_is_done_guarded_future_result(call) {
             self.clear_pending_call_args();
             self.pending_is_awaited = false;
             return;
@@ -327,46 +341,6 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         self.pending_keyword_callables.clear();
     }
 
-    pub(crate) fn first_arg_is_in_memory_buffer(&mut self, call: &ast::ExprCall) -> bool {
-        let Some(arg) = call.arguments.args.first() else {
-            // Also accept fp=/file= kwargs used by PIL.
-            let kw = call.arguments.keywords.iter().find(|k| {
-                k.arg
-                    .as_ref()
-                    .is_some_and(|a| matches!(a.as_str(), "fp" | "file" | "filename"))
-            });
-            return kw.is_some_and(|k| self.expr_is_in_memory_buffer(&k.value));
-        };
-        self.expr_is_in_memory_buffer(arg)
-    }
-
-    pub(crate) fn expr_is_in_memory_buffer(&mut self, expr: &Expr) -> bool {
-        if let Expr::Call(c) = expr {
-            // BytesIO(...) / StringIO(...) constructor call.
-            if let Some(q) = self.external_qualname(&c.func)
-                && is_in_memory_buffer_type(&q)
-            {
-                return true;
-            }
-            if let Expr::Attribute(a) = c.func.as_ref()
-                && matches!(a.attr.as_str(), "BytesIO" | "StringIO")
-            {
-                return true;
-            }
-            if let Expr::Name(n) = c.func.as_ref()
-                && matches!(n.id.as_str(), "BytesIO" | "StringIO")
-            {
-                return true;
-            }
-        }
-        if let Some(ty) = self.type_instance_qualname(expr)
-            && is_in_memory_buffer_type(&ty)
-        {
-            return true;
-        }
-        false
-    }
-
     pub(crate) fn resolve_keyword_callables(
         &mut self,
         call: &'a ast::ExprCall,
@@ -412,6 +386,8 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 self.boto_receivers.remove(name);
                 self.running_loop_locals.remove(name);
                 self.event_loop_locals.remove(name);
+                self.buffer_locals.remove(name);
+                self.in_memory_archive_receivers.remove(name);
             }
             Expr::Generator(gexpr) => {
                 self.local_genexprs
@@ -423,6 +399,8 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 self.boto_receivers.remove(name);
                 self.running_loop_locals.remove(name);
                 self.event_loop_locals.remove(name);
+                self.buffer_locals.remove(name);
+                self.in_memory_archive_receivers.remove(name);
             }
             other => {
                 self.local_lambdas.remove(name);
@@ -435,6 +413,8 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 self.note_queue_binding(name, other);
                 self.note_boto_binding(name, other);
                 self.note_loop_handle_binding(name, other);
+                self.note_buffer_binding(name, other);
+                self.note_archive_binding(name, other);
             }
         }
     }
@@ -723,27 +703,30 @@ impl<'a, 'db> CallCollector<'a, 'db> {
 
     /// Snapshot + clear branch/loop depths so nested callable bodies are graded
     /// relative to themselves (not the enclosing offload site's try/if/loop).
-    fn take_enclosing_depths(&mut self) -> (u32, u32, u32, u32, u32) {
+    fn take_enclosing_depths(&mut self) -> (u32, u32, u32, u32, u32, u32) {
         let depths = (
             self.dead_depth,
             self.loop_depth,
             self.branch_depth,
             self.cache_miss_depth,
             self.no_running_loop_depth,
+            self.off_loop_thread_depth,
         );
         self.dead_depth = 0;
         self.loop_depth = 0;
         self.branch_depth = 0;
         self.cache_miss_depth = 0;
         self.no_running_loop_depth = 0;
+        self.off_loop_thread_depth = 0;
         depths
     }
 
-    fn restore_enclosing_depths(&mut self, depths: (u32, u32, u32, u32, u32)) {
+    fn restore_enclosing_depths(&mut self, depths: (u32, u32, u32, u32, u32, u32)) {
         self.dead_depth = depths.0;
         self.loop_depth = depths.1;
         self.branch_depth = depths.2;
         self.cache_miss_depth = depths.3;
         self.no_running_loop_depth = depths.4;
+        self.off_loop_thread_depth = depths.5;
     }
 }
