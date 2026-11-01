@@ -37,7 +37,8 @@ jobs:
       # the test job can never update it.
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-lint
+          # v2: include workspace crates; new key because GHA cache is write-once.
+          shared-key: ci-lint-v2
           cache-workspace-crates: true
           # TEMP: also save from this PR for warm-cache measurement; revert to
           # main-only before merge. head_ref is set on pull_request.
@@ -68,7 +69,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-test
+          # v2: include workspace crates; new key because GHA cache is write-once.
+          shared-key: ci-test-v2
           cache-workspace-crates: true
           # TEMP: also save from this PR for warm-cache measurement; revert to
           # main-only before merge.
@@ -106,7 +108,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-test
+          shared-key: ci-test-v2
+          cache-workspace-crates: true
           save-if: false
 
       - name: Install cargo-nextest
