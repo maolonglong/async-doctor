@@ -82,8 +82,10 @@ fn json_includes_docs_url_chain_resolution_and_runnable_why() {
             && v["sinkSites"].is_array()
             && v["locationLessCandidates"].is_array()
             && v["unusedSuppressions"].is_array()
-            && v["unresolvedSummary"].is_array(),
-        "stable top-level arrays required: {v}"
+            && v["unresolvedSummary"].is_array()
+            && v.get("hiddenUnresolvedCandidates").is_some()
+            && v.get("omittedNonProductionEntries").is_some(),
+        "stable top-level arrays/counts required: {v}"
     );
     let finding = &v["findings"][0];
     assert_eq!(finding["rule"], "blocking-sleep");

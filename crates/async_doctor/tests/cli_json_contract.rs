@@ -17,6 +17,8 @@ const REQUIRED_KEYS: &[&str] = &[
     "advice",
     "locationLessCandidates",
     "skipped",
+    "hiddenUnresolvedCandidates",
+    "omittedNonProductionEntries",
     "unresolvedSummary",
     "unusedSuppressions",
     "sinkSites",
@@ -32,6 +34,8 @@ fn empty_project_json_emits_stable_keys() {
     .unwrap();
 
     let out = bin()
+        .env_remove("VIRTUAL_ENV")
+        .env_remove("CONDA_PREFIX")
         .args(["--format", "json"])
         .arg(tmp.path())
         .output()
@@ -67,21 +71,29 @@ fn empty_project_json_emits_stable_keys() {
             v[arr]
         );
     }
+    assert_eq!(v["hiddenUnresolvedCandidates"], 0);
+    assert_eq!(v["omittedNonProductionEntries"], 0);
     assert!(v["environment"].is_object());
     assert!(v["environment"]["kind"].is_string());
     assert!(v["environment"]["sitePackages"].is_array());
+    // Stdlib-only + no project venv → no advisory note (omitted or empty).
+    let note = v["environment"]["note"].as_str().unwrap_or("");
+    assert!(
+        note.is_empty(),
+        "stdlib-only must not warn about VIRTUAL_ENV: {}",
+        v["environment"]
+    );
 }
 
 #[test]
-fn environment_note_when_no_project_venv() {
+fn environment_note_when_no_venv_and_missing_third_party() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(
         tmp.path().join("app.py"),
-        "async def noop():\n    return 1\n",
+        "import definitely_missing_pkg_xyz\n\nasync def noop():\n    return 1\n",
     )
     .unwrap();
 
-    // Ensure VIRTUAL_ENV does not point at a project venv for this temp root.
     let mut cmd = bin();
     cmd.env_remove("VIRTUAL_ENV");
     cmd.env_remove("CONDA_PREFIX");
@@ -94,15 +106,33 @@ fn environment_note_when_no_project_venv() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let env = &v["environment"];
     let kind = env["kind"].as_str().unwrap_or("");
-    // Temp dir has no .venv — expect system or none, with an advisory note.
     assert!(
         kind == "system" || kind == "none",
         "expected system/none without project venv, got {env}"
+    );
+    assert!(
+        env["unresolvedThirdParty"].as_u64().unwrap_or(0) >= 1,
+        "expected unresolved third-party count: {env}"
     );
     let note = env["note"].as_str().unwrap_or("");
     assert!(
         note.contains("VIRTUAL_ENV") || note.contains("venv"),
         "expected venv advisory note, got {env}"
+    );
+    assert!(
+        !v["locationLessCandidates"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "missing third-party aggregate must be location-less: {}",
+        v["locationLessCandidates"]
+    );
+    let why = v["locationLessCandidates"][0]["why"]
+        .as_str()
+        .unwrap_or("x");
+    assert!(
+        why.is_empty(),
+        "location-less why must be empty (not a fake command): {why}"
     );
 
     let text = bin()
@@ -120,14 +150,15 @@ fn environment_note_when_no_project_venv() {
         stdout.contains("note:") && stdout.contains("VIRTUAL_ENV"),
         "text must print venv note: {stdout}"
     );
+    // Do not double-print the unresolved-import aggregate alongside the note.
+    assert!(
+        !stdout.contains("[unresolved-import]"),
+        "text must not duplicate the note as a location-less finding: {stdout}"
+    );
 }
 
 #[test]
 fn why_path_is_relative_not_absolute() {
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join("fixtures")
-        .join("m1_multihop");
     let out = bin()
         .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
         .args(["--format", "json", "fixtures/m1_multihop"])
@@ -147,8 +178,7 @@ fn why_path_is_relative_not_absolute() {
         "absolute machine path in why: {why}"
     );
     assert!(
-        path_arg.contains("m1_multihop") || path_arg == "fixtures/m1_multihop",
-        "{why}"
+        path_arg.contains("m1_multihop"),
+        "expected relative fixtures/m1_multihop path, got {why}"
     );
-    let _ = fixture;
 }
