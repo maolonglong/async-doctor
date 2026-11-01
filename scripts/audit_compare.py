@@ -55,11 +55,20 @@ def describe(finding: dict[str, Any]) -> str:
     return f"{finding['rule']} {entry['file']}:{entry['line']} -> {tail_loc} {tail_txt}".rstrip()
 
 
+def label_from_filename(name: str) -> str:
+    for suffix in (".i.1.json", ".i.json", ".cold.json", ".warm.json", ".json"):
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
 def resolve_baseline_path(base_spec: str, label: str) -> Path | None:
     if "{L}" in base_spec:
         candidate = Path(base_spec.format(L=label))
         return candidate if candidate.is_file() else None
     base_dir = Path(base_spec)
+    if base_dir.is_file():
+        return base_dir
     for suffix in (f"{label}.i.json", f"{label}.json"):
         candidate = base_dir / suffix
         if candidate.is_file():
@@ -72,15 +81,13 @@ def resolve_baseline_path(base_spec: str, label: str) -> Path | None:
 
 
 def iter_new_reports(new_dir: Path) -> list[tuple[str, Path]]:
+    if new_dir.is_file():
+        return [(label_from_filename(new_dir.name), new_dir)]
     items: dict[str, Path] = {}
     for p in sorted(new_dir.glob("*.json")):
-        name = p.name
-        if name.endswith(".i.1.json"):
-            label = name[: -len(".i.1.json")]
-        elif name.endswith(".i.json"):
-            label = name[: -len(".i.json")]
-        else:
-            label = name[: -len(".json")]
+        if p.name in ("results.json",):
+            continue
+        label = label_from_filename(p.name)
         items[label] = p
     return sorted(items.items())
 

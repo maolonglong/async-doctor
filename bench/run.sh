@@ -40,7 +40,10 @@ done
 
 mkdir -p "${CLONE_ROOT}"
 
-mapfile -d '' REPO_BLOBS < <("${PYTHON_BIN}" "${HARNESS}" parse "${REPOS_TOML}")
+REPO_BLOBS=()
+while IFS= read -r -d '' blob; do
+  REPO_BLOBS+=("${blob}")
+done < <("${PYTHON_BIN}" "${HARNESS}" parse "${REPOS_TOML}")
 
 clone_repo() {
   local name="$1" url="$2" commit="$3"
@@ -81,7 +84,7 @@ ensure_venv() {
       cd "${dest}"
       # shellcheck disable=SC1091
       source "${dest}/.venv/bin/activate"
-      uv "${install_cmd[@]}"
+      uv --no-config "${install_cmd[@]}"
     )
     local rc=$?
     set -e

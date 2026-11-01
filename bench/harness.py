@@ -50,9 +50,12 @@ def run_timed(bin_path: str, scan_path: str, out_json: str, venv_dir: str) -> No
     )
     elapsed = __import__("time").perf_counter() - t0
     usage_after = resource.getrusage(resource.RUSAGE_CHILDREN)
-    peak_kib = max(0, usage_after.ru_maxrss - usage_before.ru_maxrss)
+    rss_scale = 1024 if sys.platform == "darwin" else 1
+    before_kib = usage_before.ru_maxrss // rss_scale
+    after_kib = usage_after.ru_maxrss // rss_scale
+    peak_kib = max(0, after_kib - before_kib)
     if peak_kib == 0:
-        peak_kib = usage_after.ru_maxrss
+        peak_kib = after_kib
 
     Path(out_json).write_text(proc.stdout)
     try:

@@ -12,8 +12,8 @@ building from source, after pre-release audit fixes and owner confirmation.
 - [x] 2026-11-01: PyPI trusted publisher + `pypi` environment configured for the release workflow.
 - [x] 2026-11-01: Removed unlicensed vendored `fast-rust` skill and updated agent docs workflow to v2.
 - [x] 2026-11-01: Investigated and optimized peak memory on large monorepos (`home-assistant/core` peak RSS cut from 6.5 GB to 1.95 GB, wall time from 143s to 33.6s).
-- [ ] Re-run corpus audit and refresh `litellm` benchmark numbers.
-- [ ] Run `release.yml` workflow_dispatch dry-run and verify built wheel.
+- [x] 2026-11-01: Re-ran corpus audit (`litellm` 4,915/4,915 findings match `c503648` baseline; `home-assistant/core` full scan matches `ha-subset` and adds 2 full-repo findings) and refreshed `docs/benchmark.md`.
+- [x] 2026-11-01: Ran `release.yml` `workflow_dispatch` dry-run (`41321070358`, all 8 wheel/sdist/dry-run jobs green) and verified the built wheel with `uvx` (`byte-identical` JSON on `fixtures/miss-probe`).
 - [ ] Owner confirmation before publish.
 - [ ] Tag/publish 0.1 and verify `uvx async-doctor --version`.
 
