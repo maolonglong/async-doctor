@@ -1,8 +1,9 @@
-//! Pre-release precision regressions (SQLAlchemy / redis / locks / loop guards).
+//! Pre-release regressions: precision sinks/guards and audit fixtures.
 
 use std::fs;
 
-use super::helpers::{clone_fixture, fresh_cache_dir, temp_project};
+use super::helpers::{clone_fixture, fresh_cache_dir, report_json, temp_project};
+use crate::encoding::decode_python_source;
 use crate::{scan_path, scan_path_with_cache};
 
 #[test]
@@ -358,4 +359,162 @@ fn sqlalchemy_bulk_and_query_iter_are_sinks() {
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&cache);
+}
+
+#[test]
+fn self_referential_genexpr_reports_sleep_through_chain() {
+    let dir = tempfile::tempdir().unwrap();
+    // Previous binding must still be expanded when the name is reassigned.
+    fs::write(
+        dir.path().join("chain.py"),
+        concat!(
+            "import time\n",
+            "async def f(r):\n",
+            "    out = (time.sleep(1) for _ in r)\n",
+            "    out = (x for x in out)\n",
+            "    list(out)\n",
+        ),
+    )
+    .unwrap();
+    let report = scan_path(dir.path()).expect("scan must not abort");
+    assert!(report.complete, "skipped={:?}", report.skipped);
+    assert!(
+        report.findings.iter().any(|f| f.rule == "blocking-sleep"),
+        "self-reassigned genexpr chain must keep the sleep finding: {:?}",
+        report.findings
+    );
+}
+
+#[test]
+fn self_referential_genexpr_does_not_stack_overflow() {
+    let dir = clone_fixture("prerelease_stackoverflow");
+    let report = scan_path(&dir.join("min.py")).expect("scan must not abort");
+    assert!(report.complete, "skipped={:?}", report.skipped);
+}
+
+#[test]
+fn self_referential_genexpr_chain_does_not_stack_overflow() {
+    let dir = clone_fixture("prerelease_stackoverflow");
+    let report = scan_path(&dir.join("a.py")).expect("scan must not abort");
+    assert!(report.complete, "skipped={:?}", report.skipped);
+}
+
+#[test]
+fn latin1_coding_cookie_is_analysed() {
+    let dir = clone_fixture("prerelease_edge");
+    let report = scan_path(&dir.join("pkg/latin1.py")).expect("scan");
+    assert!(report.complete, "skipped={:?}", report.skipped);
+    assert!(
+        report.findings.iter().any(|f| f.rule == "blocking-sleep"),
+        "latin-1 source with coding cookie must be analysed: {:?}",
+        report.findings
+    );
+}
+
+#[test]
+fn encoding_param_annotation_is_not_a_coding_cookie() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("util.py"),
+        concat!(
+            "def to_string(s, encoding: str = \"utf-8\"):\n",
+            "    return s\n",
+            "\n",
+            "import time\n",
+            "async def h():\n",
+            "    time.sleep(1)\n",
+        ),
+    )
+    .unwrap();
+    let report = scan_path(dir.path()).expect("scan");
+    assert!(report.complete, "skipped={:?}", report.skipped);
+    assert!(
+        report.findings.iter().any(|f| f.rule == "blocking-sleep"),
+        "UTF-8 file with `encoding:` param must not be skipped: {:?}",
+        report.skipped
+    );
+}
+
+#[test]
+fn unknown_cookie_on_utf8_bytes_falls_back() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("gbk_cookie.py"),
+        "# coding: gbk\nimport time\nasync def h():\n    time.sleep(1)\n",
+    )
+    .unwrap();
+    let report = scan_path(dir.path()).expect("scan");
+    assert!(report.complete, "skipped={:?}", report.skipped);
+    assert!(report.findings.iter().any(|f| f.rule == "blocking-sleep"));
+}
+
+#[test]
+fn utf8_sig_cookie_is_accepted() {
+    let src = "# coding: utf-8-sig\nx = 1\n";
+    assert!(decode_python_source(src.as_bytes()).is_ok());
+}
+
+#[test]
+fn undecodable_source_is_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    // Invalid UTF-8, no coding cookie → default UTF-8 fails.
+    let path = dir.path().join("bad.py");
+    fs::write(&path, b"s = \"\xe9\"\nasync def x():\n    pass\n").unwrap();
+    let report = scan_path(&path).expect("scan");
+    assert!(!report.complete);
+    assert!(
+        report.skipped.iter().any(|s| s.contains("bad.py")),
+        "skipped={:?}",
+        report.skipped
+    );
+}
+
+#[test]
+fn empty_directory_reports_no_python_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let report = scan_path(dir.path()).expect("scan");
+    assert!(report.complete);
+    assert_eq!(
+        report.message.as_deref(),
+        Some("No Python files were found.")
+    );
+    let json = report_json(dir.path());
+    assert!(json.contains("No Python files were found."), "{json}");
+}
+
+#[test]
+fn directory_without_py_reports_no_python_files() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("readme.txt"), "hi\n").unwrap();
+    let report = scan_path(dir.path()).expect("scan");
+    assert_eq!(
+        report.message.as_deref(),
+        Some("No Python files were found.")
+    );
+}
+
+#[test]
+fn per_file_panic_is_isolated() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("good.py"),
+        "import time\nasync def ok():\n    time.sleep(1)\n",
+    )
+    .unwrap();
+    fs::write(dir.path().join("__async_doctor_panic__.py"), "x = 1\n").unwrap();
+    let report = scan_path(dir.path()).expect("scan must not abort");
+    assert!(!report.complete);
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|s| s.contains("__async_doctor_panic__.py") && s.contains("panicked")),
+        "skipped={:?}",
+        report.skipped
+    );
+    assert!(
+        report.findings.iter().any(|f| f.rule == "blocking-sleep"),
+        "other files must still be analysed: {:?}",
+        report.findings
+    );
 }
