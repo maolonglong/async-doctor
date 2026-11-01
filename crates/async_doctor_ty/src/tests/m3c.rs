@@ -89,7 +89,8 @@ fn m3c_sitepkgs_cold_warm_hidden_unresolved_identical() {
 
 #[test]
 fn m3c_missing_third_party_is_one_aggregate_note() {
-    // Missing third-party packages never emit per-import records.
+    // Missing third-party packages never emit per-import records; they live in
+    // locationLessCandidates (always visible) rather than hidden candidates.
     let dir = temp_project(&[(
         "main.py",
         "from missing_pkg.cfg import load_config\nimport also_missing\n\nasync def handler():\n    return load_config()\n",
@@ -101,9 +102,15 @@ fn m3c_missing_third_party_is_one_aggregate_note() {
         hidden.findings
     );
     assert_eq!(
-        hidden.hidden_unresolved_candidates, 1,
-        "exactly one aggregated third-party note, got {}",
-        hidden.hidden_unresolved_candidates
+        hidden.location_less_candidates.len(),
+        1,
+        "exactly one location-less third-party note, got {:?}",
+        hidden.location_less_candidates
+    );
+    assert_eq!(
+        hidden.environment.unresolved_third_party, 2,
+        "environment should count both missing modules: {:?}",
+        hidden.environment
     );
     assert!(
         hidden.candidates.is_empty(),
@@ -129,13 +136,13 @@ fn m3c_missing_third_party_is_one_aggregate_note() {
     );
     assert_eq!(
         shown
-            .candidates
+            .location_less_candidates
             .iter()
             .filter(|c| c.rule == "unresolved-import")
             .count(),
         1,
-        "one aggregate candidate, not per-import: {:?}",
-        shown.candidates
+        "one aggregate location-less candidate, not per-import: {:?}",
+        shown.location_less_candidates
     );
     assert!(
         shown

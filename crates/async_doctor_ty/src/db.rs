@@ -9,6 +9,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, bail};
+use async_doctor_core::{EnvironmentKind, ScanEnvironment};
 use ruff_db::Db as SourceDb;
 use ruff_db::diagnostic::Diagnostic;
 use ruff_db::files::{File, Files};
@@ -39,6 +40,8 @@ pub struct AsyncDoctorDb {
     /// Extra src roots discovered from config / editable finders (appended
     /// after `project_root`). May point outside the scan root.
     extra_src_roots: Vec<SystemPathBuf>,
+    /// Interpreter / venv / site-packages used for this DB.
+    scan_environment: ScanEnvironment,
 }
 
 impl AsyncDoctorDb {
@@ -68,6 +71,7 @@ impl AsyncDoctorDb {
             program_settings: ProgramSettings::empty(ty_vendored::file_system()),
             project_root: project_root.to_path_buf(),
             extra_src_roots: Vec::new(),
+            scan_environment: ScanEnvironment::none(),
         };
 
         let environment = resolve_environment(&db.system, project_root, python)?;
@@ -78,6 +82,7 @@ impl AsyncDoctorDb {
                 .into_vec(),
             None => Vec::new(),
         };
+        db.scan_environment = summarize_environment(environment.as_ref(), &site_packages);
         let python_version = environment
             .as_ref()
             .and_then(PythonEnvironment::python_version_from_metadata)
@@ -152,6 +157,7 @@ impl AsyncDoctorDb {
             program_settings: self.program_settings.clone(),
             project_root: self.project_root.clone(),
             extra_src_roots: self.extra_src_roots.clone(),
+            scan_environment: self.scan_environment.clone(),
         };
         db.program_settings
             .search_paths
@@ -161,6 +167,11 @@ impl AsyncDoctorDb {
 
     pub fn project_root(&self) -> &SystemPath {
         &self.project_root
+    }
+
+    /// Interpreter / venv / site-packages discovered for this database.
+    pub fn scan_environment(&self) -> &ScanEnvironment {
+        &self.scan_environment
     }
 
     /// Extra search roots from config / editable finders (may be outside the
@@ -248,6 +259,69 @@ fn sys_prefix_from_python_arg(system: &OsSystem, path: &SystemPath) -> SystemPat
     } else {
         path.to_path_buf()
     }
+}
+
+fn summarize_environment(
+    environment: Option<&PythonEnvironment>,
+    site_packages: &[SystemPathBuf],
+) -> ScanEnvironment {
+    let site_packages: Vec<String> = site_packages
+        .iter()
+        .map(|p| p.as_str().to_string())
+        .collect();
+    let Some(env) = environment else {
+        let mut out = ScanEnvironment::none();
+        out.site_packages = site_packages;
+        out.refresh_note();
+        return out;
+    };
+
+    let prefix = env.sys_prefix().as_str().to_string();
+    let origin = format_origin(env.origin());
+    let kind = if env.is_virtual() {
+        EnvironmentKind::Venv
+    } else {
+        EnvironmentKind::System
+    };
+    let interpreter = guess_interpreter(&prefix);
+    let mut out = ScanEnvironment {
+        kind,
+        origin,
+        prefix: Some(prefix),
+        interpreter,
+        site_packages,
+        unresolved_third_party: 0,
+        note: String::new(),
+    };
+    out.refresh_note();
+    out
+}
+
+fn format_origin(origin: &SysPrefixPathOrigin) -> String {
+    match origin {
+        SysPrefixPathOrigin::VirtualEnvVar => "VIRTUAL_ENV".into(),
+        SysPrefixPathOrigin::LocalVenv => "local .venv".into(),
+        SysPrefixPathOrigin::CondaPrefixVar => "CONDA_PREFIX".into(),
+        SysPrefixPathOrigin::PythonCliFlag => "--python".into(),
+        SysPrefixPathOrigin::PythonBinary => "PATH python".into(),
+        SysPrefixPathOrigin::SelfEnvironment => "self".into(),
+        SysPrefixPathOrigin::UvMetadata => "uv".into(),
+        SysPrefixPathOrigin::DerivedFromPyvenvCfg => "pyvenv.cfg".into(),
+        SysPrefixPathOrigin::Editor => "editor".into(),
+        SysPrefixPathOrigin::ScriptMetadataSetting => "script metadata".into(),
+        SysPrefixPathOrigin::ConfigFileSetting(..) => "config".into(),
+    }
+}
+
+fn guess_interpreter(prefix: &str) -> Option<String> {
+    let root = std::path::Path::new(prefix);
+    for rel in ["bin/python", "bin/python3", "Scripts/python.exe"] {
+        let p = root.join(rel);
+        if p.is_file() {
+            return Some(p.display().to_string());
+        }
+    }
+    None
 }
 
 #[salsa::db]

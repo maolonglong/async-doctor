@@ -42,7 +42,9 @@ use serde::{Deserialize, Serialize};
 /// v13: `no_running_loop_guard` condition tag; advice ignores offload-site
 /// try/if/loop gates; lambda body edges graded relative to the lambda;
 /// httpx module + Azure OpenAI twin matchers.
-pub const CACHE_SCHEMA_VERSION: u32 = 13;
+/// v14: report schemaVersion 2 — `environment`, `locationLessCandidates`,
+/// always-emitted top-level arrays.
+pub const CACHE_SCHEMA_VERSION: u32 = 14;
 
 /// Tool version embedded in the cache path (from this crate's Cargo.toml).
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
