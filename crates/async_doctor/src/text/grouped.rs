@@ -26,12 +26,14 @@ pub(super) fn write_grouped(out: &mut impl Write, findings: &[Finding]) -> anyho
     }
 
     let unique_sites = sites.len();
+    // Lead with distinct sink sites (the actionable unit), then findings
+    // (entry × sink paths), so totals are not mistaken for site counts.
     writeln!(
         out,
-        "Found {} finding(s) · {} entries · {} sink sites · {} fix groups\n",
+        "Found {} sink site(s) · {} finding(s) · {} entries · {} fix groups\n",
+        unique_sites,
         findings.len(),
         entries.len(),
-        unique_sites,
         groups.len()
     )?;
     writeln!(
