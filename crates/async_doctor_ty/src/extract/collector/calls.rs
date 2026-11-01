@@ -409,6 +409,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 self.local_lambdas.insert(name.to_string(), lam);
                 self.idle_loop_locals.remove(name);
                 self.unbounded_queues.remove(name);
+                self.boto_receivers.remove(name);
                 self.running_loop_locals.remove(name);
                 self.event_loop_locals.remove(name);
             }
@@ -419,6 +420,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                     .push(gexpr);
                 self.idle_loop_locals.remove(name);
                 self.unbounded_queues.remove(name);
+                self.boto_receivers.remove(name);
                 self.running_loop_locals.remove(name);
                 self.event_loop_locals.remove(name);
             }
@@ -431,8 +433,52 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                     self.idle_loop_locals.remove(name);
                 }
                 self.note_queue_binding(name, other);
+                self.note_boto_binding(name, other);
                 self.note_loop_handle_binding(name, other);
             }
+        }
+    }
+
+    fn note_boto_binding(&mut self, name: &str, value: &Expr) {
+        if self.expr_is_boto_factory_or_receiver(value) {
+            self.boto_receivers.insert(name.to_string());
+        } else {
+            self.boto_receivers.remove(name);
+        }
+    }
+
+    /// `boto3.client` / `boto3.resource` / `Session.client` / chained resource ops.
+    pub(crate) fn call_is_boto_factory(&mut self, func: &Expr) -> bool {
+        let Some(q) = self.external_qualname(func) else {
+            return false;
+        };
+        matches!(
+            q.as_str(),
+            "boto3.client"
+                | "boto3.resource"
+                | "boto3.session.Session.client"
+                | "boto3.session.Session.resource"
+                | "boto3.Session.client"
+                | "boto3.Session.resource"
+        ) || q.ends_with(".Session.client")
+            || q.ends_with(".Session.resource")
+    }
+
+    pub(crate) fn expr_is_boto_factory_or_receiver(&mut self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Name(n) => self.boto_receivers.contains(n.id.as_str()),
+            Expr::Call(c) => {
+                if self.call_is_boto_factory(&c.func) {
+                    return true;
+                }
+                // `resource(...).Table(...)` / attribute factory on a boto recv.
+                match c.func.as_ref() {
+                    Expr::Attribute(a) => self.expr_is_boto_factory_or_receiver(&a.value),
+                    other => self.expr_is_boto_factory_or_receiver(other),
+                }
+            }
+            Expr::Attribute(a) => self.expr_is_boto_factory_or_receiver(&a.value),
+            _ => false,
         }
     }
 

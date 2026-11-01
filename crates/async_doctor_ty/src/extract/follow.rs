@@ -664,9 +664,12 @@ pub(crate) fn extract_third_party_function(
         local_genexprs: HashMap::new(),
         expanding_genexprs: HashSet::new(),
         genexpr_expand_depth: 0,
+        expanded_genexpr_memo: HashSet::new(),
+        genexpr_expand_visits: 0,
         idle_loop_locals: HashSet::new(),
         idle_loop_helpers: HashSet::new(),
         unbounded_queues: HashSet::new(),
+        boto_receivers: HashSet::new(),
         running_loop_locals: HashSet::new(),
         event_loop_locals: HashSet::new(),
     };

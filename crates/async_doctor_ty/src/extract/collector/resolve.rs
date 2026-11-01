@@ -20,6 +20,38 @@ fn is_under_followable_extra(path: &str, roots: &[std::path::PathBuf]) -> bool {
     roots.iter().any(|r| p.starts_with(r))
 }
 
+/// Method names that are sync AWS client/resource API calls (boto3 has no stubs).
+fn aws_op_method_name(method: &str) -> bool {
+    matches!(
+        method,
+        "get_object"
+            | "put_object"
+            | "list_objects"
+            | "list_objects_v2"
+            | "delete_object"
+            | "send_message"
+            | "receive_message"
+            | "publish"
+            | "get_item"
+            | "put_item"
+            | "query"
+            | "scan"
+            | "invoke"
+            | "start_execution"
+            | "describe_instances"
+            | "download_file"
+            | "upload_file"
+            | "download_fileobj"
+            | "upload_fileobj"
+    ) || method.starts_with("get_")
+        || method.starts_with("put_")
+        || method.starts_with("list_")
+        || method.starts_with("create_")
+        || method.starts_with("delete_")
+        || method.starts_with("describe_")
+        || method.starts_with("update_")
+}
+
 fn is_get_event_loop_qual(qualname: &str) -> bool {
     matches!(
         qualname,
@@ -161,12 +193,13 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             "anyio.to_thread.run_sync" => Some(OffloadKind::AnyioToThread),
             "starlette.concurrency.run_in_threadpool" => Some(OffloadKind::StarletteThreadpool),
             "asgiref.sync.sync_to_async" => Some(OffloadKind::AsgirefSyncToAsync),
+            // `Executor.map` blocks on consumption — handled as a sink, not an
+            // offload cut (unlike `submit`, which returns a Future immediately).
             "concurrent.futures.Executor.submit"
-            | "concurrent.futures.Executor.map"
             | "concurrent.futures.ThreadPoolExecutor.submit"
-            | "concurrent.futures.ThreadPoolExecutor.map"
-            | "concurrent.futures.ProcessPoolExecutor.submit"
-            | "concurrent.futures.ProcessPoolExecutor.map" => Some(OffloadKind::ThreadPoolExecutor),
+            | "concurrent.futures.ProcessPoolExecutor.submit" => {
+                Some(OffloadKind::ThreadPoolExecutor)
+            }
             other if other.ends_with(".run_in_executor") => Some(OffloadKind::RunInExecutor),
             _ => None,
         }
@@ -524,6 +557,13 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             // dist-packages / weak typing: still recognize asyncio redis receivers.
             if self.expr_looks_like_asyncio_redis(&attr.value) {
                 return Some(format!("redis.asyncio.client.Redis.{}", attr.attr.as_str()));
+            }
+            // boto3 clients are dynamically typed (no per-op stubs). Syntactic
+            // receivers from `boto3.client` / `resource` still need a sink key.
+            if aws_op_method_name(attr.attr.as_str())
+                && self.expr_is_boto_factory_or_receiver(&attr.value)
+            {
+                return Some(format!("botocore.client.BaseClient.{}", attr.attr.as_str()));
             }
             // Do not map bare CoreCommands without a typed non-redis receiver:
             // untyped Pipeline shares that mixin and must stay non-sink.
