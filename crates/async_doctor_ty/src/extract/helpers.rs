@@ -65,7 +65,6 @@ pub(crate) fn qualname_from_definition<'db>(
     def: ty_python_core::definition::Definition<'db>,
 ) -> Option<String> {
     let db = model.db();
-    let parsed = parsed_module(db, def.python_file(db)).load(db);
     let kind = def.kind(db);
     let DefinitionKind::Function(fdef) = kind else {
         // Could be an import binding pointing at a function — use def.name.
@@ -73,6 +72,7 @@ pub(crate) fn qualname_from_definition<'db>(
         let module = module_of_definition(model, def)?;
         return Some(format!("{module}.{name}"));
     };
+    let parsed = parsed_module(db, def.python_file(db)).load(db);
     let node = fdef.node(&parsed);
     let func_name = node.name.as_str();
     let module = module_of_definition(model, def)?;

@@ -123,15 +123,15 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 // Only the Call that is the *direct* await operand is marked awaited;
                 // nested calls in arguments (e.g. await send(open(p).read())) stay sync sinks.
                 if let Expr::Call(call) = await_expr.value.as_ref() {
-                    self.handle_call(call, true);
-                    self.walk_call_children(call);
+                    let is_offload = self.handle_call(call, true);
+                    self.walk_call_children(call, is_offload);
                 } else {
                     self.visit_expr(&await_expr.value);
                 }
             }
             Expr::Call(call) => {
-                self.handle_call(call, false);
-                self.walk_call_children(call);
+                let is_offload = self.handle_call(call, false);
+                self.walk_call_children(call, is_offload);
             }
             // `fut.done() and fut.result()` / `self.x.done() and self.x.result()`:
             // accumulate done-proven receivers across And conjuncts left→right.

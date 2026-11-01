@@ -118,6 +118,7 @@ pub(crate) fn extract_files(
             })
             .collect();
         let (outcomes, workers) = run_pass1_parallel(&db, &pass1_specs);
+        db = db.fresh_empty();
         let mut kept_specs: Vec<Pass2FileSpec> = Vec::with_capacity(pass1_specs.len());
         let mut catalog_to_kept: Vec<Option<usize>> = vec![None; pass1_specs.len()];
         for (idx, (spec, outcome)) in pass1_specs.into_iter().zip(outcomes).enumerate() {
@@ -260,6 +261,7 @@ pub(crate) fn extract_files(
         cache_dir,
         follow_budget,
     );
+    std::thread::spawn(move || drop(db));
 
     facts.resolved_symbols =
         crate::twin_resolve::collect_resolved_twin_symbols(project_root.as_std_path());

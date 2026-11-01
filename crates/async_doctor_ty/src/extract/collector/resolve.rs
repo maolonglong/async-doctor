@@ -173,7 +173,11 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         // Ty-resolved only — do not treat bare `to_thread` / `run_in_threadpool`
         // attribute names as offload (a project function may share those names).
         let q = self.external_qualname(func)?;
-        match q.as_str() {
+        Self::offload_kind_from_qualname(&q)
+    }
+
+    pub(crate) fn offload_kind_from_qualname(q: &str) -> Option<OffloadKind> {
+        match q {
             "asyncio.to_thread" | "asyncio.threads.to_thread" => Some(OffloadKind::AsyncioToThread),
             "anyio.to_thread.run_sync" => Some(OffloadKind::AnyioToThread),
             "starlette.concurrency.run_in_threadpool" => Some(OffloadKind::StarletteThreadpool),
@@ -309,16 +313,16 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
     }
 
-    pub(crate) fn resolve_callee(&mut self, func: &Expr) -> Option<CalleeRef> {
+    pub(crate) fn resolve_non_project_callee(
+        &mut self,
+        func: &Expr,
+        ext_qual: Option<String>,
+    ) -> Option<CalleeRef> {
         // Dynamic: getattr(...)  — never guess by name; emit unresolved candidate.
         if matches!(func, Expr::Call(c) if is_getattr_call(&c.func)) {
             return Some(CalleeRef::Unresolved {
                 reason: "unresolved".into(),
             });
-        }
-
-        if let Some(fid) = self.resolve_project_function(func) {
-            return Some(CalleeRef::Project(fid));
         }
 
         // Higher-order: calling a positional parameter by name.
@@ -335,7 +339,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             return Some(CalleeRef::ParamInvoke { index });
         }
 
-        if let Some(q) = self.external_qualname(func) {
+        if let Some(q) = ext_qual {
             self.note_follow_target(func, &q);
             return Some(CalleeRef::External { qualname: q });
         }
@@ -446,19 +450,18 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         &self,
         def: ty_python_core::definition::Definition<'db>,
     ) -> Option<FunctionId> {
-        let file = def.file(self.model.db());
-        let path = file.path(self.model.db());
+        let db = self.model.db();
+        let DefinitionKind::Function(fdef) = def.kind(db) else {
+            return None;
+        };
+        let file = def.file(db);
+        let path = file.path(db);
         let FilePath::System(sys) = path else {
             // Vendored / stub — not a project function.
             return None;
         };
         let rel = relative_display(self.ctx.db.project_root(), sys);
-        let parsed =
-            parsed_module(self.model.db(), def.python_file(self.model.db())).load(self.model.db());
-        let kind = def.kind(self.model.db());
-        let DefinitionKind::Function(fdef) = kind else {
-            return None;
-        };
+        let parsed = parsed_module(db, def.python_file(db)).load(db);
         let node = fdef.node(&parsed);
         let key = DefKey {
             file: rel,

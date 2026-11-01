@@ -58,8 +58,17 @@ impl<'a, 'db> CallCollector<'a, 'db> {
     }
 
     pub(crate) fn call_is_archive_ctor(&mut self, func: &Expr) -> bool {
-        if let Some(q) = self.external_qualname(func)
-            && is_archive_ctor_qual(&q)
+        let ext_qual = self.external_qualname(func);
+        self.call_is_archive_ctor_with_qual(func, ext_qual.as_deref())
+    }
+
+    pub(crate) fn call_is_archive_ctor_with_qual(
+        &self,
+        func: &Expr,
+        ext_qual: Option<&str>,
+    ) -> bool {
+        if let Some(q) = ext_qual
+            && is_archive_ctor_qual(q)
         {
             return true;
         }
@@ -80,8 +89,14 @@ impl<'a, 'db> CallCollector<'a, 'db> {
     /// True when this call is a buffer-backed archive ctor or a *pure* in-memory
     /// method on such a receiver. Disk-touching methods (`write`, `extract`,
     /// `extractall`, `add`, …) still report even on BytesIO receivers.
-    pub(crate) fn call_is_in_memory_archive(&mut self, call: &ast::ExprCall) -> bool {
-        if self.call_is_archive_ctor(&call.func) && self.first_arg_is_in_memory_buffer(call) {
+    pub(crate) fn call_is_in_memory_archive(
+        &mut self,
+        call: &ast::ExprCall,
+        func_ext_qual: Option<&str>,
+    ) -> bool {
+        if self.call_is_archive_ctor_with_qual(&call.func, func_ext_qual)
+            && self.first_arg_is_in_memory_buffer(call)
+        {
             return true;
         }
         let Expr::Attribute(attr) = call.func.as_ref() else {
@@ -93,14 +108,11 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             return false;
         }
         if !is_pure_in_memory_archive_method(method)
-            && !self
-                .external_qualname(&call.func)
-                .as_deref()
-                .is_some_and(|q| {
-                    crate::extract::helpers::is_archive_method_qual(q)
-                        && q.rsplit_once('.')
-                            .is_some_and(|(_, m)| is_pure_in_memory_archive_method(m))
-                })
+            && !func_ext_qual.is_some_and(|q| {
+                crate::extract::helpers::is_archive_method_qual(q)
+                    && q.rsplit_once('.')
+                        .is_some_and(|(_, m)| is_pure_in_memory_archive_method(m))
+            })
         {
             return false;
         }

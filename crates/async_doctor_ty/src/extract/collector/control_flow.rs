@@ -520,8 +520,8 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         self.consuming_generator = true;
         if for_stmt.is_async {
             if let Expr::Call(call) = for_stmt.iter.as_ref() {
-                self.handle_call(call, true);
-                self.walk_call_children(call);
+                let is_offload = self.handle_call(call, true);
+                self.walk_call_children(call, is_offload);
             } else {
                 self.visit_expr(&for_stmt.iter);
             }
@@ -545,7 +545,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 if self.is_sync_with_async_cm(&item.context_expr) {
                     self.push_sync_with_async_cm_edge(caller, &item.context_expr);
                     if let Expr::Call(call) = &item.context_expr {
-                        self.walk_call_children(call);
+                        self.walk_call_children(call, None);
                     }
                     continue;
                 }
@@ -554,9 +554,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 // type is secondary and often unnamed for stubs.
                 if let Expr::Call(call) = &item.context_expr {
                     self.pending_with_enter = true;
-                    self.handle_call(call, false);
+                    let is_offload = self.handle_call(call, false);
                     self.pending_with_enter = false;
-                    self.walk_call_children(call);
+                    self.walk_call_children(call, is_offload);
                 } else if let Some(callee) = self.resolve_dunder(&item.context_expr, "__enter__") {
                     self.push_edge(
                         caller,
@@ -583,8 +583,8 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             // `async with call(...) as x`: mark that one call awaited; bind asyncio receivers.
             if with_stmt.is_async {
                 if let Expr::Call(call) = &item.context_expr {
-                    self.handle_call(call, true);
-                    self.walk_call_children(call);
+                    let is_offload = self.handle_call(call, true);
+                    self.walk_call_children(call, is_offload);
                 } else {
                     self.visit_expr(&item.context_expr);
                 }

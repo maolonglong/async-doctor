@@ -17,10 +17,15 @@ use crate::extract::helpers::{
 };
 
 impl<'a, 'db> CallCollector<'a, 'db> {
-    pub(crate) fn walk_call_children(&mut self, call: &'a ast::ExprCall) {
-        let offload = self.is_offload_callee(&call.func);
+    pub(crate) fn walk_call_children(
+        &mut self,
+        call: &'a ast::ExprCall,
+        offload_known: Option<bool>,
+    ) {
+        let is_offload =
+            offload_known.unwrap_or_else(|| self.is_offload_callee(&call.func).is_some());
         let consumer = is_generator_consumer(&call.func);
-        if offload.is_some() {
+        if is_offload {
             for (i, arg) in call.arguments.args.iter().enumerate() {
                 if i == 0 && is_callable_ref(arg) {
                     continue;
@@ -199,17 +204,21 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         false
     }
 
-    pub(crate) fn handle_call(&mut self, call: &'a ast::ExprCall, is_awaited: bool) {
+    /// Handle a call expression and return whether it resolved as an offload callee
+    /// (`None` if skipped before callee classification).
+    pub(crate) fn handle_call(
+        &mut self,
+        call: &'a ast::ExprCall,
+        is_awaited: bool,
+    ) -> Option<bool> {
         self.pending_is_awaited = is_awaited;
         // Module-level and function-level: task spawns + imperative routes.
         self.note_task_spawn(call);
         self.note_imperative_route(call);
 
-        let Some(caller) = self.current_fn else {
-            return;
-        };
+        let caller = self.current_fn?;
         if self.dead_depth > 0 || self.in_lambda || self.off_loop_thread_depth > 0 {
-            return;
+            return None;
         }
 
         // Lambda assigned to a local then called: `f = lambda: ...; f()`.
@@ -219,53 +228,81 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             self.analyze_lambda_body(lambda);
         }
 
-        self.pending_literals = call.arguments.args.iter().map(literal_arg).collect();
-        self.pending_callables = self.resolve_positional_callables(call.arguments.args.as_ref());
-        self.pending_externals = self.resolve_positional_externals(call.arguments.args.as_ref());
-        self.pending_constructed_receivers =
-            self.resolve_positional_constructed_receivers(call.arguments.args.as_ref());
-        self.pending_constructed_receiver = match call.func.as_ref() {
-            Expr::Attribute(_) => self.constructed_root_receiver(call.func.as_ref()),
-            _ => None,
-        };
-        self.pending_keyword_callables = self.resolve_keyword_callables(call);
-
-        // In-memory buffer args to open/Image.open: not blocking file IO — skip
-        // the edge (and therefore follow into PIL internals that would open paths).
-        if let Some(q) = self.external_qualname(&call.func)
-            && is_path_or_file_open_qual(&q)
-            && self.first_arg_is_in_memory_buffer(call)
-        {
-            self.clear_pending_call_args();
-            self.pending_is_awaited = false;
-            return;
-        }
-
-        // zipfile/tarfile on BytesIO/StringIO (ctor or subsequent receiver ops).
-        if self.call_is_in_memory_archive(call) {
-            self.clear_pending_call_args();
-            self.pending_is_awaited = false;
-            return;
-        }
-
         // `if fut.done(): fut.result()` — result does not block.
         if self.call_is_done_guarded_future_result(call) {
             self.clear_pending_call_args();
             self.pending_is_awaited = false;
-            return;
+            return Some(false);
+        }
+
+        self.pending_literals = call.arguments.args.iter().map(literal_arg).collect();
+        self.pending_callables = self.resolve_positional_callables(call.arguments.args.as_ref());
+        self.pending_externals.clear();
+        self.pending_constructed_receivers.clear();
+        self.pending_constructed_receiver = None;
+        self.pending_keyword_callables = self.resolve_keyword_callables(call);
+
+        // Fast path for first-party project function calls: skips external qualname
+        // and stdlib buffer/archive/lock/offload checks.
+        if let Some(fid) = self.resolve_project_function(&call.func) {
+            let kind = if self.pending_with_enter {
+                CallKind::WithEnter
+            } else if self.consuming_generator && self.function(fid).is_generator {
+                CallKind::GeneratorConsume
+            } else {
+                CallKind::Call
+            };
+            let is_coro = Some(self.function(fid).is_async);
+            self.push_edge(
+                caller,
+                CalleeRef::Project(fid),
+                call.range(),
+                kind,
+                false,
+                is_coro,
+            );
+            self.clear_pending_call_args();
+            return Some(false);
+        }
+
+        let func_ext_qual = self.external_qualname(&call.func);
+
+        // In-memory buffer args to open/Image.open: not blocking file IO — skip
+        // the edge (and therefore follow into PIL internals that would open paths).
+        if let Some(q) = func_ext_qual.as_deref()
+            && is_path_or_file_open_qual(q)
+            && self.first_arg_is_in_memory_buffer(call)
+        {
+            self.clear_pending_call_args();
+            self.pending_is_awaited = false;
+            return Some(false);
+        }
+
+        // zipfile/tarfile on BytesIO/StringIO (ctor or subsequent receiver ops).
+        if self.call_is_in_memory_archive(call, func_ext_qual.as_deref()) {
+            self.clear_pending_call_args();
+            self.pending_is_awaited = false;
+            return Some(false);
         }
 
         // Non-blocking lock/queue variants (`acquire(False)`, `join(timeout=0)`,
         // `put` on unbounded Queue, …) — skip the edge entirely.
-        if let Some(q) = self.external_qualname(&call.func)
-            && self.is_proven_nonblocking_lock_call(&q, call)
+        if let Some(q) = func_ext_qual.as_deref()
+            && self.is_proven_nonblocking_lock_call(q, call)
         {
             self.clear_pending_call_args();
             self.pending_is_awaited = false;
-            return;
+            return Some(false);
         }
 
-        if let Some(kind) = self.is_offload_callee(&call.func) {
+        if let Some(kind) = func_ext_qual
+            .as_deref()
+            .and_then(Self::offload_kind_from_qualname)
+        {
+            self.pending_externals =
+                self.resolve_positional_externals(call.arguments.args.as_ref());
+            self.pending_constructed_receivers =
+                self.resolve_positional_constructed_receivers(call.arguments.args.as_ref());
             // Passing a callable param into a real offload → this function is a wrapper.
             let callable_idx = kind.callable_arg_index();
             if let Some(arg) = call.arguments.args.get(callable_idx)
@@ -293,7 +330,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 target_coro,
             );
             self.clear_pending_call_args();
-            return;
+            return Some(true);
         }
 
         // getattr / setattr dynamic dispatch → unresolved candidate
@@ -309,19 +346,22 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 None,
             );
             self.clear_pending_call_args();
-            return;
+            return Some(false);
         }
 
-        if let Some(callee) = self.resolve_callee(&call.func) {
+        if let Some(callee) = self.resolve_non_project_callee(&call.func, func_ext_qual) {
+            if let CalleeRef::External { qualname } = &callee
+                && qualname.starts_with("openai.")
+            {
+                self.pending_constructed_receiver = match call.func.as_ref() {
+                    Expr::Attribute(_) => self.constructed_root_receiver(call.func.as_ref()),
+                    _ => None,
+                };
+            }
             let kind = if self.pending_with_enter {
                 CallKind::WithEnter
-            } else if self.consuming_generator
-                && (matches!(
-                    &callee,
-                    CalleeRef::Project(id) if self.function(*id).is_generator
-                ) || matches!(&callee, CalleeRef::External { .. }))
-            {
-                // Project generators and external consume-only sinks (`listen()`).
+            } else if self.consuming_generator && matches!(&callee, CalleeRef::External { .. }) {
+                // External consume-only sinks (`listen()`).
                 CallKind::GeneratorConsume
             } else {
                 CallKind::Call
@@ -330,6 +370,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             self.push_edge(caller, callee, call.range(), kind, false, is_coro);
         }
         self.clear_pending_call_args();
+        Some(false)
     }
 
     pub(crate) fn clear_pending_call_args(&mut self) {

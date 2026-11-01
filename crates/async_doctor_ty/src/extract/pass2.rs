@@ -208,6 +208,7 @@ pub(crate) fn run_pass2_parallel(
     let queues: Vec<Mutex<VecDeque<usize>>> = worker_deques.into_iter().map(Mutex::new).collect();
     let mut indexed: Vec<(usize, Pass2FileResult)> = Vec::with_capacity(files.len());
 
+    let mut retired_dbs: Vec<AsyncDoctorDb> = Vec::with_capacity(nthreads);
     std::thread::scope(|scope| {
         let mut handles = Vec::with_capacity(nthreads);
         let queues_ref = &queues;
@@ -215,6 +216,7 @@ pub(crate) fn run_pass2_parallel(
             let mut worker_db = worker.db;
             handles.push(scope.spawn(move || {
                 let mut out = Vec::new();
+                let mut local_retired = Vec::new();
                 let mut since_reset = 0usize;
                 loop {
                     let mut next_idx = queues_ref[t].lock().unwrap().pop_front();
@@ -232,7 +234,8 @@ pub(crate) fn run_pass2_parallel(
                         break;
                     };
                     if since_reset >= WORKER_DB_RESET_INTERVAL {
-                        worker_db = worker_db.fresh_empty();
+                        let fresh = worker_db.fresh_empty();
+                        local_retired.push(std::mem::replace(&mut worker_db, fresh));
                         since_reset = 0;
                     }
                     let result = match catch_unwind(AssertUnwindSafe(|| {
@@ -244,21 +247,27 @@ pub(crate) fn run_pass2_parallel(
                         }
                         Err(payload) => {
                             // Salsa state may be poisoned — drop memos for the next file.
-                            worker_db = worker_db.fresh_empty();
+                            let fresh = worker_db.fresh_empty();
+                            local_retired.push(std::mem::replace(&mut worker_db, fresh));
                             since_reset = 0;
                             Pass2FileResult::skipped(&files[i].rel, &panic_message(&payload))
                         }
                     };
                     out.push((i, result));
                 }
-                drop(worker_db);
-                out
+                local_retired.push(worker_db);
+                (out, local_retired)
             }));
         }
         for h in handles {
-            indexed.extend(h.join().expect("pass2 worker"));
+            let (out, local_retired) = h.join().expect("pass2 worker");
+            indexed.extend(out);
+            retired_dbs.extend(local_retired);
         }
     });
+    if !retired_dbs.is_empty() {
+        std::thread::spawn(move || drop(retired_dbs));
+    }
 
     indexed.sort_by_key(|(i, _)| *i);
     indexed.into_iter().map(|(_, r)| r).collect()
