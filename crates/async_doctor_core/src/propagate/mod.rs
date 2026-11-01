@@ -505,10 +505,12 @@ pub fn analyze_with_options(
     }
 
     // Missing third-party packages: one location-less note (never per-import).
-    // Always emitted under `locationLessCandidates` so env degradation is visible
-    // without `--show-unresolved` (empty entry.file/chain stay out of `candidates`).
+    // Always under `locationLessCandidates` (not hidden candidates). Empty `why`
+    // — there is no file:line locator for an environment-level aggregate.
     let n_tp = facts.unresolved_third_party_modules.len() as u32;
+    let n_resolved = facts.resolved_third_party_modules.len() as u32;
     report.environment.unresolved_third_party = n_tp;
+    report.environment.resolved_third_party = n_resolved;
     report.environment.refresh_note();
     if n_tp > 0 {
         let pattern = format!("{n_tp} third-party modules not installed; run in the project venv");
@@ -540,7 +542,7 @@ pub fn analyze_with_options(
                         .to_string(),
                     fix_group_id: fix_group_id("unresolved-import", sink_key),
                 },
-                why: "async-doctor why — activate the project venv or set VIRTUAL_ENV".into(),
+                why: String::new(),
                 docs_anchor: "#unresolved-call".into(),
                 docs_url: "https://github.com/maolonglong/async-doctor/blob/main/docs/rules.md#unresolved-call".into(),
             });
