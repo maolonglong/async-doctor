@@ -243,9 +243,11 @@ pub(super) fn match_family(q: &str) -> Option<SinkHit> {
                 "Use `aioboto3` / `aiobotocore` instead of sync `boto3`.",
             )));
         }
+        // AWS-op name heuristic only on client/resource receivers — never
+        // `botocore.session.*` / ComponentLocator / other internals (`get_*`).
         let is_api = q.ends_with("._make_api_call")
             || q.contains("make_api_call")
-            || method_looks_like_aws_op(q);
+            || (is_boto_client_or_resource_api_qual(q) && method_looks_like_aws_op(q));
         if is_api {
             return Some(hit(&BuiltinSink::finding(
                 "botocore.client.BaseClient._make_api_call",
@@ -582,6 +584,28 @@ pub fn aws_op_method_name(method: &str) -> bool {
         || method.starts_with("delete_")
         || method.starts_with("describe_")
         || method.starts_with("update_")
+}
+
+/// True when `qualname` is a sync boto client or resource API surface.
+///
+/// Operation-name heuristics must not apply to `botocore.session.*`,
+/// `ComponentLocator`, or other non-client internals — those expose many
+/// `get_*` helpers that are local metadata, not HTTP.
+pub fn is_boto_client_or_resource_api_qual(qualname: &str) -> bool {
+    let q = normalize_stubs_package_root(qualname);
+    if is_aioboto_package_qual(&q) {
+        return false;
+    }
+    // `botocore.client.BaseClient.*` and dynamically created client classes.
+    if q.starts_with("botocore.client.") {
+        return true;
+    }
+    // Raw resource factory types, and post-normalize `boto3.resources.factory.`
+    // → `boto3.` forms that still live under the resources package.
+    if q.starts_with("boto3.resources.") {
+        return true;
+    }
+    false
 }
 
 pub(super) fn method_looks_like_aws_op(q: &str) -> bool {

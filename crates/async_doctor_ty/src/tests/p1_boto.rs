@@ -168,3 +168,67 @@ fn p1_boto3_stubs_session_client_ops_and_aioboto_clean() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&cache);
 }
+
+fn assert_session_internals_clean_and_client_ops_fire(fixture: &str) {
+    let dir = clone_fixture(fixture);
+    let cache = fresh_cache_dir(fixture);
+    let report = scan_path_with_cache(&dir, Some(&cache)).unwrap();
+    for entry in ["regions_ok", "service_ops_ok"] {
+        let hits: Vec<_> = report
+            .findings
+            .iter()
+            .filter(|f| f.entry.name == entry)
+            .collect();
+        assert!(
+            hits.is_empty(),
+            "{fixture}/{entry} must be 0 blocking-http (session internals): {hits:?} {:?}",
+            report.findings
+        );
+    }
+    let get_sinks: Vec<String> = report
+        .findings
+        .iter()
+        .filter(|f| f.entry.name == "client_get_object_blocks")
+        .flat_map(|f| {
+            f.chain
+                .iter()
+                .flat_map(|c| [c.text.clone(), c.resolution.clone()])
+        })
+        .collect();
+    assert!(
+        get_sinks.iter().any(|s| s.contains("get_object")),
+        "{fixture} client.get_object must fire: {get_sinks:?} {:?}",
+        report.findings
+    );
+    let describe_sinks: Vec<String> = report
+        .findings
+        .iter()
+        .filter(|f| f.entry.name == "session_client_describe_blocks")
+        .flat_map(|f| {
+            f.chain
+                .iter()
+                .flat_map(|c| [c.text.clone(), c.resolution.clone()])
+        })
+        .collect();
+    assert!(
+        describe_sinks
+            .iter()
+            .any(|s| s.contains("describe_db_instances")),
+        "{fixture} Session().client(...).describe_db_instances must fire: {describe_sinks:?} {:?}",
+        report.findings
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&cache);
+}
+
+#[test]
+fn p1_boto_session_internals_clean_without_stubs() {
+    // Real-shaped boto3/botocore (no boto3-stubs): get_available_regions /
+    // get_session().get_service_model must not flag via session get_* heuristics.
+    assert_session_internals_clean_and_client_ops_fire("boto_session_internals");
+}
+
+#[test]
+fn p1_boto_session_internals_clean_with_stubs() {
+    assert_session_internals_clean_and_client_ops_fire("boto_session_internals_stubs");
+}

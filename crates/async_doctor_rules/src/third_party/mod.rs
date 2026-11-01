@@ -14,8 +14,8 @@ use crate::async_twin::async_twin_for_sink;
 use crate::{BuiltinSink, StdlibSinkTable};
 
 pub use families::{
-    aws_op_method_name, is_aioboto_package_qual, is_sync_boto_factory_qualname,
-    is_sync_boto_package_qual, normalize_stubs_package_root,
+    aws_op_method_name, is_aioboto_package_qual, is_boto_client_or_resource_api_qual,
+    is_sync_boto_factory_qualname, is_sync_boto_package_qual, normalize_stubs_package_root,
 };
 use families::{is_redis_pipeline_buffering, match_family};
 use sinks::THIRD_PARTY_ALIASES;
