@@ -7,7 +7,11 @@ mod grouped;
 
 use std::io::Write;
 
-use async_doctor_core::{Advice, Candidate, EntryLabel, Finding, Report};
+use async_doctor_core::{
+    Advice, Candidate, EntryLabel, EnvironmentKind, Finding, Report, ScanEnvironment,
+};
+
+use crate::paths::display_fs_path;
 
 /// Default number of advice items shown before `--expand`.
 const TOP_ADVICE_SHOWN: usize = 10;
@@ -24,6 +28,7 @@ pub struct TextOptions {
 
 pub fn write_report(report: &Report, opts: TextOptions) -> anyhow::Result<()> {
     let mut out = std::io::stdout().lock();
+    write_environment_banner(&mut out, &report.environment)?;
     if report.findings.is_empty() {
         write!(out, "No findings.")?;
         let mut parts = Vec::new();
@@ -103,6 +108,13 @@ pub fn write_report(report: &Report, opts: TextOptions) -> anyhow::Result<()> {
             )?;
         }
     }
+    if !report.location_less_candidates.is_empty() {
+        writeln!(out)?;
+        for c in &report.location_less_candidates {
+            writeln!(out, "[{}] {}", c.rule, c.reason)?;
+            writeln!(out, "  fix: {}", c.fix.hint)?;
+        }
+    }
     if !report.unused_suppressions.is_empty() {
         writeln!(
             out,
@@ -115,6 +127,41 @@ pub fn write_report(report: &Report, opts: TextOptions) -> anyhow::Result<()> {
                 "  {}:{}  ignore[{}] — {}",
                 u.file, u.line, u.rule, u.reason
             )?;
+        }
+    }
+    if !report.environment.note.is_empty() {
+        writeln!(out, "\nnote: {}", report.environment.note)?;
+    }
+    Ok(())
+}
+
+/// Print detected interpreter/venv like react-doctor prints framework/project.
+fn write_environment_banner(out: &mut impl Write, env: &ScanEnvironment) -> anyhow::Result<()> {
+    match env.kind {
+        EnvironmentKind::None => {
+            writeln!(out, "Environment: none (no interpreter/venv found)")?;
+        }
+        EnvironmentKind::Venv | EnvironmentKind::System => {
+            let kind = env.kind.as_str();
+            let mut parts = vec![format!("{kind} ({})", env.origin)];
+            if let Some(prefix) = &env.prefix {
+                parts.push(format!("prefix {}", display_fs_path(prefix)));
+            }
+            if let Some(interp) = &env.interpreter {
+                parts.push(format!("interpreter {}", display_fs_path(interp)));
+            }
+            if let Some(sp) = env.site_packages.first() {
+                let extra = env.site_packages.len().saturating_sub(1);
+                if extra > 0 {
+                    parts.push(format!(
+                        "site-packages {} (+{extra} more)",
+                        display_fs_path(sp)
+                    ));
+                } else {
+                    parts.push(format!("site-packages {}", display_fs_path(sp)));
+                }
+            }
+            writeln!(out, "Environment: {}", parts.join(" · "))?;
         }
     }
     Ok(())

@@ -179,15 +179,23 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
 pub(crate) fn rewrite_why_commands(report: &mut Report, scan_path: &Path) {
     let path_arg = cli_path_arg(scan_path);
     let rewrite = |why: &mut String| {
-        if let Some(rest) = why.strip_prefix("async-doctor why ") {
-            let loc = rest.split_whitespace().next().unwrap_or(rest);
-            *why = format!("async-doctor why {loc} --path {path_arg}");
+        let Some(rest) = why.strip_prefix("async-doctor why ") else {
+            return;
+        };
+        let loc = rest.split_whitespace().next().unwrap_or(rest);
+        // Location-less advisories are not `file:line` locators.
+        if !loc.contains(':') || loc.starts_with('—') {
+            return;
         }
+        *why = format!("async-doctor why {loc} --path {path_arg}");
     };
     for f in &mut report.findings {
         rewrite(&mut f.why);
     }
     for c in &mut report.candidates {
+        rewrite(&mut c.why);
+    }
+    for c in &mut report.location_less_candidates {
         rewrite(&mut c.why);
     }
     for a in &mut report.advice {
