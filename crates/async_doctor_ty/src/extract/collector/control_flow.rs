@@ -41,6 +41,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
     pub(crate) fn visit_body_seq(&mut self, body: &'a [Stmt]) {
         let mut after_branch = 0u32;
         let mut after_cache = 0u32;
+        let mut after_no_loop = 0u32;
         let mut after_dead = 0u32;
         for stmt in body {
             if let Stmt::If(if_stmt) = stmt {
@@ -53,12 +54,19 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                             after_dead += 1;
                             self.dead_depth += 1;
                         }
-                        EarlyExitKind::Conditional { cache_miss } => {
+                        EarlyExitKind::Conditional {
+                            cache_miss,
+                            no_running_loop,
+                        } => {
                             after_branch += 1;
                             self.branch_depth += 1;
                             if cache_miss {
                                 after_cache += 1;
                                 self.cache_miss_depth += 1;
+                            }
+                            if no_running_loop {
+                                after_no_loop += 1;
+                                self.no_running_loop_depth += 1;
                             }
                         }
                     }
@@ -69,6 +77,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
         self.branch_depth -= after_branch;
         self.cache_miss_depth -= after_cache;
+        self.no_running_loop_depth -= after_no_loop;
         self.dead_depth -= after_dead;
     }
 
@@ -89,15 +98,29 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 .iter()
                 .any(|c| c.test.is_none() && !body_always_exits(&c.body) && !c.body.is_empty());
             if else_continues {
-                return Some(EarlyExitKind::Conditional { cache_miss: false });
+                return Some(EarlyExitKind::Conditional {
+                    cache_miss: false,
+                    no_running_loop: false,
+                });
             }
             return Some(EarlyExitKind::UnreachableRest);
         }
+        // `if loop is not None: return …` / `if loop.is_running(): return …`
+        // → subsequent statements only run with no running event loop.
+        let no_running_loop = self.is_running_loop_present_test_ctx(&if_stmt.test);
         if has_elif {
-            return Some(EarlyExitKind::Conditional { cache_miss: false });
+            return Some(EarlyExitKind::Conditional {
+                cache_miss: false,
+                no_running_loop,
+            });
         }
-        let cache_miss = is_cache_hit_test(&if_stmt.test);
-        Some(EarlyExitKind::Conditional { cache_miss })
+        // Loop-state early returns must not be mis-tagged as cache-miss
+        // (`is_cache_hit_test` also matches `x is not None`).
+        let cache_miss = !no_running_loop && is_cache_hit_test(&if_stmt.test);
+        Some(EarlyExitKind::Conditional {
+            cache_miss,
+            no_running_loop,
+        })
     }
 
     /// Confirm `name` binds to a once-assigned module-level constant via ty.

@@ -81,9 +81,10 @@ raises `RuntimeError` at runtime (loop already running). Behind an offload
 boundary this is not reported.
 
 Sites under a proven “no running loop” guard are dropped entirely:
-`if loop is None`, `except RuntimeError` after `get_running_loop` /
-`get_event_loop`, `not loop.is_running()`, and similar helpers. Other
-conditional nested-loop sites stay findings (with normal branch conditions).
+`if loop is None`, early-return `if loop is not None: return` (rest of the
+function), `except RuntimeError` after `get_running_loop` / `get_event_loop`,
+`not loop.is_running()`, and similar helpers. Other conditional nested-loop
+sites stay findings (with normal branch conditions).
 
 **Fix:** await the coroutine directly; do not nest event-loop runners.
 

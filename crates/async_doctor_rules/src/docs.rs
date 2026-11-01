@@ -167,7 +167,7 @@ These APIs expect to own the event loop. Calling them from a running loop raises
 `RuntimeError` at runtime. Offloaded (thread) calls are not reported.\n\
 \n\
 Sites under a proven \"no running loop\" guard are dropped (not even candidates):\n\
-`if loop is None`, `except RuntimeError` after `get_running_loop` / `get_event_loop`,\n\
+`if loop is None`, early-return `if loop is not None: return`, `except RuntimeError` after `get_running_loop` / `get_event_loop`,\n\
 `not loop.is_running()`, and similar helpers. Other conditional nested-loop sites\n\
 remain findings with normal branch conditions.",
         fix: "\

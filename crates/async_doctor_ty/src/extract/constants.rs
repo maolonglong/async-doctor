@@ -277,6 +277,12 @@ pub(crate) fn body_always_exits(body: &[Stmt]) -> bool {
 pub(crate) enum EarlyExitKind {
     /// Guard is provably always true and body exits — rest of suite is dead.
     UnreachableRest,
-    /// Guard may fail — rest of suite is conditional (optionally cache-miss).
-    Conditional { cache_miss: bool },
+    /// Guard may fail — rest of suite is conditional (optionally cache-miss /
+    /// proven no-running-loop after `if loop is not None: return`).
+    Conditional {
+        cache_miss: bool,
+        /// Rest of the suite only runs when there is no running event loop
+        /// (early-return after `loop is not None` / `loop.is_running()` / …).
+        no_running_loop: bool,
+    },
 }

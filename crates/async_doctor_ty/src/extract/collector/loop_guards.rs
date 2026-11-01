@@ -62,6 +62,30 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             _ => is_no_running_loop_test(test),
         }
     }
+
+    /// `if loop is not None` / truthy `if loop` / `if loop.is_running()` —
+    /// used for early-return classification (`if loop is not None: return`).
+    pub(super) fn is_running_loop_present_test_ctx(&self, test: &Expr) -> bool {
+        if self.is_running_loop_test_ctx(test) {
+            return true;
+        }
+        match test {
+            Expr::Name(n) => looks_like_loop_name_str(n.id.as_str()),
+            Expr::Compare(cmp) if cmp.ops.len() == 1 && cmp.operands.len() == 2 => {
+                let op = cmp.ops[0];
+                let left = &cmp.operands[0];
+                let right = &cmp.operands[1];
+                match op {
+                    ast::CmpOp::IsNot | ast::CmpOp::NotEq => {
+                        (looks_like_loop_name(left) && matches!(right, Expr::NoneLiteral(_)))
+                            || (matches!(left, Expr::NoneLiteral(_)) && looks_like_loop_name(right))
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
 }
 
 fn compare_is_none_of_param(cmp: &ast::ExprCompare, params: &[String]) -> bool {
@@ -178,16 +202,14 @@ fn is_running_loop_call(expr: &Expr) -> bool {
 
 fn looks_like_loop_name(expr: &Expr) -> bool {
     match expr {
-        Expr::Name(n) => {
-            let s = n.id.as_str();
-            s == "loop" || s.ends_with("_loop") || s.contains("event_loop")
-        }
-        Expr::Attribute(attr) => {
-            let s = attr.attr.as_str();
-            s == "loop" || s.ends_with("_loop") || s.contains("event_loop")
-        }
+        Expr::Name(n) => looks_like_loop_name_str(n.id.as_str()),
+        Expr::Attribute(attr) => looks_like_loop_name_str(attr.attr.as_str()),
         _ => false,
     }
+}
+
+fn looks_like_loop_name_str(s: &str) -> bool {
+    s == "loop" || s.ends_with("_loop") || s.contains("event_loop")
 }
 
 fn is_event_loop_running_helper(name: &str) -> bool {
