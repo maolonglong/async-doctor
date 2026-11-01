@@ -70,8 +70,8 @@ hidden dirs are skipped (`--include-non-production` to include).
   a high-confidence same-package async twin installed in the scanned venv
   (non-blocking; SARIF `note`; text **Advice** section, capped unless `--expand`)
 - **Errors:** `nested-event-loop` (`asyncio.run` / … from async without offload;
-  loop-state guards like `if loop is None` are dropped), `offload-coroutine`
-  (offload target is `async def`)
+  loop-state guards like `if loop is None` / early-return `if loop is not None:
+  return` are dropped), `offload-coroutine` (offload target is `async def`)
 
 ## GitHub Actions (SARIF / code scanning)
 
