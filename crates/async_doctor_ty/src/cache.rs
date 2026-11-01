@@ -44,7 +44,9 @@ use serde::{Deserialize, Serialize};
 /// httpx module + Azure OpenAI twin matchers.
 /// v14: report schemaVersion 2 — `environment`, `locationLessCandidates`,
 /// always-emitted top-level arrays.
-pub const CACHE_SCHEMA_VERSION: u32 = 14;
+/// v15: edge occurrence for externals counted by canonical sink key (family
+/// aliases like Session.client → boto3.client) so finding ids cannot collide.
+pub const CACHE_SCHEMA_VERSION: u32 = 15;
 
 /// Tool version embedded in the cache path (from this crate's Cargo.toml).
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");

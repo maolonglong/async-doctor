@@ -1,5 +1,7 @@
 //! Unit tests for propagation grading.
 
+use std::collections::HashSet;
+
 use super::*;
 use crate::graph::{CallEdge, CallKind, FunctionFact, LiteralArg, ParamGuard, ProjectFacts};
 use crate::report::EntryLabel;
@@ -8,6 +10,16 @@ struct TestSinks;
 impl SinkTable for TestSinks {
     fn lookup(&self, qualname: &str) -> Option<SinkHit> {
         match qualname {
+            // Family-style alias: two callees share one sink key (boto Session.client shape).
+            "pkg.factory_a" | "pkg.factory_b" => Some(SinkHit {
+                rule: "blocking-http",
+                sink_qualname: "pkg.factory",
+                fix_hint: "use async twin",
+                candidate_only: false,
+                candidate_reason: None,
+                with_only: false,
+                consume_only: false,
+            }),
             "time.sleep" => Some(SinkHit {
                 rule: "blocking-sleep",
                 sink_qualname: "time.sleep",
@@ -438,4 +450,54 @@ fn is_non_production_paths() {
     assert!(is_non_production_entry_path("examples/demo.py"));
     assert!(is_non_production_entry_path(".agents/x.py"));
     assert!(!is_non_production_entry_path("app/main.py"));
+}
+
+#[test]
+fn aliased_sink_keys_need_distinct_occurrence() {
+    // Two call sites whose callees alias to the same sink_qualname must not
+    // share occurrence 0 — that collides finding ids and silently drops one.
+    let facts = ProjectFacts {
+        functions: vec![fn_fact(0, "handler", true, "a.py", 1)],
+        edges: vec![
+            {
+                let mut e = edge(
+                    0,
+                    CalleeRef::External {
+                        qualname: "pkg.factory_a".into(),
+                    },
+                    2,
+                    "factory_a()",
+                    vec![ConditionTag::Unconditional, ConditionTag::AllPaths],
+                );
+                e.occurrence = 0;
+                e
+            },
+            {
+                let mut e = edge(
+                    0,
+                    CalleeRef::External {
+                        qualname: "pkg.factory_b".into(),
+                    },
+                    3,
+                    "factory_b()",
+                    vec![ConditionTag::Unconditional, ConditionTag::AllPaths],
+                );
+                // Distinct ordinal (as extract assigns when counting by sink key).
+                e.occurrence = 1;
+                e
+            },
+        ],
+        complete: true,
+        ..Default::default()
+    };
+    let report = analyze(&facts, &TestSinks);
+    assert_eq!(
+        report.findings.len(),
+        2,
+        "aliased factories with distinct occurrence must both emit: {:?}",
+        report.findings
+    );
+    assert_ne!(report.findings[0].id, report.findings[1].id);
+    let lines: HashSet<_> = report.findings.iter().map(|f| f.chain[0].line).collect();
+    assert_eq!(lines, HashSet::from([2, 3]), "{:?}", report.findings);
 }

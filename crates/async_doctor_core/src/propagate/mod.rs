@@ -195,6 +195,8 @@ pub fn analyze_with_options(
     let mut unresolved_agg: HashMap<String, (u32, HashSet<FunctionId>)> = HashMap::new();
 
     let mut emitted: HashSet<String> = HashSet::new();
+    // Finding id → sink site `(file, line)` for collision diagnostics.
+    let mut emitted_sink_sites: HashMap<String, (String, u32)> = HashMap::new();
     let mut omitted_entries: HashSet<FunctionId> = HashSet::new();
     let mut raw_findings: Vec<Finding> = Vec::new();
     let mut raw_candidates: Vec<Candidate> = Vec::new();
@@ -338,6 +340,20 @@ pub fn analyze_with_options(
                         chain_qualnames: &chain_refs,
                         occurrence: seed_edge.occurrence,
                     });
+                    if let Some((prev_file, prev_line)) = emitted_sink_sites
+                        .insert(id.clone(), (seed_edge.file.clone(), seed_edge.line))
+                    {
+                        // Same id from a distinct call site means occurrence was
+                        // counted on a different key than finding_id hashes.
+                        debug_assert!(
+                            prev_file == seed_edge.file && prev_line == seed_edge.line,
+                            "finding-id collision across distinct sink sites: \
+                             id={id} {prev_file}:{prev_line} vs {}:{}",
+                            seed_edge.file,
+                            seed_edge.line
+                        );
+                        continue;
+                    }
                     if !emitted.insert(id.clone()) {
                         continue;
                     }
