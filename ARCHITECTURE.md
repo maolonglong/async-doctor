@@ -10,9 +10,15 @@ or SARIF.
 Pipeline: discover files and environment → extract call-graph facts with ty
 (pass-1 functions, pass-2 edges, third-party follow) → propagate sinks up the
 reverse call graph with offload cuts → grade and report. Two caches sit on the
-side: a per-package third-party edge cache, and a whole-scan report cache keyed
-on first-party content hashes plus executable identity. The tool never runs
-Python, never autofixes, and never loads a project config file.
+side: a per-package third-party edge cache, and a whole-scan report cache (see
+**Whole-scan cache key** below). The tool never runs Python, never autofixes,
+and never loads a project config file.
+
+**Non-goals:** no runtime probing (recommend blockbuster/pyleak alongside); no
+Trio-only semantics; no gevent/eventlet monkey-patch modelling; no autofix; no
+general CPU profiling (obvious CPU hotspots may appear only as *candidates*).
+
+Exit codes and JSON field meanings live in [`docs/json-contract.md`](docs/json-contract.md).
 
 ## Entry points
 
@@ -35,9 +41,8 @@ text / JSON / SARIF reporters (`text/`, `sarif.rs`), and `explain` / `why`
 (`help_cmd.rs`). Depends on `async_doctor_ty` for scanning and
 `async_doctor_core` for report types. Non-MSVC builds use jemalloc.
 
-**API boundary:** the published CLI surface and exit codes (`0` clean, `1`
-findings or unused suppressions, `2` tool error). Incomplete analysis is
-`complete=false`, not exit 2.
+**API boundary:** the published CLI surface. Exit codes: see
+[`docs/json-contract.md`](docs/json-contract.md).
 
 ### `crates/async_doctor_ty`
 
@@ -59,6 +64,35 @@ only plain `ProjectFacts` / `Report` values leave this crate.
 **API boundary:** `scan_path*` and `extract_path*` (plus test seams for cache
 root and follow budget). Callers must not mutate process-wide `XDG_CACHE_HOME`
 under parallel tests — pass an explicit cache dir instead.
+
+**Follow / search-path behaviour (current):**
+
+- Venv/`site-packages` and system `dist-packages` are third-party: followed when
+  reachable, never finding entries. Reverse propagation stops at third-party
+  async. Awaited *sync* sinks still seed (sync body runs on the loop before
+  `await`); awaited known-async APIs do not.
+- Outside-scan-root editables are follow-only (never entry sources). Scanning a
+  package directory (one containing a Python package init module) adds its
+  parent for self-imports.
+- Extra search paths (after src roots): pyright `extraPaths`,
+  `[tool.ty.environment] extra-paths`, `[tool.ruff] src`, setuptools editable
+  finder `MAPPING` parents.
+- Imperative FastAPI/Starlette routes and `include_router` are recognized as
+  entries. `--show-unresolved` aggregates by callee pattern; failed first-party
+  imports surface once per file+module (`unresolved-import:…`); on-disk relative
+  imports are not recorded as unresolved; missing third-party collapses to one
+  note. Third-party sinks under parameter/branch guards (e.g. PIL
+  `if is_path(fp):`) demote to candidates.
+
+**Whole-scan cache key** (`scan_cache.rs` / `scan_input_fingerprint`): schema
+version, tool version, build id, analyze options (`include_non_production`,
+`show_unresolved`), follow budget, scan-root path, every first-party `.py` /
+`.pyi` content hash, discovery config file contents
+(`pyproject.toml` / pyright / ruff), active venv identity, and each installed
+dist-info content fingerprint. Package-cache fingerprints are coarse
+(RECORD/METADATA/one-level `.py`); identical RECORD + unchanged dist-info mtime
+can reuse a package entry even if an unpacked `.py` was patched in place
+(editable installs that refresh dist-info mtime invalidate correctly).
 
 ### `crates/async_doctor_core`
 
@@ -127,7 +161,7 @@ maturin/PyPI release workflow.
 - CLI: `crates/async_doctor/tests/` (`cli_*`, `concurrent_cache`,
   `file_length`).
 - Default `cargo test --workspace` stays fast. Longer stress loops use
-  `#[ignore]` (e.g. concurrent cold-cache race).
+  `#[ignore]` (see [docs/notes/2026-10-concurrent-cache-stress.md](docs/notes/2026-10-concurrent-cache-stress.md)).
 
 ### Error handling
 
