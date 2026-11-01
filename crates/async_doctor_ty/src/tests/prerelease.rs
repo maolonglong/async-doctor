@@ -517,3 +517,165 @@ fn per_file_panic_is_isolated() {
         report.findings
     );
 }
+
+#[test]
+fn p1_miss_probe_covers_stdlib_and_boto_gaps() {
+    let dir = clone_fixture("miss-probe");
+    let cache = fresh_cache_dir("miss-probe");
+    let report = scan_path_with_cache(&dir, Some(&cache)).unwrap();
+    let names: std::collections::BTreeSet<_> = report
+        .findings
+        .iter()
+        .map(|f| f.entry.name.as_str())
+        .collect();
+    for expected in [
+        "h_smtp", "h_ftp", "h_zip", "h_tar", "h_boto", "h_glob", "h_input", "h_future",
+    ] {
+        assert!(
+            names.contains(expected),
+            "missing {expected}: names={names:?} findings={:?}",
+            report.findings
+        );
+    }
+    let boto = report
+        .findings
+        .iter()
+        .find(|f| f.entry.name == "h_boto")
+        .unwrap();
+    assert!(
+        boto.fix.hint.contains("aioboto3") || boto.fix.hint.contains("aiobotocore"),
+        "boto advice must mention aioboto3/aiobotocore: {}",
+        boto.fix.hint
+    );
+    let fut = report
+        .findings
+        .iter()
+        .find(|f| f.entry.name == "h_future")
+        .unwrap();
+    assert!(
+        fut.chain
+            .iter()
+            .any(|c| c.resolution.contains("concurrent.futures.Future.result")),
+        "{:?}",
+        fut.chain
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&cache);
+}
+
+#[test]
+fn p1_boto2_client_and_resource_ops() {
+    let dir = clone_fixture("boto2");
+    let cache = fresh_cache_dir("boto2");
+    let report = scan_path_with_cache(&dir, Some(&cache)).unwrap();
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| f.entry.name == "a" && f.fix.hint.contains("aioboto")),
+        "get_object must fire: {:?}",
+        report.findings
+    );
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| f.entry.name == "resource_table"),
+        "resource Table.get_item must fire: {:?}",
+        report.findings
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&cache);
+}
+
+#[test]
+fn p1_chain_through_sink_helpers() {
+    let dir = clone_fixture("chain-through-sinks");
+    let report = scan_path(&dir).unwrap();
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|f| f.entry.name == "handler" && f.rule == "blocking-file"),
+        "{:?}",
+        report.findings
+    );
+    assert!(
+        report.findings.len() >= 2,
+        "expected both _check and _patch paths: {:?}",
+        report.findings
+    );
+    let joined: Vec<String> = report
+        .findings
+        .iter()
+        .map(|f| {
+            f.chain
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" | ")
+        })
+        .collect();
+    assert!(
+        joined
+            .iter()
+            .any(|c| c.contains("_check") && c.contains("open")),
+        "missing _check path: {joined:?}"
+    );
+    assert!(
+        joined
+            .iter()
+            .any(|c| c.contains("_patch") && c.contains("open")),
+        "missing _patch path: {joined:?}"
+    );
+    // Paths must not mash _check and _patch into one chain.
+    assert!(
+        joined
+            .iter()
+            .all(|c| !(c.contains("_check") && c.contains("_patch"))),
+        "cross-merged chains: {joined:?}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn p1_genexpr_fanout_finishes_quickly() {
+    let dir = clone_fixture("genexpr-fanout");
+    let start = std::time::Instant::now();
+    let report = scan_path(&dir).expect("scan must not abort");
+    let elapsed = start.elapsed();
+    assert!(report.complete, "skipped={:?}", report.skipped);
+    assert!(
+        report.findings.iter().any(|f| f.rule == "blocking-sleep"),
+        "{:?}",
+        report.findings
+    );
+    assert!(
+        elapsed.as_secs() < 30,
+        "fan-out expansion too slow: {elapsed:?}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn p1_futures_map_wait_and_asyncio_precision() {
+    let dir = clone_fixture("p1_futures_map");
+    let report = scan_path(&dir).unwrap();
+    let names: std::collections::BTreeSet<_> = report
+        .findings
+        .iter()
+        .map(|f| f.entry.name.as_str())
+        .collect();
+    assert!(names.contains("map_consumed"), "{names:?}");
+    assert!(names.contains("wait_blocked"), "{names:?}");
+    assert!(
+        !names.contains("submit_only_ok"),
+        "bare submit must stay clean: {names:?}"
+    );
+    assert!(
+        !names.contains("asyncio_future_result"),
+        "asyncio.Future.result must not match concurrent.futures: {names:?} {:?}",
+        report.findings
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
