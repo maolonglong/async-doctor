@@ -1,9 +1,15 @@
-//! JSON/text report types (schemaVersion 1).
+//! JSON/text report types (schemaVersion 2).
 
 use serde::{Deserialize, Serialize};
 
+use crate::environment::ScanEnvironment;
+
 /// JSON schema version. Bump only on breaking field changes.
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// v2: always emit top-level arrays (even when empty); add `environment` and
+/// `locationLessCandidates`; `why` paths are scan-root-relative (never
+/// absolute machine paths).
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Exit code: no findings.
 pub const EXIT_OK: i32 = 0;
@@ -243,12 +249,19 @@ pub struct SinkSiteSummary {
 pub struct Report {
     pub schema_version: u32,
     pub complete: bool,
+    /// Interpreter / venv / site-packages used for this scan (schema v2).
+    #[serde(default)]
+    pub environment: ScanEnvironment,
+    /// Top-level arrays are always emitted (schema v2) — including when empty.
     pub findings: Vec<Finding>,
     pub candidates: Vec<Candidate>,
-    /// Non-blocking suggestions (never affect exit code). Additive in schema v1.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Non-blocking suggestions (never affect exit code).
+    #[serde(default)]
     pub advice: Vec<Advice>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Candidates with no file location (e.g. aggregated missing third-party).
+    #[serde(default)]
+    pub location_less_candidates: Vec<Candidate>,
+    #[serde(default)]
     pub skipped: Vec<String>,
     /// Async entries omitted because they live under tests/docs/examples/… (zero-config).
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -257,13 +270,13 @@ pub struct Report {
     #[serde(default, skip_serializing_if = "is_zero")]
     pub hidden_unresolved_candidates: u32,
     /// Aggregated unresolved patterns (populated when `--show-unresolved`).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub unresolved_summary: Vec<UnresolvedPattern>,
-    /// Inline ignore comments that did not suppress anything. Additive in schema v1.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Inline ignore comments that did not suppress anything.
+    #[serde(default)]
     pub unused_suppressions: Vec<UnusedSuppression>,
-    /// Sink sites ranked by entry count. Additive in schema v1.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Sink sites ranked by entry count.
+    #[serde(default)]
     pub sink_sites: Vec<SinkSiteSummary>,
 }
 
@@ -280,9 +293,11 @@ impl Report {
         Self {
             schema_version: SCHEMA_VERSION,
             complete: true,
+            environment: ScanEnvironment::none(),
             findings: Vec::new(),
             candidates: Vec::new(),
             advice: Vec::new(),
+            location_less_candidates: Vec::new(),
             skipped: Vec::new(),
             omitted_non_production_entries: 0,
             hidden_unresolved_candidates: 0,

@@ -1,11 +1,13 @@
 //! Call graph, propagation, grading, and report types. This crate must not depend on ty/ruff.
 
+mod environment;
 mod graph;
 mod id;
 mod propagate;
 mod report;
 mod sink_sites;
 
+pub use environment::{EnvironmentKind, ScanEnvironment};
 pub use graph::{
     AnalyzeOptions, CallEdge, CallKind, CalleeRef, ConditionTag, FunctionFact, FunctionId,
     LiteralArg, OffloadKind, ParamGuard, ProjectFacts, UnresolvedImport,
