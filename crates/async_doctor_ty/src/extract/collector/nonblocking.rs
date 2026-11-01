@@ -15,11 +15,12 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         qualname: &str,
         call: &ast::ExprCall,
     ) -> bool {
-        let method = qualname.rsplit_once('.').map(|(_, m)| m).unwrap_or(qualname);
+        let method = qualname
+            .rsplit_once('.')
+            .map(|(_, m)| m)
+            .unwrap_or(qualname);
         match method {
-            "acquire" if is_lock_or_semaphore_acquire(qualname) => {
-                acquire_is_nonblocking(call)
-            }
+            "acquire" if is_lock_or_semaphore_acquire(qualname) => acquire_is_nonblocking(call),
             "join" if is_thread_join(qualname) => join_timeout_is_zero(call),
             "get" | "put" if is_queue_get_or_put(qualname) => {
                 queue_call_is_nonblocking(call)
@@ -61,8 +62,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
 fn is_lock_or_semaphore_acquire(q: &str) -> bool {
     // ty may surface `_thread.lock.acquire` / `LockType.acquire` / `threading.Lock.acquire`.
     let lower = q.to_ascii_lowercase();
-    lower.ends_with(".acquire")
-        && (lower.contains("lock") || lower.contains("semaphore"))
+    lower.ends_with(".acquire") && (lower.contains("lock") || lower.contains("semaphore"))
 }
 
 fn is_thread_join(q: &str) -> bool {
@@ -109,8 +109,7 @@ fn join_timeout_is_zero(call: &ast::ExprCall) -> bool {
         return true;
     }
     for kw in &call.arguments.keywords {
-        if kw.arg.as_ref().is_some_and(|a| a.as_str() == "timeout") && expr_is_zero(&kw.value)
-        {
+        if kw.arg.as_ref().is_some_and(|a| a.as_str() == "timeout") && expr_is_zero(&kw.value) {
             return true;
         }
     }
@@ -224,9 +223,7 @@ fn is_queue_constructor(func: &Expr) -> bool {
 fn maxsize_is_unbounded(expr: &Expr) -> bool {
     match expr {
         Expr::NumberLiteral(n) => match &n.value {
-            ast::Number::Int(i) => {
-                i.as_i64().is_some_and(|v| v <= 0) || i.as_u64() == Some(0)
-            }
+            ast::Number::Int(i) => i.as_i64().is_some_and(|v| v <= 0) || i.as_u64() == Some(0),
             _ => false,
         },
         Expr::UnaryOp(u) if matches!(u.op, ast::UnaryOp::USub) => {

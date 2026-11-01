@@ -95,7 +95,9 @@ fn urllib_request_urlopen_not_urllib3() {
     let u3 = t.lookup("urllib3.HTTPConnectionPool.urlopen").unwrap();
     assert_eq!(u3.rule, RULE_BLOCKING_HTTP);
     // Family catch-all still labels as urllib3.request for non-exact rows.
-    let family = t.lookup("urllib3.connectionpool.HTTPConnectionPool.urlopen").unwrap();
+    let family = t
+        .lookup("urllib3.connectionpool.HTTPConnectionPool.urlopen")
+        .unwrap();
     assert!(
         family.sink_qualname.contains("urllib3"),
         "{}",

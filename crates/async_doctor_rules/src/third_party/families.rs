@@ -65,10 +65,7 @@ pub(super) fn match_family(q: &str) -> Option<SinkHit> {
         return None;
     }
     // Factories that return clients/pipelines/pubsub handles are not IO.
-    if q.ends_with(".pipeline")
-        || q.ends_with(".pubsub")
-        || is_redis_client_factory(q)
-    {
+    if q.ends_with(".pipeline") || q.ends_with(".pubsub") || is_redis_client_factory(q) {
         return None;
     }
     // redis sync PubSub.listen() — blocks only when the generator is consumed.
@@ -100,7 +97,10 @@ pub(super) fn match_family(q: &str) -> Option<SinkHit> {
         && !is_redis_sync_pipeline_receiver(q)
         && !is_redis_client_factory(q)
     {
-        let method = q.rsplit_once('.').map(|(_, m)| m).unwrap_or("execute_command");
+        let method = q
+            .rsplit_once('.')
+            .map(|(_, m)| m)
+            .unwrap_or("execute_command");
         let sink_qualname = redis_command_sink_qualname(method);
         return Some(SinkHit {
             rule: RULE_BLOCKING_DB,
@@ -329,12 +329,7 @@ fn is_redis_client_factory(q: &str) -> bool {
     let method = q.rsplit_once('.').map(|(_, m)| m).unwrap_or(q);
     matches!(
         method,
-        "from_url"
-            | "from_pool"
-            | "__init__"
-            | "__new__"
-            | "Redis"
-            | "StrictRedis"
+        "from_url" | "from_pool" | "__init__" | "__new__" | "Redis" | "StrictRedis"
     )
 }
 
