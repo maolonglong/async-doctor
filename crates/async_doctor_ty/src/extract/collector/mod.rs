@@ -1,5 +1,6 @@
 //! Call-graph edge collection over a single Python file.
 
+mod boto;
 mod buffers;
 mod calls;
 mod control_flow;
@@ -122,6 +123,9 @@ pub(crate) struct CallCollector<'a, 'db> {
     /// Names bound from `boto3.client` / `boto3.resource` (module or local).
     /// Dynamic client methods often have no stubs — track syntactically.
     pub(super) boto_receivers: HashSet<String>,
+    /// Names rooted in `aioboto3` / `aiobotocore` (Session, client, resource).
+    /// Never treated as sync boto receivers for AWS-op synthesis.
+    pub(super) aio_boto_receivers: HashSet<String>,
     /// Locals assigned from `asyncio.get_running_loop()` (incl. `= None` after
     /// `except RuntimeError`). Early-return `if name is not None` only guards
     /// when the name is in this set.
@@ -217,6 +221,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             idle_loop_helpers: HashSet::new(),
             unbounded_queues: HashSet::new(),
             boto_receivers: HashSet::new(),
+            aio_boto_receivers: HashSet::new(),
             running_loop_locals: HashSet::new(),
             event_loop_locals: HashSet::new(),
             buffer_locals: HashSet::new(),

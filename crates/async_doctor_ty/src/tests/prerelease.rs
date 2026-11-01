@@ -605,6 +605,27 @@ fn p1_boto2_client_and_resource_ops() {
 }
 
 #[test]
+fn p1_aioboto3_session_client_not_sync_boto() {
+    // aioboto3 + boto3 installed, no types-aioboto3: Session.client must not
+    // synthesize botocore BaseClient ops (advice literally points at aioboto3).
+    let dir = clone_fixture("aioboto3_ok");
+    let cache = fresh_cache_dir("aioboto3_ok");
+    let report = scan_path_with_cache(&dir, Some(&cache)).unwrap();
+    let hits: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.entry.name == "aio_session_client" || f.entry.name == "aio_inline")
+        .collect();
+    assert!(
+        hits.is_empty(),
+        "aioboto3 Session.client / awaited receivers must be 0 findings: {hits:?} {:?}",
+        report.findings
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&cache);
+}
+
+#[test]
 fn p1_chain_through_sink_helpers() {
     let dir = clone_fixture("chain-through-sinks");
     let report = scan_path(&dir).unwrap();

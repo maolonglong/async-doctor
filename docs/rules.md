@@ -79,7 +79,9 @@ Sync database drivers and sync cloud/AI SDKs (SQLAlchemy Session, redis, boto3, 
   `aiobotocore` fix hint. Meta helpers (`get_paginator`, `get_waiter`,
   `can_paginate`, `generate_presigned_url`, `meta`) are not IO and stay clean.
   There is still no dedicated `aioboto3` sink/follow family; `aioboto3.*` /
-  `aiobotocore.*` qualnames are classified as async counterparts (never findings).
+  `aiobotocore.*` qualnames (including `Session.client` / `Session.resource`
+  and `async with` receivers) are classified as async counterparts (never
+  findings), even when boto3 is also installed and types-aioboto3 is missing.
 
 ## unresolved-call
 
