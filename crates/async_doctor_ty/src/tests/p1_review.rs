@@ -24,6 +24,11 @@ fn p1_off_loop_thread_and_done_guards() {
         "lk.owner != get_ident() must NOT be treated as off-loop: {names:?} {:?}",
         report.findings
     );
+    assert!(
+        names.contains("done_guard_rebind_still_blocks"),
+        "rebind inside if fut.done(): must invalidate the guard: {names:?} {:?}",
+        report.findings
+    );
     for clean in [
         "off_loop_get_ident_result_ok",
         "off_loop_attr_loop_thread_id_ok",
