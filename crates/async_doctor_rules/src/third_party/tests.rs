@@ -199,7 +199,54 @@ fn boto_dynamic_client_methods_match_aioboto_advice() {
             .is_none(),
         "get_available_regions is local metadata, not IO"
     );
+    // Session / ComponentLocator internals must never match the AWS-op heuristic.
+    for q in [
+        "botocore.session.get_session",
+        "botocore.session.Session.get_service_model",
+        "botocore.session.Session.get_available_regions",
+        "botocore.session.Session._get_internal_component",
+        "botocore.session.Session.get_component",
+        "botocore.session.ComponentLocator.get_component",
+        "boto3.session.Session.get_component",
+    ] {
+        assert!(
+            t.lookup(q).is_none(),
+            "botocore session/internal {q} must not be a sink"
+        );
+    }
+    assert!(
+        t.lookup("botocore.client.BaseClient.describe_db_instances")
+            .is_some(),
+        "real client describe_* must stay a sink"
+    );
     assert!(t.lookup("boto3.client").is_some());
+}
+
+#[test]
+fn boto_aws_op_heuristic_only_on_client_or_resource() {
+    use super::is_boto_client_or_resource_api_qual;
+
+    assert!(is_boto_client_or_resource_api_qual(
+        "botocore.client.BaseClient.get_object"
+    ));
+    assert!(is_boto_client_or_resource_api_qual(
+        "botocore.client.S3.get_object"
+    ));
+    assert!(is_boto_client_or_resource_api_qual(
+        "boto3.resources.factory.dynamodb.Table.get_item"
+    ));
+    assert!(!is_boto_client_or_resource_api_qual(
+        "botocore.session.Session.get_service_model"
+    ));
+    assert!(!is_boto_client_or_resource_api_qual(
+        "botocore.session.ComponentLocator.get_component"
+    ));
+    assert!(!is_boto_client_or_resource_api_qual(
+        "botocore.session.get_session"
+    ));
+    assert!(!is_boto_client_or_resource_api_qual(
+        "aiobotocore.client.AioBaseClient.get_object"
+    ));
 }
 
 #[test]
