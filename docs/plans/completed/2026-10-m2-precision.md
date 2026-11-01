@@ -1,9 +1,24 @@
 # M2 precision sample notes
 
-Clean-room evaluation of async-doctor M2. Numbers from this agent run
-(release binary).
+## Purpose
 
-## Fixture rule families (`fixtures/m2_*`)
+Record clean-room M2 precision/recall and cold/warm timings on fixtures and
+public corpora so later precision work has a baseline.
+
+## Progress
+
+- [x] 2026-10: Fixture family matrix for `fixtures/m2_*` (third-party rules, redis Pipeline, follow, higher-order, routes).
+- [x] 2026-10: Determinism check (5 cold runs, identical SHA-256 JSON).
+- [x] 2026-10: Timing table for litellm / open-webui / cache fixtures.
+- [x] 2026-10: Sampled FP/FN notes for open-webui and litellm.
+
+## Surprises & Discoveries
+
+- Indexing edges by caller (`O(E)` build) cut litellm cold from ~57.8s to **26.0s** (release, no project venv).
+- Warm with only the package cache stayed close to cold until the whole-scan report cache landed (see [../../benchmark.md](../../benchmark.md)).
+- Sync FastAPI `def` routes correctly excluded; dynamic provider/`getattr` paths stay unresolved candidates.
+
+### Fixture rule families (`fixtures/m2_*`)
 
 | Family | Positive | Async / negative |
 | --- | --- | --- |
@@ -17,12 +32,7 @@ Clean-room evaluation of async-doctor M2. Numbers from this agent run
 | Imperative routes | `add_api_route` / `add_route` / `Route` / `WebSocketRoute` / router `add_api_route` labeled `route` | — |
 | Site-packages follow (`m2_sitepkgs_cache`) | `libx.fetch` → `helper` → `time.sleep` | cold JSON == warm JSON |
 
-## Determinism
-
-5 cold runs on `fixtures/m2_third_party_rules` produced identical SHA-256 JSON.
-Regression: `m2_analysis_is_byte_identical_across_runs` (N=5).
-
-## Timing (release, isolated `XDG_CACHE_HOME`)
+### Timing (release, isolated `XDG_CACHE_HOME`)
 
 | Corpus | Files | Cold | Warm | Peak RSS (child max) |
 | --- | ---: | ---: | ---: | ---: |
@@ -32,22 +42,9 @@ Regression: `m2_analysis_is_byte_identical_across_runs` (N=5).
 | `fixtures/m2_sitepkgs_cache` (+ stub `.venv`) | tiny | 33 ms | **23 ms** | ~31 MiB |
 | `fixtures/m2_third_party_rules` | tiny + stubs | 34 ms | 29 ms | ~31 MiB |
 
-No-venv speedup vs the pre-fix M2 binary comes from indexing edges by
-caller (`O(E)` build, `O(degree)` extend) instead of
-`facts.edges.iter().filter(|e| e.caller == fid)` / full edge rewrites after
-every extraction. litellm cold is now ~0.9× the earlier M1-era ~29s baseline
-cited in review (target was ≤1.2×).
+### FP / FN list (sampled)
 
-Warm runs with a real site-packages follow path are faster because the
-versioned package cache (`v{schema}/{tool}/{package}/{version}-{fingerprint}.json`) stores
-full edge summaries under External qualname keys and materializes transitive
-callees without re-parsing. Schema **v11** also adds a whole-scan report cache
-(`scan/{input-fingerprint}.json`, content-hash keyed) so unchanged inputs skip
-extract entirely.
-
-## FP / FN list (sampled)
-
-### open-webui backend (26 findings)
+#### open-webui backend (26 findings)
 
 | Verdict | Examples |
 | --- | --- |
@@ -55,7 +52,7 @@ extract entirely.
 | **FP** | None confirmed in the sampled top findings (sync FastAPI `def` routes correctly excluded) |
 | **FN** | Dynamic provider/`getattr` paths stay unresolved (hidden unless `--show-unresolved`) — expected |
 
-### litellm `litellm/` (sampled)
+#### litellm `litellm/` (sampled)
 
 | Verdict | Examples |
 | --- | --- |
@@ -63,9 +60,17 @@ extract entirely.
 | **FP** | None confirmed in the first 6 sampled findings |
 | **FN** | Large dynamic registry / provider dispatch → unresolved candidates, not findings — expected precision tradeoff |
 
-### sqlalchemy + redis sync in async code
+## Decision log
 
-Covered by `fixtures/m2_third_party_rules`: sync `Session.execute` /
-`redis.Redis.get` are findings with async-twin hints; `AsyncSession` /
-`redis.asyncio` do not fire. Redis Pipeline buffering is not IO — only
-`execute()` blocks.
+- Decision: treat unresolved dynamic dispatch as candidates, not findings / Date: 2026-10 / Rationale: false positives are worse than misses ([../../decisions/2026-10-30-reporting-contract.md](../../decisions/2026-10-30-reporting-contract.md)).
+
+## Validation
+
+- `cargo test -p async_doctor_ty` includes `m2_analysis_is_byte_identical_across_runs` (N=5).
+- Fixture families under `fixtures/m2_*` pass in the default workspace test run.
+
+## Outcomes & Retrospective
+
+M2 precision baseline recorded. sqlalchemy + redis sync covered by
+`fixtures/m2_third_party_rules`; Pipeline buffering is not IO — only
+`execute()` blocks. Follow-on corpus gaps moved to M3a plans.
