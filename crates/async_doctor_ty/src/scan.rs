@@ -96,8 +96,12 @@ fn scan_path_with_options_cache_budget(
     timing.span("fingerprint", t_fp);
 
     let t_load = Instant::now();
-    if let Some(report) = load_scan_report(&cache_root, &fingerprint) {
+    if let Some(mut report) = load_scan_report(&cache_root, &fingerprint) {
         timing.span("scan_cache_load", t_load);
+        // Recompute live origin/prefix/interpreter so VIRTUAL_ENV vs local
+        // `.venv` is not sticky from a prior cache write; keep third-party
+        // counts from the cached analysis and refresh the advisory note.
+        refresh_environment_on_cache_hit(&mut report, &fingerprint_root);
         timing.finish("scan_cache=hit");
         return Ok(report);
     }
@@ -116,4 +120,17 @@ fn scan_path_with_options_cache_budget(
     timing.span("scan_cache_save", t_save);
     timing.finish("scan_cache=miss");
     Ok(report)
+}
+
+fn refresh_environment_on_cache_hit(report: &mut Report, scan_root: &Path) {
+    let Ok(root) = ruff_db::system::SystemPathBuf::from_path_buf(scan_root.to_path_buf()) else {
+        return;
+    };
+    let Ok(mut live) = crate::env_info::discover_scan_environment(&root) else {
+        return;
+    };
+    live.unresolved_third_party = report.environment.unresolved_third_party;
+    live.resolved_third_party = report.environment.resolved_third_party;
+    live.refresh_note();
+    report.environment = live;
 }
