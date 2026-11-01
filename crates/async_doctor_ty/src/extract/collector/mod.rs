@@ -91,8 +91,15 @@ pub(crate) struct CallCollector<'a, 'db> {
     pub(super) narrowed_locals: HashMap<String, crate::extract::helpers::NarrowFact>,
     /// Local name → lambda assigned in the current function.
     pub(super) local_lambdas: HashMap<String, &'a ast::ExprLambda>,
-    /// Local name → generator expression assigned in the current function.
-    pub(super) local_genexprs: HashMap<String, &'a ast::ExprGenerator>,
+    /// Local name → stack of generator expressions (oldest → newest).
+    /// Self-reassignment keeps prior bindings so
+    /// `out = (sleep…); out = (x for x in out)` still expands the sleep body.
+    pub(super) local_genexprs: HashMap<String, Vec<&'a ast::ExprGenerator>>,
+    /// Genexprs currently being expanded while consuming (cycle guard for
+    /// `out = (x for x in out)` then `tuple(out)`).
+    pub(super) expanding_genexprs: HashSet<*const ast::ExprGenerator>,
+    /// Nesting depth of genexpr expansions (hard cap beyond the pointer set).
+    pub(super) genexpr_expand_depth: u32,
     /// Locals bound only when no event loop is running (ternary / idle-loop helper).
     /// `if name is not None:` (or truthy `if name:`) is a [`ConditionTag::NoRunningLoopGuard`].
     pub(super) idle_loop_locals: HashSet<String>,
@@ -109,6 +116,9 @@ pub(crate) struct CallCollector<'a, 'db> {
     /// combined with `.is_running()` (not bare `is not None`).
     pub(super) event_loop_locals: HashSet<String>,
 }
+
+/// Hard cap on nested local-genexpr expansions (belt alongside the pointer set).
+pub(super) const MAX_GENEXPR_EXPAND_DEPTH: u32 = 64;
 
 impl<'a, 'db> CallCollector<'a, 'db> {
     pub(super) fn def_get(&self, key: &DefKey) -> Option<FunctionId> {

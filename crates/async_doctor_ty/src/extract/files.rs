@@ -7,25 +7,27 @@
 //! - `N>0`: reset every N files (lower peak RSS, slower cold)
 
 use std::collections::{HashMap, HashSet};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_doctor_core::{CallEdge, CalleeRef, EntryLabel, FunctionId, ProjectFacts};
 use ruff_db::files::system_path_to_file;
 use ruff_db::parsed::parsed_module;
 use ruff_db::source::{line_index, source_text};
 use ruff_db::system::{SystemPath, SystemPathBuf};
-use ruff_python_ast::visitor::Visitor;
-use ty_python_semantic::SemanticModel;
 
 use crate::db::AsyncDoctorDb;
 use crate::sitepkgs::{FollowTarget, PackageMetaMemo};
 
-use super::collector::CallCollector;
-use super::constants::collect_module_constants;
 use super::ctx::{DefKey, FileCtx, TaskTargets};
 use super::follow::follow_third_party;
 use super::functions::{collect_functions, twin_name};
-use super::pass2::{Pass2FileSpec, Pass2Shared, merge_pass2_results, run_pass2_parallel};
+use super::panic_util::panic_message;
+use super::pass2::{
+    Pass2FileResult, Pass2FileSpec, Pass2Shared, extract_one_file, merge_pass2_results,
+    run_pass2_parallel,
+};
 use super::path::{module_name_from_relative, relative_display};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +124,12 @@ pub(crate) fn extract_files(
                 }
             };
             let program_file = program.program_file(&db, file);
+            let source = source_text(&db, file);
+            if let Some(err) = source.read_error() {
+                facts.complete = false;
+                facts.skipped.push(format!("{}: {err}", entry.rel));
+                continue;
+            }
             let parsed = parsed_module(&db, program_file.python_file(&db)).load(&db);
             if parsed.has_invalid_syntax() {
                 facts.complete = false;
@@ -133,7 +141,6 @@ pub(crate) fn extract_files(
                 facts.skipped.push(format!("{}: {detail}", entry.rel));
                 continue;
             }
-            let source = source_text(&db, file);
             let index = line_index(&db, file);
             let ctx = FileCtx {
                 db: &db,
@@ -144,6 +151,8 @@ pub(crate) fn extract_files(
                 source: source.as_str().to_string(),
                 index,
             };
+            // Pass 1 is parse-only (no SemanticModel); panics are unexpected.
+            // Isolation for analysis panics lives in pass 2.
             collect_functions(
                 &ctx,
                 parsed.suite(),
@@ -211,7 +220,6 @@ pub(crate) fn extract_files(
             &property_defs,
             &mut task_targets,
             &mut follow_targets,
-            &mut package_meta,
             &followable_extra_roots,
         );
     }
@@ -255,7 +263,6 @@ fn run_pass2_batched(
     property_defs: &HashSet<DefKey>,
     task_targets: &mut TaskTargets,
     follow_targets: &mut HashMap<String, FollowTarget>,
-    package_meta: &mut PackageMetaMemo,
     followable_extra_roots: &[PathBuf],
 ) {
     let chunks = pass2_chunks(entries, batch_mode);
@@ -270,88 +277,40 @@ fn run_pass2_batched(
         if batch_idx > 0 {
             *db = db.fresh_empty();
         }
-        let program = db.program();
+        // Per-file local buffers (same as parallel): merge only on success so a
+        // mid-file panic cannot leave partial edges in the shared maps.
         for entry in chunk.iter() {
-            let file = match system_path_to_file(db, &entry.system_path) {
-                Ok(f) => f,
-                Err(_) => continue,
+            let shared = Pass2Shared {
+                functions: Arc::new(facts.functions.clone()),
+                def_map: Arc::new(def_map.clone()),
+                qual_map: Arc::new(qual_map.clone()),
+                property_defs: Arc::new(property_defs.clone()),
+                followable_extra_roots: Arc::new(followable_extra_roots.to_vec()),
             };
-            let program_file = program.program_file(db, file);
-            let source = source_text(db, file);
-            let index = line_index(db, file);
-            let parsed = parsed_module(db, program_file.python_file(db)).load(db);
-            if parsed.has_invalid_syntax() {
-                continue;
-            }
-            let model = SemanticModel::new(db, program_file);
-            let ctx = FileCtx {
-                db,
-                program_file,
-                file,
+            let spec = Pass2FileSpec {
+                system_path: entry.system_path.clone(),
                 rel: entry.rel.clone(),
                 module: entry.module.clone(),
-                source: source.as_str().to_string(),
-                index,
             };
-            let module_constants = collect_module_constants(parsed.suite());
-            let mut visitor = CallCollector {
-                ctx: &ctx,
-                model: &model,
+            let base_fn_len = facts.functions.len();
+            let result =
+                match catch_unwind(AssertUnwindSafe(|| extract_one_file(db, &spec, &shared))) {
+                    Ok(r) => r,
+                    Err(payload) => {
+                        *db = db.fresh_empty();
+                        Pass2FileResult::skipped(&entry.rel, &panic_message(&payload))
+                    }
+                };
+            // Merge one file at a time so subsequent files see prior defs.
+            merge_pass2_results(
                 facts,
                 def_map,
-                def_map_base: None,
                 qual_map,
-                qual_map_base: None,
-                property_defs,
-                task_targets,
                 follow_targets,
-                package_meta,
-                followable_extra_roots,
-                record_unresolved_imports: true,
-                module_constants: &module_constants,
-                current_fn: None,
-                current_param_names: Vec::new(),
-                class_stack: Vec::new(),
-                fn_stack: Vec::new(),
-                dead_depth: 0,
-                loop_depth: 0,
-                branch_depth: 0,
-                cache_miss_depth: 0,
-                no_running_loop_depth: 0,
-                try_saw_get_loop: false,
-                active_param_guard: None,
-                consuming_generator: false,
-                in_lambda: false,
-                skip_lambda_body: false,
-                in_callee_position: false,
-                pending_is_awaited: false,
-                pending_with_enter: false,
-                in_eager_offload_arg: false,
-                async_with_receivers: HashMap::new(),
-                redis_family_memo: HashMap::new(),
-                occurrence_counter: HashMap::new(),
-                pending_literals: Vec::new(),
-                pending_callables: Vec::new(),
-                pending_externals: Vec::new(),
-                pending_constructed_receivers: Vec::new(),
-                pending_constructed_receiver: None,
-                pending_keyword_callables: Vec::new(),
-                narrowed_locals: HashMap::new(),
-                local_lambdas: HashMap::new(),
-                local_genexprs: HashMap::new(),
-                idle_loop_locals: HashSet::new(),
-                idle_loop_helpers: HashSet::new(),
-                unbounded_queues: HashSet::new(),
-                running_loop_locals: HashSet::new(),
-                event_loop_locals: HashSet::new(),
-            };
-            super::collector::loop_guards::collect_idle_loop_helpers(
-                parsed.suite(),
-                &mut visitor.idle_loop_helpers,
+                task_targets,
+                base_fn_len,
+                vec![result],
             );
-            for stmt in parsed.suite() {
-                visitor.visit_stmt(stmt);
-            }
         }
     }
 }

@@ -121,10 +121,8 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
             }
             Expr::Name(name) => {
                 // Consuming a locally-assigned genexpr by name.
-                if self.consuming_generator
-                    && let Some(gexpr) = self.local_genexprs.get(name.id.as_str()).copied()
-                {
-                    self.visit_comprehension_like(&gexpr.elt, None, &gexpr.generators);
+                if self.consuming_generator {
+                    self.expand_named_genexpr(name.id.as_str());
                 }
                 walk_expr(self, expr);
             }
@@ -138,7 +136,7 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
             // Bare genexpr is deferred — only walk when consumed.
             Expr::Generator(g) => {
                 if self.consuming_generator {
-                    self.visit_comprehension_like(&g.elt, None, &g.generators);
+                    self.expand_local_genexpr(g);
                 }
             }
             Expr::DictComp(dc) => {
@@ -146,5 +144,43 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
             }
             _ => walk_expr(self, expr),
         }
+    }
+}
+
+impl<'a, 'db> CallCollector<'a, 'db> {
+    /// Expand the newest non-cyclic genexpr bound to `name`.
+    ///
+    /// On `out = (sleep…); out = (x for x in out)`, expanding the second
+    /// genexpr visits `out` while the second is already in
+    /// [`Self::expanding_genexprs`] — resolve to the previous binding instead.
+    fn expand_named_genexpr(&mut self, name: &str) {
+        let Some(stack) = self.local_genexprs.get(name) else {
+            return;
+        };
+        // Newest → oldest; skip bindings already on the expand stack.
+        let chosen = stack
+            .iter()
+            .rev()
+            .copied()
+            .find(|g| !self.expanding_genexprs.contains(&std::ptr::from_ref(*g)));
+        if let Some(gexpr) = chosen {
+            self.expand_local_genexpr(gexpr);
+        }
+    }
+
+    /// Expand a genexpr under a consumer, guarding against self-referential
+    /// reassignment cycles (`out = (x for x in out)`).
+    fn expand_local_genexpr(&mut self, gexpr: &'a ruff_python_ast::ExprGenerator) {
+        if self.genexpr_expand_depth >= super::MAX_GENEXPR_EXPAND_DEPTH {
+            return;
+        }
+        let ptr = std::ptr::from_ref(gexpr);
+        if !self.expanding_genexprs.insert(ptr) {
+            return;
+        }
+        self.genexpr_expand_depth += 1;
+        self.visit_comprehension_like(&gexpr.elt, None, &gexpr.generators);
+        self.genexpr_expand_depth -= 1;
+        self.expanding_genexprs.remove(&ptr);
     }
 }
