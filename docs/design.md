@@ -140,19 +140,25 @@ FastAPI sync `def` routes already run in a thread pool — do not report them.
 | --- | --- |
 | `schemaVersion` | integer; bump on breaking changes (currently **2**) |
 | `complete` | false on timeout / parse failure; attach `skipped` |
-| `environment` | interpreter/venv/site-packages used; `note` when degraded |
+| `environment` | interpreter/venv/site-packages used; `note` when degraded (ratio-aware when a venv is active) |
 | `findings[]` / `candidates[]` / `advice[]` | always emitted (even empty); candidates have `reason`; advice is non-blocking (SARIF `note`) |
-| `locationLessCandidates[]` | always emitted; unresolved-import aggregates with empty `entry.file`/`chain` |
+| `locationLessCandidates[]` | always emitted; the missing-third-party aggregate (formerly a hidden `--show-unresolved` candidate) lives here with empty `entry.file`/`chain` and empty `why` (no `file:line` locator) |
 | `skipped[]` / `sinkSites[]` / `unusedSuppressions[]` / `unresolvedSummary[]` | always emitted (even empty) |
+| `hiddenUnresolvedCandidates` / `omittedNonProductionEntries` | always emitted, including `0` |
 | `id` | stable hash of rule + entry + sink (baseline-friendly) |
 | `rule` | e.g. `blocking-sleep`, `blocking-http` |
 | `entry` | async def location + label (`route` / `lifecycle` / `task` / `other`) |
 | `chain[]` | shortest evidence chain (`file`, `line`, `text`) |
 | `conditions[]` | e.g. `unconditional`, `loop` |
 | `fix` | hint + `fixGroupId` (shared across same root cause) |
-| `why` | runnable `async-doctor why file:line --path <relative>` |
+| `why` | runnable `async-doctor why file:line --path <cwd-relative>`; empty on location-less entries |
 
 Default output is human text (leads with environment + sink-site count); `--format json` for agents; `--format sarif` for SARIF 2.1.0.
+
+**Environment note policy:** no project venv and zero unresolved third-party →
+silent. No project venv with unresolved third-party → activate/`VIRTUAL_ENV`
+note. Active venv with unresolved/resolved third-party ratio ≥ 25% → “install
+project deps/extras” note (does not tell the user to set `VIRTUAL_ENV` again).
 
 ## Agent integration (M3)
 

@@ -25,10 +25,12 @@ resolve — without it, findings silently drop because site-packages follow cann
 see project dependencies. Then run:
 
 ```bash
-uvx async-doctor --changed
-# or, if already installed:
 async-doctor --changed
 ```
+
+Once published to PyPI, the same command works as `uvx async-doctor --changed`
+(see README install). Until then, use a wheel/`cargo install` build or an
+already-installed `async-doctor` on `PATH`.
 
 Fix every **finding** before finishing. Candidates and advice do not fail the
 exit code; findings do.
@@ -42,9 +44,9 @@ exit code; findings do.
 ## For a full cleanup
 
 ```bash
-uvx async-doctor .
-uvx async-doctor --format json .
-uvx async-doctor --expand .   # show all advice (default text caps the list)
+async-doctor .
+async-doctor --format json .
+async-doctor --expand .   # show all advice (default text caps the list)
 ```
 
 JSON includes `environment` (interpreter/venv/site-packages) and additive

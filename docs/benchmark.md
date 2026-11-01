@@ -55,6 +55,13 @@ Libraries such as httpx / starlette / fastapi are mostly already async, so
 zero findings is expected; litellm exercises site-packages follow and
 third-party rules under a real uv venv.
 
+### Full-repo memory (pre-release audit, 1 Nov 2026)
+
+Scanning the **entire** litellm clone (**8686** `.py` files, with venv) peaked
+around **~6.9 GB** RSS on this VM. The table above’s `litellm/` subdirectory
+scan (~3009 files) peaked around **~2.2–2.3 GB**. Prefer a package subdirectory
+when memory is tight.
+
 ## Reproduce
 
 ```bash
