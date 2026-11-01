@@ -41,7 +41,8 @@ exclude = [
     "docs/**",
     "bench/**",
     "skills/**",
-    ".cursor/**",
+    ".agents/**",
+    ".claude/**",
     ".github/**",
 ]
 
