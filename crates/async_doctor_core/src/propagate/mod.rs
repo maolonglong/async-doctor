@@ -7,7 +7,7 @@ mod special;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use crate::graph::{
     AnalyzeOptions, CallKind, CalleeRef, ConditionTag, FunctionId, ParamGuard, ProjectFacts,
@@ -20,7 +20,7 @@ use crate::report::{
 
 use advice::collect_offload_twin_advice;
 use grade::{
-    ParamVerdict, async_twin_hint, chain_step_for, evaluate_param_guards, label_rank,
+    ParamVerdict, PathToEntry, async_twin_hint, chain_step_for, evaluate_param_guards, label_rank,
     merge_file_io_findings, merge_same_line_ctor_call_findings, reconcile_conditions,
     resolution_for_edge, shortest_paths_to_async_entries, unresolved_pattern,
 };
@@ -103,18 +103,20 @@ pub fn analyze_with_options(
         sink_sites: Vec::new(),
     };
 
-    // BTreeMap + sorted preds so reverse-graph walk order is stable across
+    // Dense vec + sorted preds so reverse-graph walk order is stable across
     // cold extract vs warm cache materialization (edge insertion order differs).
-    let mut reverse: BTreeMap<FunctionId, Vec<usize>> = BTreeMap::new();
+    let mut reverse: Vec<Vec<usize>> = vec![Vec::new(); facts.functions.len()];
     for (idx, edge) in facts.edges.iter().enumerate() {
         if edge.is_offload_wrapper {
             continue;
         }
-        if let CalleeRef::Project(callee) = edge.callee {
-            reverse.entry(callee).or_default().push(idx);
+        if let CalleeRef::Project(callee) = edge.callee
+            && let Some(slot) = reverse.get_mut(callee.index())
+        {
+            slot.push(idx);
         }
     }
-    for idxs in reverse.values_mut() {
+    for idxs in &mut reverse {
         idxs.sort_by(|&a, &b| {
             let ea = &facts.edges[a];
             let eb = &facts.edges[b];
@@ -200,11 +202,14 @@ pub fn analyze_with_options(
     let mut omitted_entries: HashSet<FunctionId> = HashSet::new();
     let mut raw_findings: Vec<Finding> = Vec::new();
     let mut raw_candidates: Vec<Candidate> = Vec::new();
+    let mut paths_cache: HashMap<FunctionId, Vec<PathToEntry>> = HashMap::new();
 
     for seed in seeds {
         let seed_edge = &facts.edges[seed.edge_idx];
         let seed_caller = seed_edge.caller;
-        let paths = shortest_paths_to_async_entries(facts, &reverse, seed_caller);
+        let paths = paths_cache
+            .entry(seed_caller)
+            .or_insert_with(|| shortest_paths_to_async_entries(facts, &reverse, seed_caller));
 
         for path in paths {
             let entry_id = path.entry;
@@ -295,7 +300,7 @@ pub fn analyze_with_options(
             let conditions = reconcile_conditions(&condition_tags);
 
             // Parameter-controlled sink: demote unless the guarding arg is provably truthy.
-            let param_verdict = evaluate_param_guards(facts, &path, &param_guards);
+            let param_verdict = evaluate_param_guards(facts, path, &param_guards);
             if param_verdict == ParamVerdict::ProvablyFalse {
                 continue;
             }
@@ -373,7 +378,7 @@ pub fn analyze_with_options(
                              rather than calling it (`to_thread(f())`)."
                         );
                     }
-                    if let Some(twin) = async_twin_hint(facts, entry_id, &path) {
+                    if let Some(twin) = async_twin_hint(facts, entry_id, path) {
                         hint = format!("{hint} Async twin available: `{twin}`.");
                     }
 

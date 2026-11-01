@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
-use async_doctor_core::{CallEdge, CalleeRef, EntryLabel, FunctionId, ProjectFacts};
+use async_doctor_core::{CalleeRef, EntryLabel, FunctionId, ProjectFacts};
 use ruff_db::files::system_path_to_file;
 use ruff_db::parsed::parsed_module;
 use ruff_db::source::{line_index, source_text};
@@ -192,13 +192,6 @@ pub(crate) fn extract_files(
     let batch_mode = pass2_batch_mode();
     if matches!(batch_mode, Pass2BatchMode::None) && !entries.is_empty() {
         let base_fn_len = facts.functions.len();
-        let shared = Pass2Shared {
-            functions: std::sync::Arc::new(facts.functions.clone()),
-            def_map: std::sync::Arc::new(def_map.clone()),
-            qual_map: std::sync::Arc::new(qual_map.clone()),
-            property_defs: std::sync::Arc::new(property_defs.clone()),
-            followable_extra_roots: std::sync::Arc::new(followable_extra_roots.clone()),
-        };
         let specs: Vec<Pass2FileSpec> = entries
             .iter()
             .map(|e| Pass2FileSpec {
@@ -207,7 +200,16 @@ pub(crate) fn extract_files(
                 module: e.module.clone(),
             })
             .collect();
-        let results = run_pass2_parallel(&db, &specs, &shared);
+        let results = {
+            let shared = Pass2Shared {
+                functions: &facts.functions,
+                def_map: &def_map,
+                qual_map: &qual_map,
+                property_defs: &property_defs,
+                followable_extra_roots: &followable_extra_roots,
+            };
+            run_pass2_parallel(&db, &specs, &shared)
+        };
         merge_pass2_results(
             &mut facts,
             &mut def_map,
@@ -244,7 +246,7 @@ pub(crate) fn extract_files(
     db = db.fresh_empty();
 
     follow_third_party(
-        &db,
+        &mut db,
         &mut facts,
         &mut def_map,
         &mut qual_map,
@@ -366,42 +368,56 @@ fn stabilize_facts(facts: &mut ProjectFacts) {
     facts.resolved_third_party_modules.sort();
     facts.resolved_third_party_modules.dedup();
 
-    let project_keys: Vec<String> = facts
-        .functions
-        .iter()
-        .map(|f| format!("{}:{}", f.module, f.qualname))
-        .collect();
-    let callee_key = |e: &CallEdge| -> String {
-        match &e.callee {
-            CalleeRef::External { qualname } => format!("E:{qualname}"),
-            CalleeRef::Unresolved { reason } => format!("U:{reason}"),
-            CalleeRef::Offload(k) => format!("O:{}", k.as_str()),
-            CalleeRef::ParamInvoke { index } => format!("I:{index}"),
-            CalleeRef::Project(id) => format!(
-                "P:{}",
-                project_keys
-                    .get(id.index())
-                    .map(String::as_str)
-                    .unwrap_or("")
-            ),
-        }
+    let functions = &facts.functions;
+    let cmp_callee = |ca: &CalleeRef, cb: &CalleeRef| -> std::cmp::Ordering {
+        let tag = |c: &CalleeRef| -> u8 {
+            match c {
+                CalleeRef::External { .. } => b'E',
+                CalleeRef::ParamInvoke { .. } => b'I',
+                CalleeRef::Offload(_) => b'O',
+                CalleeRef::Project(_) => b'P',
+                CalleeRef::Unresolved { .. } => b'U',
+            }
+        };
+        tag(ca).cmp(&tag(cb)).then_with(|| match (ca, cb) {
+            (CalleeRef::External { qualname: qa }, CalleeRef::External { qualname: qb }) => {
+                qa.as_str().cmp(qb.as_str())
+            }
+            (CalleeRef::ParamInvoke { index: ia }, CalleeRef::ParamInvoke { index: ib }) => {
+                if ia == ib {
+                    std::cmp::Ordering::Equal
+                } else {
+                    ia.to_string().cmp(&ib.to_string())
+                }
+            }
+            (CalleeRef::Offload(ka), CalleeRef::Offload(kb)) => ka.as_str().cmp(kb.as_str()),
+            (CalleeRef::Project(ida), CalleeRef::Project(idb)) => {
+                if ida == idb {
+                    return std::cmp::Ordering::Equal;
+                }
+                let fa = functions.get(ida.index());
+                let fb = functions.get(idb.index());
+                match (fa, fb) {
+                    (Some(fa), Some(fb)) => fa
+                        .module
+                        .as_str()
+                        .cmp(fb.module.as_str())
+                        .then_with(|| fa.qualname.as_str().cmp(fb.qualname.as_str())),
+                    (Some(_), None) => std::cmp::Ordering::Greater,
+                    (None, Some(_)) => std::cmp::Ordering::Less,
+                    (None, None) => std::cmp::Ordering::Equal,
+                }
+            }
+            (CalleeRef::Unresolved { reason: ra }, CalleeRef::Unresolved { reason: rb }) => {
+                ra.as_str().cmp(rb.as_str())
+            }
+            _ => std::cmp::Ordering::Equal,
+        })
     };
     facts.edges.sort_by(|a, b| {
-        (
-            a.file.as_str(),
-            a.line,
-            a.occurrence,
-            a.text.as_str(),
-            callee_key(a),
-            a.caller.0,
-        )
-            .cmp(&(
-                b.file.as_str(),
-                b.line,
-                b.occurrence,
-                b.text.as_str(),
-                callee_key(b),
-                b.caller.0,
-            ))
+        (a.file.as_str(), a.line, a.occurrence, a.text.as_str())
+            .cmp(&(b.file.as_str(), b.line, b.occurrence, b.text.as_str()))
+            .then_with(|| cmp_callee(&a.callee, &b.callee))
+            .then_with(|| a.caller.0.cmp(&b.caller.0))
     });
 }

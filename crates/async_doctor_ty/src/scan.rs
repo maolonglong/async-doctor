@@ -11,7 +11,7 @@ use async_doctor_rules::BuiltinSinkTable;
 
 use crate::cache::effective_cache_root;
 use crate::extract::{
-    DEFAULT_FOLLOW_BUDGET, absolute_utf8, discover_python_files, discover_python_stub_files,
+    DEFAULT_FOLLOW_BUDGET, absolute_utf8, discover_python_and_stub_files, extract_discovered_files,
     extract_path_with_cache_budget,
 };
 use crate::scan_cache::{load_scan_report, save_scan_report, scan_input_fingerprint};
@@ -76,12 +76,9 @@ fn scan_path_with_options_cache_budget(
         (parent, vec![abs.as_std_path().to_path_buf()])
     } else {
         let root = abs.as_std_path().to_path_buf();
-        // Fingerprint .py and .pyi (same ignore rules). Extract still walks
-        // only .py; stubs affect ty resolution via the filesystem.
-        let mut files = discover_python_files(&root)?;
-        files.extend(discover_python_stub_files(&root)?);
-        files.sort();
-        files.dedup();
+        // Fingerprint .py and .pyi in a single walk (same ignore rules).
+        // Extract still walks only .py; stubs affect ty resolution via the filesystem.
+        let files = discover_python_and_stub_files(&root)?;
         (root, files)
     };
     timing.span("discovery", t_disc);
@@ -108,7 +105,15 @@ fn scan_path_with_options_cache_budget(
     timing.span("scan_cache_miss", t_load);
 
     let t_extract = Instant::now();
-    let facts = extract_path_with_cache_budget(path, cache_dir, follow_budget)?;
+    let facts = if abs.as_std_path().is_file() {
+        extract_path_with_cache_budget(path, cache_dir, follow_budget)?
+    } else {
+        let py_files: Vec<std::path::PathBuf> = fingerprint_files
+            .into_iter()
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("py"))
+            .collect();
+        extract_discovered_files(&abs, py_files, cache_dir, follow_budget)?
+    };
     timing.span("extract", t_extract);
 
     let t_analyze = Instant::now();

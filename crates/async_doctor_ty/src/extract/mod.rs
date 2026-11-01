@@ -20,10 +20,10 @@ use ruff_db::system::{SystemPath, SystemPathBuf};
 
 use files::extract_files;
 
-pub use path::{discover_python_files, discover_python_stub_files};
+pub use path::discover_python_files;
 
 pub(crate) use follow::DEFAULT_FOLLOW_BUDGET;
-pub(crate) use path::absolute_utf8;
+pub(crate) use path::{absolute_utf8, discover_python_and_stub_files};
 
 /// Default third-party follow budget (test seam — not public API).
 #[cfg(test)]
@@ -70,10 +70,19 @@ pub(crate) fn extract_path_with_cache_budget(
     // Only walk the scan root for first-party entries. Outside editable roots
     // stay on the search path and are followed like site-packages when called.
     let files = discover_python_files(path.as_std_path())?;
+    extract_discovered_files(&path, files, cache_dir, follow_budget)
+}
+
+pub(crate) fn extract_discovered_files(
+    path: &SystemPath,
+    files: Vec<std::path::PathBuf>,
+    cache_dir: Option<&Path>,
+    follow_budget: usize,
+) -> anyhow::Result<ProjectFacts> {
     if files.is_empty() {
         // Discover before returning so cold empty scans match warm cache hits
         // (which refresh `environment` via `discover_scan_environment`).
-        let environment = crate::env_info::discover_scan_environment(&path)?;
+        let environment = crate::env_info::discover_scan_environment(path)?;
         return Ok(ProjectFacts {
             complete: true,
             no_python_files: true,
@@ -81,5 +90,5 @@ pub(crate) fn extract_path_with_cache_budget(
             ..ProjectFacts::default()
         });
     }
-    extract_files(&path, files, cache_dir, follow_budget)
+    extract_files(path, files, cache_dir, follow_budget)
 }

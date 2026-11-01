@@ -139,7 +139,9 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
         suppressed_by_baseline = n;
     }
 
-    report.refresh_sink_sites();
+    if suppressed_by_ignore > 0 || cli.changed.is_some() || suppressed_by_baseline > 0 {
+        report.refresh_sink_sites();
+    }
 
     match cli.format {
         Format::Text => text::write_report(
@@ -152,9 +154,10 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
         )?,
         Format::Json => {
             let stdout = std::io::stdout();
-            let mut out = stdout.lock();
+            let mut out = std::io::BufWriter::with_capacity(64 * 1024, stdout.lock());
             serde_json::to_writer_pretty(&mut out, &report)?;
             writeln!(out)?;
+            out.flush()?;
         }
         Format::Sarif => {
             let src_root = repo_root_for_sarif
@@ -162,9 +165,10 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
                 .unwrap_or(scan_root.as_path());
             let doc = sarif::report_to_sarif(&report, &scan_root, src_root);
             let stdout = std::io::stdout();
-            let mut out = stdout.lock();
+            let mut out = std::io::BufWriter::with_capacity(64 * 1024, stdout.lock());
             serde_json::to_writer_pretty(&mut out, &doc)?;
             writeln!(out)?;
+            out.flush()?;
         }
     }
 

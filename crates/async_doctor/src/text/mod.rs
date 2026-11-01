@@ -27,7 +27,8 @@ pub struct TextOptions {
 }
 
 pub fn write_report(report: &Report, opts: TextOptions) -> anyhow::Result<()> {
-    let mut out = std::io::stdout().lock();
+    let stdout = std::io::stdout();
+    let mut out = std::io::BufWriter::with_capacity(64 * 1024, stdout.lock());
     write_environment_banner(&mut out, &report.environment)?;
     if let Some(msg) = &report.message {
         writeln!(out, "{msg}")?;
@@ -148,6 +149,7 @@ pub fn write_report(report: &Report, opts: TextOptions) -> anyhow::Result<()> {
     if !note.is_empty() {
         writeln!(out, "\nnote: {note}")?;
     }
+    out.flush()?;
     Ok(())
 }
 

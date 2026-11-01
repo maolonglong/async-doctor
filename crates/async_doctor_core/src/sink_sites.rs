@@ -14,69 +14,70 @@ use crate::report::{Finding, SinkSiteSummary};
 /// Build an additive `sinkSites` summary from findings (largest sites first).
 pub fn summarize(findings: &[Finding]) -> Vec<SinkSiteSummary> {
     // (fix_group_id, file, line) → aggregate — BTreeMap for stable order.
-    let mut sites: BTreeMap<(String, String, u32), SiteAcc> = BTreeMap::new();
+    let mut sites: BTreeMap<(&str, &str, u32), SiteAcc<'_>> = BTreeMap::new();
 
-    for f in findings {
+    for (f_idx, f) in findings.iter().enumerate() {
         let Some(last) = f.chain.last() else {
             continue;
         };
-        let key = (f.fix.fix_group_id.clone(), last.file.clone(), last.line);
+        let key = (f.fix.fix_group_id.as_str(), last.file.as_str(), last.line);
         let acc = sites.entry(key).or_insert_with(|| SiteAcc {
-            rule: f.rule.clone(),
-            fix_group_id: f.fix.fix_group_id.clone(),
-            file: last.file.clone(),
+            rule: f.rule.as_str(),
+            fix_group_id: f.fix.fix_group_id.as_str(),
+            file: last.file.as_str(),
             line: last.line,
-            text: last.text.clone(),
+            text: last.text.as_str(),
             finding_count: 0,
             entries: BTreeSet::new(),
             intermediates: BTreeMap::new(),
         });
         acc.finding_count += 1;
         acc.entries
-            .insert((f.entry.file.clone(), f.entry.name.clone()));
+            .insert((f.entry.file.as_str(), f.entry.name.as_str()));
         let n = f.chain.len();
         if n >= 2 {
             for step in &f.chain[..n - 1] {
-                let ikey = (step.file.clone(), step.line, step.text.clone());
-                acc.intermediates
-                    .entry(ikey)
-                    .or_default()
-                    .insert(f.id.clone());
+                let ikey = (step.file.as_str(), step.line, step.text.as_str());
+                let entry = acc.intermediates.entry(ikey).or_insert((0, usize::MAX));
+                if entry.1 != f_idx {
+                    entry.0 += 1;
+                    entry.1 = f_idx;
+                }
             }
         }
     }
 
     // Within each fix group, count how many sites share each entry set.
-    let mut set_counts: BTreeMap<(String, String), u32> = BTreeMap::new();
-    let mut site_set_ids: BTreeMap<(String, String, u32), String> = BTreeMap::new();
-    for ((gid, file, line), acc) in &sites {
+    let mut set_counts: BTreeMap<(&str, String), u32> = BTreeMap::new();
+    let mut site_set_ids: BTreeMap<(&str, &str, u32), String> = BTreeMap::new();
+    for (&(gid, file, line), acc) in &sites {
         let set_id = entry_set_id(&acc.entries);
-        *set_counts.entry((gid.clone(), set_id.clone())).or_default() += 1;
-        site_set_ids.insert((gid.clone(), file.clone(), *line), set_id);
+        *set_counts.entry((gid, set_id.clone())).or_default() += 1;
+        site_set_ids.insert((gid, file, line), set_id);
     }
 
     let mut out: Vec<SinkSiteSummary> = sites
         .into_iter()
         .map(|(key, acc)| {
-            let set_id = site_set_ids.get(&key).cloned().unwrap_or_default();
+            let set_id = site_set_ids.remove(&key).unwrap_or_default();
             let shared = set_counts
-                .get(&(acc.fix_group_id.clone(), set_id.clone()))
+                .get(&(acc.fix_group_id, set_id.clone()))
                 .copied()
                 .unwrap_or(1);
             let choke = dominant_choke(&acc);
             SinkSiteSummary {
-                rule: acc.rule,
-                fix_group_id: acc.fix_group_id,
-                file: acc.file,
+                rule: acc.rule.to_string(),
+                fix_group_id: acc.fix_group_id.to_string(),
+                file: acc.file.to_string(),
                 line: acc.line,
-                text: acc.text,
+                text: acc.text.to_string(),
                 finding_count: acc.finding_count,
                 entry_count: acc.entries.len() as u32,
                 entry_set_id: set_id,
                 shared_entry_site_count: shared,
-                choke_point_file: choke.as_ref().map(|c| c.0.clone()).unwrap_or_default(),
+                choke_point_file: choke.as_ref().map(|c| c.0.to_string()).unwrap_or_default(),
                 choke_point_line: choke.as_ref().map(|c| c.1).unwrap_or(0),
-                choke_point_text: choke.as_ref().map(|c| c.2.clone()).unwrap_or_default(),
+                choke_point_text: choke.as_ref().map(|c| c.2.to_string()).unwrap_or_default(),
                 choke_point_finding_count: choke.as_ref().map(|c| c.3).unwrap_or(0),
             }
         })
@@ -93,7 +94,7 @@ pub fn summarize(findings: &[Finding]) -> Vec<SinkSiteSummary> {
     out
 }
 
-fn entry_set_id(entries: &BTreeSet<(String, String)>) -> String {
+fn entry_set_id(entries: &BTreeSet<(&str, &str)>) -> String {
     let mut h = Sha256::new();
     for (f, n) in entries {
         h.update(f.as_bytes());
@@ -104,32 +105,31 @@ fn entry_set_id(entries: &BTreeSet<(String, String)>) -> String {
     format!("{:x}", h.finalize())[..16].to_string()
 }
 
-struct SiteAcc {
-    rule: String,
-    fix_group_id: String,
-    file: String,
+struct SiteAcc<'a> {
+    rule: &'a str,
+    fix_group_id: &'a str,
+    file: &'a str,
     line: u32,
-    text: String,
+    text: &'a str,
     finding_count: u32,
-    entries: BTreeSet<(String, String)>,
-    intermediates: BTreeMap<(String, u32, String), BTreeSet<String>>,
+    entries: BTreeSet<(&'a str, &'a str)>,
+    intermediates: BTreeMap<(&'a str, u32, &'a str), (u32, usize)>,
 }
 
 /// An intermediate hop dominates when it covers ≥50% of findings at the site
 /// and at least 2 findings (avoid noise on tiny sites).
-fn dominant_choke(acc: &SiteAcc) -> Option<(String, u32, String, u32)> {
+fn dominant_choke<'a>(acc: &SiteAcc<'a>) -> Option<(&'a str, u32, &'a str, u32)> {
     if acc.finding_count < 2 {
         return None;
     }
-    let mut best: Option<(String, u32, String, u32)> = None;
-    for ((file, line, text), ids) in &acc.intermediates {
-        let n = ids.len() as u32;
-        let better = match &best {
+    let mut best: Option<(&'a str, u32, &'a str, u32)> = None;
+    for (&(file, line, text), &(n, _)) in &acc.intermediates {
+        let better = match best {
             None => true,
-            Some((bf, bl, bt, bn)) => n > *bn || (n == *bn && (file, line, text) < (bf, bl, bt)),
+            Some((bf, bl, bt, bn)) => n > bn || (n == bn && (file, line, text) < (bf, bl, bt)),
         };
         if better {
-            best = Some((file.clone(), *line, text.clone(), n));
+            best = Some((file, line, text, n));
         }
     }
     let (file, line, text, n) = best?;

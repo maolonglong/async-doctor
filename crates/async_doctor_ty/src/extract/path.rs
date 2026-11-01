@@ -22,13 +22,9 @@ pub fn discover_python_files(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
     discover_first_party_files(root, &["py"])
 }
 
-/// Discover first-party `.pyi` stub files under `root` with the same ignore
-/// rules as [`discover_python_files`].
-///
-/// Used by the whole-scan fingerprint so stub add/edit/delete invalidates
-/// warm hits (ty resolves against stubs even when extract walks only `.py`).
-pub fn discover_python_stub_files(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    discover_first_party_files(root, &["pyi"])
+/// Discover first-party `.py` and `.pyi` files in a single walk.
+pub(crate) fn discover_python_and_stub_files(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    discover_first_party_files(root, &["py", "pyi"])
 }
 
 fn discover_first_party_files(root: &Path, extensions: &[&str]) -> anyhow::Result<Vec<PathBuf>> {
@@ -38,6 +34,15 @@ fn discover_first_party_files(root: &Path, extensions: &[&str]) -> anyhow::Resul
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true)
+        .filter_entry(|entry| {
+            if entry.depth() == 0 {
+                return true;
+            }
+            !matches!(
+                entry.file_name().to_str(),
+                Some(".venv" | "venv" | "site-packages" | "__pycache__" | ".git" | "target")
+            )
+        })
         .build();
 
     for entry in walker {

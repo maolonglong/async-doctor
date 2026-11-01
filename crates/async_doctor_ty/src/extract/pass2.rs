@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use async_doctor_core::{
     CallEdge, CalleeRef, FunctionFact, FunctionId, ProjectFacts, UnresolvedImport,
@@ -29,12 +29,12 @@ use super::ctx::{DefKey, FileCtx, TaskTargets};
 use super::panic_util::panic_message;
 
 /// Inputs shared read-only across pass-2 workers.
-pub(crate) struct Pass2Shared {
-    pub functions: Arc<Vec<FunctionFact>>,
-    pub def_map: Arc<HashMap<DefKey, FunctionId>>,
-    pub qual_map: Arc<HashMap<(String, String), FunctionId>>,
-    pub property_defs: Arc<HashSet<DefKey>>,
-    pub followable_extra_roots: Arc<Vec<PathBuf>>,
+pub(crate) struct Pass2Shared<'a> {
+    pub functions: &'a [FunctionFact],
+    pub def_map: &'a HashMap<DefKey, FunctionId>,
+    pub qual_map: &'a HashMap<(String, String), FunctionId>,
+    pub property_defs: &'a HashSet<DefKey>,
+    pub followable_extra_roots: &'a [PathBuf],
 }
 
 pub(crate) struct Pass2FileSpec {
@@ -235,18 +235,18 @@ pub(crate) fn extract_one_file(
         &model,
         &mut facts,
         &mut def_map,
-        Some(shared.def_map.as_ref()),
+        Some(shared.def_map),
         &mut qual_map,
-        Some(shared.qual_map.as_ref()),
-        &shared.property_defs,
+        Some(shared.qual_map),
+        shared.property_defs,
         &mut task_targets,
         &mut follow_targets,
         &mut package_meta,
-        &shared.followable_extra_roots,
+        shared.followable_extra_roots,
         true,
         &module_constants,
     );
-    visitor.functions_base = Some(shared.functions.as_slice());
+    visitor.functions_base = Some(shared.functions);
     super::collector::loop_guards::collect_idle_loop_helpers(
         parsed.suite(),
         &mut visitor.idle_loop_helpers,

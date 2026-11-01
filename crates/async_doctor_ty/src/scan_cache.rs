@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cache::{
     CACHE_SCHEMA_VERSION, TOOL_VERSION, build_id, package_content_fingerprint, sanitize_component,
+    short_hash,
 };
 
 /// On-disk envelope so stale schema/tool versions never deserialize as a hit.
@@ -106,16 +107,35 @@ pub fn scan_input_fingerprint(
         .unwrap_or_else(|_| scan_root.to_path_buf());
     blob.push_str(&format!("root:{}\n", root_canon.display()));
 
-    let mut files: Vec<(String, String)> = Vec::with_capacity(first_party_files.len());
-    for path in first_party_files {
+    let fp_one = |path: &PathBuf| -> (String, String) {
         let rel = path
             .strip_prefix(&root_canon)
             .or_else(|_| path.strip_prefix(scan_root))
             .unwrap_or(path);
         let rel = rel.to_string_lossy().replace('\\', "/");
         let fp = content_fingerprint(path).unwrap_or_else(|| "0".to_string());
-        files.push((rel, fp));
-    }
+        (rel, fp)
+    };
+    let mut files: Vec<(String, String)> = if first_party_files.len() >= 64 {
+        let nthreads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .min(8);
+        let chunk_size = first_party_files.len().div_ceil(nthreads).max(1);
+        std::thread::scope(|s| {
+            let handles: Vec<_> = first_party_files
+                .chunks(chunk_size)
+                .map(|chunk| s.spawn(move || chunk.iter().map(fp_one).collect::<Vec<_>>()))
+                .collect();
+            let mut out = Vec::with_capacity(first_party_files.len());
+            for h in handles {
+                out.extend(h.join().expect("fingerprint worker"));
+            }
+            out
+        })
+    } else {
+        first_party_files.iter().map(fp_one).collect()
+    };
     files.sort();
     for (rel, fp) in &files {
         // Tag by extension so .py vs .pyi with the same stem cannot collide.
@@ -266,15 +286,6 @@ fn fingerprint_site_packages(venv_prefix: &Path) -> Vec<String> {
         }
     }
     out
-}
-
-fn short_hash(bytes: &[u8]) -> String {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for b in bytes {
-        hash ^= u64::from(*b);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("{hash:016x}")
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 //! Grading helpers: conditions, param guards, file-IO merge, shortest paths.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::graph::{CalleeRef, ConditionTag, FunctionId, LiteralArg, ParamGuard, ProjectFacts};
 use crate::report::{ChainStep, EntryLabel, Finding};
@@ -216,6 +216,13 @@ pub(super) fn merge_file_io_findings(findings: Vec<Finding>) -> Vec<Finding> {
             name: o.entry.name.clone(),
         })
         .collect();
+    let mut opens_by_entry: HashMap<(&str, &str), Vec<usize>> = HashMap::new();
+    for (oi, meta) in open_meta.iter().enumerate() {
+        opens_by_entry
+            .entry((meta.file.as_str(), meta.name.as_str()))
+            .or_default()
+            .push(oi);
+    }
     let mut absorbed: HashSet<usize> = HashSet::new();
     for (i, rw) in others.iter().enumerate() {
         if rw.rule != "blocking-file"
@@ -223,13 +230,16 @@ pub(super) fn merge_file_io_findings(findings: Vec<Finding>) -> Vec<Finding> {
         {
             continue;
         }
+        let Some(candidate_opens) =
+            opens_by_entry.get(&(rw.entry.file.as_str(), rw.entry.name.as_str()))
+        else {
+            continue;
+        };
         let rw_line = rw.chain.last().map(|c| c.line).unwrap_or(0);
         let rw_prefix = chain_prefix_before_sink(&rw.chain);
         let mut best: Option<usize> = None;
-        for (oi, meta) in open_meta.iter().enumerate() {
-            if rw.entry.file != meta.file || rw.entry.name != meta.name {
-                continue;
-            }
+        for &oi in candidate_opens {
+            let meta = &open_meta[oi];
             if meta.prefix != rw_prefix {
                 continue;
             }
@@ -307,45 +317,56 @@ pub(super) fn merge_same_line_ctor_call_findings(findings: Vec<Finding>) -> Vec<
         return findings;
     }
     let n = findings.len();
+    let mut buckets: HashMap<(&str, &str, &str, u32), Vec<usize>> = HashMap::new();
+    for (i, f) in findings.iter().enumerate() {
+        if let Some(sink) = f.chain.last() {
+            buckets
+                .entry((
+                    f.entry.file.as_str(),
+                    f.entry.name.as_str(),
+                    sink.file.as_str(),
+                    sink.line,
+                ))
+                .or_default()
+                .push(i);
+        }
+    }
     let mut drop_ctor: HashSet<usize> = HashSet::new();
     let mut absorb_into: HashMap<usize, Vec<usize>> = HashMap::new();
-    for i in 0..n {
-        if drop_ctor.contains(&i) {
+    for group in buckets.values() {
+        if group.len() < 2 {
             continue;
         }
-        let Some(i_sink) = findings[i].chain.last() else {
-            continue;
-        };
-        for j in (i + 1)..n {
-            if drop_ctor.contains(&j) {
+        for (pos_a, &i) in group.iter().enumerate() {
+            if drop_ctor.contains(&i) {
                 continue;
             }
-            if findings[i].entry.file != findings[j].entry.file
-                || findings[i].entry.name != findings[j].entry.name
-            {
-                continue;
-            }
-            let Some(j_sink) = findings[j].chain.last() else {
+            let Some(i_sink) = findings[i].chain.last() else {
                 continue;
             };
-            if i_sink.file != j_sink.file || i_sink.line != j_sink.line {
-                continue;
+            for &j in &group[(pos_a + 1)..] {
+                if drop_ctor.contains(&j) {
+                    continue;
+                }
+                let Some(j_sink) = findings[j].chain.last() else {
+                    continue;
+                };
+                let (method_i, ctor_i) = if i_sink.text.contains(j_sink.text.as_str())
+                    && i_sink.text.len() > j_sink.text.len()
+                    && looks_like_ctor_call_text(&j_sink.text)
+                {
+                    (i, j)
+                } else if j_sink.text.contains(i_sink.text.as_str())
+                    && j_sink.text.len() > i_sink.text.len()
+                    && looks_like_ctor_call_text(&i_sink.text)
+                {
+                    (j, i)
+                } else {
+                    continue;
+                };
+                drop_ctor.insert(ctor_i);
+                absorb_into.entry(method_i).or_default().push(ctor_i);
             }
-            let (method_i, ctor_i) = if i_sink.text.contains(j_sink.text.as_str())
-                && i_sink.text.len() > j_sink.text.len()
-                && looks_like_ctor_call_text(&j_sink.text)
-            {
-                (i, j)
-            } else if j_sink.text.contains(i_sink.text.as_str())
-                && j_sink.text.len() > i_sink.text.len()
-                && looks_like_ctor_call_text(&i_sink.text)
-            {
-                (j, i)
-            } else {
-                continue;
-            };
-            drop_ctor.insert(ctor_i);
-            absorb_into.entry(method_i).or_default().push(ctor_i);
         }
     }
     if drop_ctor.is_empty() {
@@ -405,7 +426,7 @@ pub(super) struct PathToEntry {
 
 pub(super) fn shortest_paths_to_async_entries(
     facts: &ProjectFacts,
-    reverse: &BTreeMap<FunctionId, Vec<usize>>,
+    reverse: &[Vec<usize>],
     seed_caller: FunctionId,
 ) -> Vec<PathToEntry> {
     let seed_fn = facts.function(seed_caller);
@@ -432,7 +453,7 @@ pub(super) fn shortest_paths_to_async_entries(
     let mut entries = Vec::new();
 
     while let Some((node, required)) = queue.pop_front() {
-        let Some(preds) = reverse.get(&node) else {
+        let Some(preds) = reverse.get(node.index()) else {
             continue;
         };
         for &edge_idx in preds {

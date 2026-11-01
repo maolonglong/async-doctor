@@ -48,17 +48,53 @@ pub fn apply(mut report: Report, root: &Path) -> anyhow::Result<SuppressOutcome>
     let files = files_to_scan(&report, root)?;
     let mut by_file: HashMap<String, Vec<Suppression>> = HashMap::new();
     let mut missing_reason = Vec::new();
-    for file in files {
-        let rel = relativize(root, &file);
-        let text = match fs::read_to_string(&file) {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
+    let scan_one = |file: &PathBuf| -> Option<(String, ParseResult)> {
+        let text = fs::read_to_string(file).ok()?;
+        if !text.contains("async-doctor") {
+            return None;
+        }
+        let rel = relativize(root, file);
         let parsed = parse_file(&rel, &text);
+        if parsed.suppressions.is_empty() && parsed.missing_reason.is_empty() {
+            return None;
+        }
+        Some((rel, parsed))
+    };
+    let hits: Vec<(String, ParseResult)> = if files.len() >= 64 {
+        let nthreads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .min(8);
+        let chunk_size = files.len().div_ceil(nthreads).max(1);
+        std::thread::scope(|s| {
+            let handles: Vec<_> = files
+                .chunks(chunk_size)
+                .map(|chunk| s.spawn(move || chunk.iter().filter_map(scan_one).collect::<Vec<_>>()))
+                .collect();
+            let mut out = Vec::new();
+            for h in handles {
+                out.extend(h.join().expect("suppress worker"));
+            }
+            out
+        })
+    } else {
+        files.iter().filter_map(scan_one).collect()
+    };
+    for (rel, parsed) in hits {
         missing_reason.extend(parsed.missing_reason);
         if !parsed.suppressions.is_empty() {
             by_file.insert(rel, parsed.suppressions);
         }
+    }
+
+    if by_file.is_empty() {
+        missing_reason.sort_by(|a, b| (&a.file, a.line, &a.rule).cmp(&(&b.file, b.line, &b.rule)));
+        report.unused_suppressions = Vec::new();
+        return Ok(SuppressOutcome {
+            report,
+            suppressed_findings: 0,
+            missing_reason,
+        });
     }
 
     let mut used: HashSet<(String, u32, String)> = HashSet::new();
@@ -315,12 +351,15 @@ fn parse_ignore_comment(comment: &str) -> IgnoreParse {
     }
 }
 
-fn files_to_scan(report: &Report, root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+fn files_to_scan<'a>(report: &'a Report, root: &Path) -> anyhow::Result<Vec<PathBuf>> {
     let mut paths = HashSet::new();
-    let add = |paths: &mut HashSet<PathBuf>, rel: &str| {
-        let p = root.join(rel);
-        if p.is_file() {
-            paths.insert(p);
+    let mut rel_seen: HashSet<&'a str> = HashSet::new();
+    let mut add = |paths: &mut HashSet<PathBuf>, rel: &'a str| {
+        if !rel.is_empty() && rel_seen.insert(rel) {
+            let p = root.join(rel);
+            if p.is_file() {
+                paths.insert(p);
+            }
         }
     };
     // Finding / candidate locations (entry + chain hops) — suppressions apply there.

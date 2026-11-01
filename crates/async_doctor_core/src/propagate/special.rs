@@ -1,10 +1,8 @@
 //! Special finding rules: `nested-event-loop` and `offload-coroutine`.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 
-use crate::graph::{
-    CalleeRef, ConditionTag, FunctionId, ProjectFacts, is_non_production_entry_path,
-};
+use crate::graph::{CalleeRef, ConditionTag, ProjectFacts, is_non_production_entry_path};
 use crate::id::{FindingIdParts, finding_id, fix_group_id};
 use crate::report::{Entry, Finding, Fix};
 
@@ -57,7 +55,7 @@ pub(super) fn is_nested_event_loop_qual(qualname: &str) -> bool {
 /// Emit `offload-coroutine` findings for offload sites whose target is `async def`.
 pub(super) fn collect_offload_coroutine_findings(
     facts: &ProjectFacts,
-    reverse: &BTreeMap<FunctionId, Vec<usize>>,
+    reverse: &[Vec<usize>],
     include_non_production: bool,
     emitted: &mut HashSet<String>,
 ) -> Vec<Finding> {

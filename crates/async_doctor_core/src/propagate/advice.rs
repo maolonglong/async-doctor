@@ -7,7 +7,7 @@
 //! The offload site's own try/if/loop conditions are irrelevant — advice is about
 //! the offloaded work's sinks, not whether the offload call is branch-guarded.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::graph::{
     CalleeRef, FunctionId, OffloadKind, ProjectFacts, is_non_production_entry_path,
@@ -24,7 +24,7 @@ pub(super) const RULE_OFFLOAD_HAS_ASYNC_TWIN: &str = "offload-has-async-twin";
 pub(super) fn collect_offload_twin_advice(
     facts: &ProjectFacts,
     sinks: &dyn SinkTable,
-    reverse: &BTreeMap<FunctionId, Vec<usize>>,
+    reverse: &[Vec<usize>],
     include_non_production: bool,
 ) -> Vec<Advice> {
     let edges_by_caller = build_edges_by_caller(facts);

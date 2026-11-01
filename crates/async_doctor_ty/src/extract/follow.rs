@@ -70,7 +70,7 @@ pub(crate) const DEFAULT_FOLLOW_BUDGET: usize = 256;
 /// call sites stay obvious rather than hiding behind a scratch struct.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn follow_third_party(
-    db: &AsyncDoctorDb,
+    db: &mut AsyncDoctorDb,
     facts: &mut ProjectFacts,
     def_map: &mut HashMap<DefKey, FunctionId>,
     qual_map: &mut HashMap<(String, String), FunctionId>,
@@ -80,6 +80,8 @@ pub(crate) fn follow_third_party(
     cache_dir: Option<&Path>,
     follow_budget: usize,
 ) {
+    const FOLLOW_DB_RESET_INTERVAL: usize = 64;
+    let mut uncached_since_reset = 0usize;
     let sinks = BuiltinSinkTable::new();
     let mut qual_to_id: BTreeMap<String, FunctionId> = BTreeMap::new();
     let mut id_to_external_key: HashMap<FunctionId, String> = HashMap::new();
@@ -187,6 +189,11 @@ pub(crate) fn follow_third_party(
             let Some(target) = follow_targets.get(q).cloned() else {
                 continue;
             };
+            if uncached_since_reset >= FOLLOW_DB_RESET_INTERVAL {
+                *db = db.fresh_empty();
+                uncached_since_reset = 0;
+            }
+            uncached_since_reset += 1;
             let edge_before = facts.edges.len();
             if let Some(id) = extract_third_party_function(
                 db,
@@ -354,6 +361,11 @@ pub(crate) fn follow_third_party(
             let Some(target) = follow_targets.get(&qualname).cloned() else {
                 continue;
             };
+            if uncached_since_reset >= FOLLOW_DB_RESET_INTERVAL {
+                *db = db.fresh_empty();
+                uncached_since_reset = 0;
+            }
+            uncached_since_reset += 1;
             let edge_before = facts.edges.len();
             if let Some(id) = extract_third_party_function(
                 db,
@@ -396,6 +408,11 @@ pub(crate) fn follow_third_party(
             let Some(target) = follow_targets.get(q).cloned() else {
                 continue;
             };
+            if uncached_since_reset >= FOLLOW_DB_RESET_INTERVAL {
+                *db = db.fresh_empty();
+                uncached_since_reset = 0;
+            }
+            uncached_since_reset += 1;
             let edge_before = facts.edges.len();
             if let Some(id) = extract_third_party_function(
                 db,

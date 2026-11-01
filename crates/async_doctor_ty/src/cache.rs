@@ -61,9 +61,9 @@ pub fn build_id() -> &'static str {
     static ID: OnceLock<String> = OnceLock::new();
     ID.get_or_init(|| {
         if let Ok(exe) = std::env::current_exe()
-            && let Ok(bytes) = std::fs::read(&exe)
+            && let Ok(h) = hash_file_streaming(&exe)
         {
-            return format!("exe-{:x}", fnv1a64_bytes(&bytes));
+            return format!("exe-{h:x}");
         }
         // Fallback when the exe cannot be read (unusual): compile-time stamp.
         env!("ASYNC_DOCTOR_BUILD_ID").to_string()
@@ -71,12 +71,52 @@ pub fn build_id() -> &'static str {
     .as_str()
 }
 
-fn fnv1a64_bytes(data: &[u8]) -> u64 {
+fn hash_file_streaming(path: &Path) -> std::io::Result<u64> {
+    use std::io::Read;
+    const PRIME: u64 = 0x100000001b3;
+    let mut f = fs::File::open(path)?;
+    let mut buf = [0u8; 64 * 1024];
     let mut h: u64 = 0xcbf29ce484222325;
-    for b in data {
-        h ^= u64::from(*b);
-        h = h.wrapping_mul(0x100000001b3);
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h = (h ^ fnv1a64_bytes(&buf[..n])).wrapping_mul(PRIME);
     }
+    Ok(h)
+}
+
+fn fnv1a64_bytes(data: &[u8]) -> u64 {
+    const PRIME: u64 = 0x100000001b3;
+    let mut h0: u64 = 0xcbf29ce484222325 ^ (data.len() as u64);
+    let mut h1: u64 = 0x84222325cbf29ce4;
+    let mut h2: u64 = 0x4b95f51d84222325;
+    let mut h3: u64 = 0x9e3779b97f4a7c15;
+
+    let mut chunks = data.chunks_exact(32);
+    for chunk in &mut chunks {
+        let w0 = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
+        let w1 = u64::from_le_bytes(chunk[8..16].try_into().unwrap());
+        let w2 = u64::from_le_bytes(chunk[16..24].try_into().unwrap());
+        let w3 = u64::from_le_bytes(chunk[24..32].try_into().unwrap());
+        h0 = (h0 ^ w0).wrapping_mul(PRIME);
+        h1 = (h1 ^ w1).wrapping_mul(PRIME);
+        h2 = (h2 ^ w2).wrapping_mul(PRIME);
+        h3 = (h3 ^ w3).wrapping_mul(PRIME);
+    }
+    let mut h = h0
+        .rotate_left(13)
+        .wrapping_add(h1.rotate_left(27))
+        .wrapping_add(h2.rotate_left(41))
+        .wrapping_add(h3.rotate_left(53));
+    for &b in chunks.remainder() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(PRIME);
+    }
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xff51afd7ed558ccd);
+    h ^= h >> 33;
     h
 }
 
@@ -312,14 +352,8 @@ pub fn package_content_fingerprint(dist_info_or_pkg_dir: &Path) -> String {
     short_hash(format!("PY:{entries:?}").as_bytes())
 }
 
-fn short_hash(bytes: &[u8]) -> String {
-    // Cheap stable FNV-1a 64-bit → 16 hex chars (no extra crate).
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for b in bytes {
-        hash ^= u64::from(*b);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("{hash:016x}")
+pub(crate) fn short_hash(bytes: &[u8]) -> String {
+    format!("{:016x}", fnv1a64_bytes(bytes))
 }
 
 /// Load a cached package summary when present and compatible.
