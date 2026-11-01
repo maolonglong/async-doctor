@@ -5,11 +5,16 @@ use std::io::Write;
 
 use async_doctor_core::{Finding, SinkSiteSummary, group_choke_point, summarize_sink_sites};
 
+use super::style::Palette;
 use super::{sink_label, write_finding_indented};
 
 const TOP_CLUSTERS_SHOWN: usize = 8;
 
-pub(super) fn write_grouped(out: &mut impl Write, findings: &[Finding]) -> anyhow::Result<()> {
+pub(super) fn write_grouped(
+    out: &mut impl Write,
+    findings: &[Finding],
+    pal: &Palette,
+) -> anyhow::Result<()> {
     let sites = summarize_sink_sites(findings);
     let mut groups: BTreeMap<&str, Vec<&Finding>> = BTreeMap::new();
     let mut entries: BTreeSet<(&str, &str)> = BTreeSet::new();
@@ -26,11 +31,13 @@ pub(super) fn write_grouped(out: &mut impl Write, findings: &[Finding]) -> anyho
     }
 
     let unique_sites = sites.len();
+    let b = pal.bold;
+    let dim = pal.dim;
     // Lead with distinct sink sites (the actionable unit), then findings
     // (entry × sink paths), so totals are not mistaken for site counts.
     writeln!(
         out,
-        "Found {} sink site(s) · {} finding(s) · {} entries · {} fix groups\n",
+        "{b}Found {} sink site(s) · {} finding(s) · {} entries · {} fix groups{b:#}\n",
         unique_sites,
         findings.len(),
         entries.len(),
@@ -38,7 +45,7 @@ pub(super) fn write_grouped(out: &mut impl Write, findings: &[Finding]) -> anyho
     )?;
     writeln!(
         out,
-        "(sink sites ranked by entries; shared entry sets are clustered; pass --expand for every chain)\n"
+        "{dim}(sink sites ranked by entries; shared entry sets are clustered; pass --expand for every chain){dim:#}\n"
     )?;
 
     let mut sites_by_group: BTreeMap<&str, Vec<&SinkSiteSummary>> = BTreeMap::new();
@@ -52,6 +59,9 @@ pub(super) fn write_grouped(out: &mut impl Write, findings: &[Finding]) -> anyho
     let mut ordered: Vec<_> = groups.into_iter().collect();
     ordered.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(b.0)));
 
+    let r = pal.rule_finding;
+    let fx = pal.fix;
+    let ck = pal.choke;
     for (gid, group) in ordered {
         let rep = group[0];
         let group_sites = sites_by_group.remove(gid).unwrap_or_default();
@@ -77,7 +87,7 @@ pub(super) fn write_grouped(out: &mut impl Write, findings: &[Finding]) -> anyho
 
         writeln!(
             out,
-            "[{}] {} — {} finding(s), {} entr{}, {} sink site{}",
+            "{r}[{}]{r:#} {b}{}{b:#} — {} finding(s), {} entr{}, {} sink site{}",
             rep.rule,
             if sink_text.is_empty() {
                 "sink".to_string()
@@ -90,7 +100,7 @@ pub(super) fn write_grouped(out: &mut impl Write, findings: &[Finding]) -> anyho
             group_sites.len(),
             if group_sites.len() == 1 { "" } else { "s" }
         )?;
-        writeln!(out, "  fix: {}", rep.fix.hint)?;
+        writeln!(out, "  {fx}fix:{fx:#} {}", rep.fix.hint)?;
         if !rep.docs_url.is_empty() {
             writeln!(out, "  docs: {}", rep.docs_url)?;
         } else if !rep.docs_anchor.is_empty() {
@@ -101,7 +111,7 @@ pub(super) fn write_grouped(out: &mut impl Write, findings: &[Finding]) -> anyho
             let short = truncate_call(&text, 72);
             writeln!(
                 out,
-                "  choke point: {file}:{line}  {short}  (in {n}/{} findings)",
+                "  {ck}choke point:{ck:#} {file}:{line}  {short}  (in {n}/{} findings)",
                 group.len()
             )?;
         }

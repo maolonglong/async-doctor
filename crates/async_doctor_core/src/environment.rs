@@ -40,6 +40,9 @@ pub struct ScanEnvironment {
     pub interpreter: Option<String>,
     /// site-packages directories on the module search path.
     pub site_packages: Vec<String>,
+    /// Detected async frameworks and key libraries (`<name> <version>`) in `site_packages`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frameworks: Vec<String>,
     /// Distinct top-level third-party modules that failed to import.
     pub unresolved_third_party: u32,
     /// Distinct top-level third-party modules that resolved successfully.
@@ -61,6 +64,7 @@ impl ScanEnvironment {
             prefix: None,
             interpreter: None,
             site_packages: Vec::new(),
+            frameworks: Vec::new(),
             unresolved_third_party: 0,
             resolved_third_party: 0,
             note: String::new(),
@@ -164,6 +168,7 @@ mod tests {
             prefix: Some("/proj/.venv".into()),
             interpreter: Some("/proj/.venv/bin/python".into()),
             site_packages: vec!["/proj/.venv/lib/python3.12/site-packages".into()],
+            frameworks: Vec::new(),
             unresolved_third_party: 98,
             resolved_third_party: 50,
             note: String::new(),
@@ -189,6 +194,7 @@ mod tests {
             prefix: Some("/proj/.venv".into()),
             interpreter: Some("/proj/.venv/bin/python".into()),
             site_packages: vec!["/proj/.venv/lib/python3.12/site-packages".into()],
+            frameworks: Vec::new(),
             unresolved_third_party: 2,
             resolved_third_party: 40,
             note: String::new(),

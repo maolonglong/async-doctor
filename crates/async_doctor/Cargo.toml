@@ -13,6 +13,8 @@ name = "async-doctor"
 path = "src/main.rs"
 
 [dependencies]
+anstream = { workspace = true }
+anstyle = { workspace = true }
 anyhow = { workspace = true }
 async_doctor_core = { workspace = true }
 async_doctor_rules = { workspace = true }

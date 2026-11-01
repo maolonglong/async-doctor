@@ -4,14 +4,17 @@
 //! Pass `--expand` to list every finding.
 
 mod grouped;
+pub mod style;
 
 use std::io::Write;
+use std::time::Duration;
 
 use async_doctor_core::{
     Advice, Candidate, EntryLabel, EnvironmentKind, Finding, Report, ScanEnvironment,
 };
 
 use crate::paths::display_fs_path;
+use style::Palette;
 
 /// Default number of advice items shown before `--expand`.
 const TOP_ADVICE_SHOWN: usize = 10;
@@ -24,16 +27,20 @@ pub struct TextOptions {
     pub suppressed_by_baseline: u32,
     /// Findings suppressed by inline `# async-doctor: ignore[...]`.
     pub suppressed_by_ignore: u32,
+    /// Total wall-clock scan duration when invoked from the CLI.
+    pub elapsed: Option<Duration>,
 }
 
 pub fn write_report(report: &Report, opts: TextOptions) -> anyhow::Result<()> {
+    let pal = Palette::stdout();
     let stdout = std::io::stdout();
     let mut out = std::io::BufWriter::with_capacity(64 * 1024, stdout.lock());
-    write_environment_banner(&mut out, &report.environment)?;
+    write_environment_banner(&mut out, &report.environment, &pal)?;
     if let Some(msg) = &report.message {
         writeln!(out, "{msg}")?;
     } else if report.findings.is_empty() {
-        write!(out, "No findings.")?;
+        let ok = pal.ok;
+        write!(out, "{ok}No findings.{ok:#}")?;
         let mut parts = Vec::new();
         if opts.suppressed_by_baseline > 0 {
             parts.push(format!(
@@ -52,12 +59,13 @@ pub fn write_report(report: &Report, opts: TextOptions) -> anyhow::Result<()> {
         }
         writeln!(out)?;
     } else if opts.expand {
-        writeln!(out, "Found {} finding(s):\n", report.findings.len())?;
+        let b = pal.bold;
+        writeln!(out, "{b}Found {} finding(s):{b:#}\n", report.findings.len())?;
         for finding in &report.findings {
-            write_finding(&mut out, finding)?;
+            write_finding_styled(&mut out, finding, &pal)?;
         }
     } else {
-        grouped::write_grouped(&mut out, &report.findings)?;
+        grouped::write_grouped(&mut out, &report.findings, &pal)?;
     }
 
     write_advice_section(&mut out, report, opts.expand)?;
@@ -149,15 +157,51 @@ pub fn write_report(report: &Report, opts: TextOptions) -> anyhow::Result<()> {
     if !note.is_empty() {
         writeln!(out, "\nnote: {note}")?;
     }
+    if report.message.is_none() {
+        write_scan_footer(&mut out, report, opts.elapsed, &pal)?;
+    }
     out.flush()?;
     Ok(())
 }
 
+fn write_scan_footer(
+    out: &mut impl Write,
+    report: &Report,
+    elapsed: Option<Duration>,
+    pal: &Palette,
+) -> anyhow::Result<()> {
+    let dim = pal.dim;
+    let files = report.file_count;
+    let entries = report.async_entry_count;
+    let file_s = if files == 1 { "" } else { "s" };
+    let entry_s = if entries == 1 { "y" } else { "ies" };
+    match elapsed {
+        Some(d) => writeln!(
+            out,
+            "{dim}Scanned {files} file{file_s} · {entries} async entr{entry_s} in {}ms{dim:#}",
+            d.as_millis()
+        )?,
+        None => writeln!(
+            out,
+            "{dim}Scanned {files} file{file_s} · {entries} async entr{entry_s}{dim:#}"
+        )?,
+    }
+    Ok(())
+}
+
 /// Print detected interpreter/venv like react-doctor prints framework/project.
-fn write_environment_banner(out: &mut impl Write, env: &ScanEnvironment) -> anyhow::Result<()> {
+fn write_environment_banner(
+    out: &mut impl Write,
+    env: &ScanEnvironment,
+    pal: &Palette,
+) -> anyhow::Result<()> {
+    let dim = pal.dim;
     match env.kind {
         EnvironmentKind::None => {
-            writeln!(out, "Environment: none (no interpreter/venv found)")?;
+            writeln!(
+                out,
+                "{dim}Environment: none (no interpreter/venv found){dim:#}"
+            )?;
         }
         EnvironmentKind::Venv | EnvironmentKind::System => {
             let kind = env.kind.as_str();
@@ -179,7 +223,10 @@ fn write_environment_banner(out: &mut impl Write, env: &ScanEnvironment) -> anyh
                     parts.push(format!("site-packages {}", display_fs_path(sp)));
                 }
             }
-            writeln!(out, "Environment: {}", parts.join(" · "))?;
+            if !env.frameworks.is_empty() {
+                parts.push(format!("frameworks {}", env.frameworks.join(", ")));
+            }
+            writeln!(out, "{dim}Environment: {}{dim:#}", parts.join(" · "))?;
         }
     }
     Ok(())
@@ -204,12 +251,27 @@ pub fn entry_headline(finding: &Finding) -> String {
 }
 
 pub fn write_finding(out: &mut impl Write, finding: &Finding) -> anyhow::Result<()> {
-    writeln!(out, "[{}] {}", finding.rule, entry_headline(finding))?;
+    write_finding_styled(out, finding, &Palette::stdout())
+}
+
+pub fn write_finding_styled(
+    out: &mut impl Write,
+    finding: &Finding,
+    pal: &Palette,
+) -> anyhow::Result<()> {
+    let r = pal.rule_finding;
+    let fx = pal.fix;
+    writeln!(
+        out,
+        "{r}[{}]{r:#} {}",
+        finding.rule,
+        entry_headline(finding)
+    )?;
     write_chain(out, &finding.chain, "  ", true)?;
     if !finding.conditions.is_empty() {
         writeln!(out, "  conditions: {}", finding.conditions.join(", "))?;
     }
-    writeln!(out, "  fix: {}", finding.fix.hint)?;
+    writeln!(out, "  {fx}fix:{fx:#} {}", finding.fix.hint)?;
     if !finding.docs_url.is_empty() {
         writeln!(out, "  docs: {}", finding.docs_url)?;
     }
@@ -254,9 +316,12 @@ fn write_advice_section(out: &mut impl Write, report: &Report, expand: bool) -> 
 }
 
 pub fn write_advice(out: &mut impl Write, advice: &Advice) -> anyhow::Result<()> {
+    let pal = Palette::stdout();
+    let r = pal.rule_advice;
+    let fx = pal.fix;
     writeln!(
         out,
-        "[advice:{}] ({})  async def {}  {}:{}",
+        "{r}[advice:{}]{r:#} ({})  async def {}  {}:{}",
         advice.rule,
         advice.category.as_str(),
         advice.entry.name,
@@ -264,7 +329,7 @@ pub fn write_advice(out: &mut impl Write, advice: &Advice) -> anyhow::Result<()>
         advice.entry.line
     )?;
     write_chain(out, &advice.chain, "  ", true)?;
-    writeln!(out, "  fix: {}", advice.fix.hint)?;
+    writeln!(out, "  {fx}fix:{fx:#} {}", advice.fix.hint)?;
     if !advice.docs_url.is_empty() {
         writeln!(out, "  docs: {}", advice.docs_url)?;
     }
@@ -275,9 +340,12 @@ pub fn write_advice(out: &mut impl Write, advice: &Advice) -> anyhow::Result<()>
 }
 
 pub fn write_candidate(out: &mut impl Write, candidate: &Candidate) -> anyhow::Result<()> {
+    let pal = Palette::stdout();
+    let r = pal.rule_candidate;
+    let fx = pal.fix;
     writeln!(
         out,
-        "[{}] candidate ({})  async def {}  {}:{}",
+        "{r}[{}]{r:#} candidate ({})  async def {}  {}:{}",
         candidate.rule,
         candidate.reason,
         candidate.entry.name,
@@ -285,7 +353,7 @@ pub fn write_candidate(out: &mut impl Write, candidate: &Candidate) -> anyhow::R
         candidate.entry.line
     )?;
     write_chain(out, &candidate.chain, "  ", true)?;
-    writeln!(out, "  fix: {}", candidate.fix.hint)?;
+    writeln!(out, "  {fx}fix:{fx:#} {}", candidate.fix.hint)?;
     if !candidate.docs_url.is_empty() {
         writeln!(out, "  docs: {}", candidate.docs_url)?;
     }

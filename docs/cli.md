@@ -16,9 +16,10 @@ async-doctor why file:line --path DIR  # re-scan; explain findings/advice at a s
 
 | Flag / behaviour | Contract |
 | --- | --- |
-| Default format | Human text (environment + sink-site summary, then findings / advice) |
+| Default format | Human text (environment + sink-site summary, then findings / advice + scan summary footer; TTY-styled via `anstyle`/`anstream`, respects `NO_COLOR` and `CLICOLOR_FORCE`/`FORCE_COLOR`) |
 | `--format json` | Schema in [json-contract.md](json-contract.md) |
 | `--format sarif` | SARIF 2.1.0 for code scanning |
+| `--format markdown` | GitHub-Flavored Markdown for `$GITHUB_STEP_SUMMARY` and PR comments |
 | `--expand` | Show full advice list (text caps by default) |
 | `--show-unresolved` | Surface `reason=unresolved` candidates (else hidden / aggregated) |
 | `--include-non-production` | Include entries under tests/docs/examples/scripts/hidden dirs |

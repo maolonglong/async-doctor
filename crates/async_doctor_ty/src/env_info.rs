@@ -49,18 +49,78 @@ pub(crate) fn summarize_environment(
         EnvironmentKind::System
     };
     let interpreter = guess_interpreter(&prefix);
+    let frameworks = detect_frameworks(&site_packages);
     let mut out = ScanEnvironment {
         kind,
         origin,
         prefix: Some(prefix),
         interpreter,
         site_packages,
+        frameworks,
         unresolved_third_party: 0,
         resolved_third_party: 0,
         note: String::new(),
     };
     out.refresh_note();
     out
+}
+
+/// Known async frameworks and clients worth surfacing in the environment banner.
+const KNOWN_FRAMEWORKS: &[&str] = &[
+    "aioboto3",
+    "aiohttp",
+    "anthropic",
+    "anyio",
+    "arq",
+    "asyncpg",
+    "celery",
+    "channels",
+    "django",
+    "dramatiq",
+    "fastapi",
+    "grpcio",
+    "httpx",
+    "litestar",
+    "motor",
+    "openai",
+    "psycopg",
+    "pydantic",
+    "quart",
+    "redis",
+    "sanic",
+    "sqlalchemy",
+    "starlette",
+    "tornado",
+    "trio",
+    "uvloop",
+];
+
+fn detect_frameworks(site_packages: &[String]) -> Vec<String> {
+    let mut found = std::collections::BTreeMap::<String, String>::new();
+    for sp in site_packages {
+        let Ok(entries) = std::fs::read_dir(sp) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let Some(name) = file_name.to_str() else {
+                continue;
+            };
+            let Some(stem) = name.strip_suffix(".dist-info") else {
+                continue;
+            };
+            let Some((pkg, ver)) = stem.split_once('-') else {
+                continue;
+            };
+            let norm = pkg.to_ascii_lowercase().replace('_', "-");
+            if KNOWN_FRAMEWORKS.binary_search(&norm.as_str()).is_ok() {
+                found
+                    .entry(norm.clone())
+                    .or_insert_with(|| format!("{norm} {ver}"));
+            }
+        }
+    }
+    found.into_values().collect()
 }
 
 fn format_origin(origin: &SysPrefixPathOrigin) -> String {

@@ -9,11 +9,11 @@ CLI flags: [cli.md](cli.md).
 | --- | --- |
 | `schemaVersion` | integer; bump on breaking changes (currently **2**) |
 | `complete` | false on timeout / parse failure; attach `skipped` |
-| `environment` | interpreter/venv/site-packages used; `note` when degraded (ratio-aware when a venv is active). `environment.note` is omitted from JSON when empty (`skip_serializing_if`) |
+| `environment` | interpreter/venv/site-packages used; `frameworks` when async frameworks/clients are detected in `site-packages`; `note` when degraded (ratio-aware when a venv is active). `environment.note` and `environment.frameworks` are omitted from JSON when empty (`skip_serializing_if`) |
 | `findings[]` / `candidates[]` / `advice[]` | always emitted (even empty); candidates have `reason`; advice is non-blocking (SARIF `note`) |
 | `locationLessCandidates[]` | always emitted; missing-third-party aggregate lives here with empty `entry.file`/`chain` and empty `why` |
 | `skipped[]` / `sinkSites[]` / `unusedSuppressions[]` / `unresolvedSummary[]` | always emitted (even empty) |
-| `hiddenUnresolvedCandidates` / `omittedNonProductionEntries` | always emitted, including `0` |
+| `hiddenUnresolvedCandidates` / `omittedNonProductionEntries` / `fileCount` / `asyncEntryCount` | always emitted, including `0` |
 | `id` | stable sha256 (16-byte hex) of **rule + entry qualname + sink qualname + chain qualnames + occurrence**; **not** file/line/column |
 | `rule` | e.g. `blocking-sleep`, `blocking-http` |
 | `entry` | async def location + label (`route` / `lifecycle` / `task` / `other`) |

@@ -285,6 +285,12 @@ pub struct Report {
     /// Sink sites ranked by entry count.
     #[serde(default)]
     pub sink_sites: Vec<SinkSiteSummary>,
+    /// Number of first-party Python files scanned.
+    #[serde(default)]
+    pub file_count: u32,
+    /// Number of active first-party `async def` entries evaluated.
+    #[serde(default)]
+    pub async_entry_count: u32,
 }
 
 fn is_zero(v: &u32) -> bool {
@@ -312,6 +318,8 @@ impl Report {
             unresolved_summary: Vec::new(),
             unused_suppressions: Vec::new(),
             sink_sites: Vec::new(),
+            file_count: 0,
+            async_entry_count: 0,
         }
     }
 

@@ -82,6 +82,29 @@ pub fn analyze_with_options(
     let owned = materialize_higher_order(facts);
     let facts = &owned;
 
+    let mut first_party_files = HashSet::new();
+    let mut async_entry_count = 0u32;
+    for f in &facts.functions {
+        if f.is_third_party {
+            continue;
+        }
+        if !f.file.is_empty() {
+            first_party_files.insert(f.file.as_str());
+        }
+        if f.is_async
+            && !f.is_sync_route
+            && (options.include_non_production || !is_non_production_entry_path(&f.file))
+        {
+            async_entry_count += 1;
+        }
+    }
+
+    let file_count = if facts.no_python_files {
+        0
+    } else {
+        first_party_files.len().max(1) as u32
+    };
+
     let mut report = Report {
         schema_version: SCHEMA_VERSION,
         complete: facts.complete,
@@ -101,6 +124,8 @@ pub fn analyze_with_options(
         unresolved_summary: Vec::new(),
         unused_suppressions: Vec::new(),
         sink_sites: Vec::new(),
+        file_count,
+        async_entry_count,
     };
 
     // Dense vec + sorted preds so reverse-graph walk order is stable across

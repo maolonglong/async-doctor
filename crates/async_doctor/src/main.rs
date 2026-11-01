@@ -8,6 +8,7 @@ mod args;
 mod baseline;
 mod changed;
 mod help_cmd;
+mod markdown;
 mod paths;
 mod sarif;
 mod suppress;
@@ -16,6 +17,7 @@ mod text;
 use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
+use std::time::Instant;
 
 use anyhow::{Context, bail};
 use async_doctor_core::{AnalyzeOptions, EXIT_ERROR, EXIT_OK, Report};
@@ -62,10 +64,12 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
         include_non_production: cli.include_non_production,
         show_unresolved: cli.show_unresolved,
     };
+    let t_start = Instant::now();
     // Absolute so bare `file.py` is not treated as having an empty parent.
     let path = resolve_cli_path(&cli.path);
     let mut report = async_doctor_ty::scan_path_with_options(&path, options)
         .with_context(|| format!("failed to scan `{}`", path.display()))?;
+    let elapsed = t_start.elapsed();
 
     rewrite_why_commands(&mut report, &path);
 
@@ -95,7 +99,11 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
     let mut report = suppress_out.report;
 
     // Prefer git toplevel for SARIF %SRCROOT%; fall back to scan root.
-    let mut repo_root_for_sarif = changed::repo_root_for(&path).ok();
+    let mut repo_root_for_sarif = if matches!(cli.format, Format::Sarif) {
+        changed::repo_root_for(&path).ok()
+    } else {
+        None
+    };
 
     if let Some(ref_spec) = &cli.changed {
         let git_ref = if ref_spec.is_empty() || ref_spec == "AUTO" {
@@ -150,6 +158,15 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
                 expand: cli.expand,
                 suppressed_by_baseline,
                 suppressed_by_ignore,
+                elapsed: Some(elapsed),
+            },
+        )?,
+        Format::Markdown => markdown::write_markdown(
+            &report,
+            markdown::MarkdownOptions {
+                suppressed_by_baseline,
+                suppressed_by_ignore,
+                elapsed: Some(elapsed),
             },
         )?,
         Format::Json => {

@@ -35,6 +35,8 @@ salsa = { version = "0.28.5", default-features = false, features = [
 ] }
 
 anyhow = "1"
+anstream = "1.0"
+anstyle = "1.0"
 clap = { version = "4", features = ["derive"] }
 ignore = "0.4"
 rayon = "1.10"

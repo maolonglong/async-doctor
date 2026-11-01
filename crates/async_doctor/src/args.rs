@@ -10,6 +10,8 @@ pub enum Format {
     Json,
     /// SARIF 2.1.0 (GitHub code scanning).
     Sarif,
+    /// GitHub-Flavored Markdown (step summaries / PR comments).
+    Markdown,
 }
 
 #[derive(Parser, Debug)]
