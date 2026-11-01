@@ -64,9 +64,18 @@ pub(super) fn match_family(q: &str) -> Option<SinkHit> {
         // pipe.set / pipe.get / client.pipeline() — buffer only.
         return None;
     }
-    // Factories that return clients/pipelines/pubsub handles are not IO.
+    // Factories that return clients/pipelines/pubsub/lock handles are not IO.
     if q.ends_with(".pipeline") || q.ends_with(".pubsub") || is_redis_client_factory(q) {
         return None;
+    }
+    // redis.lock.Lock.acquire blocks (network); never share the threading
+    // non-blocking exemption — this is a real sync-IO sink.
+    if is_redis_sync_lock_acquire(q) {
+        return Some(hit(&BuiltinSink::finding(
+            "redis.Lock.acquire",
+            RULE_BLOCKING_DB,
+            "Use `redis.asyncio` locks, or offload lock acquisition.",
+        )));
     }
     // redis sync PubSub.listen() — blocks only when the generator is consumed.
     if (q == "redis.PubSub.listen"
@@ -120,6 +129,23 @@ pub(super) fn match_family(q: &str) -> Option<SinkHit> {
             rule: RULE_BLOCKING_DB,
             sink_qualname,
             fix_hint: "Use `sqlalchemy.ext.asyncio.AsyncSession` instead of sync `Session`.",
+            candidate_only: false,
+            candidate_reason: None,
+            with_only: false,
+            consume_only: false,
+        });
+    }
+    // Legacy Query: iteration / fetch emits SQL (`for u in session.query(User)`).
+    if let Some(method) = sqlalchemy_query_io(q) {
+        let sink_qualname = if method == "__iter__" {
+            "sqlalchemy.orm.Query.__iter__"
+        } else {
+            intern_qualname(&format!("sqlalchemy.orm.Query.{method}"))
+        };
+        return Some(SinkHit {
+            rule: RULE_BLOCKING_DB,
+            sink_qualname,
+            fix_hint: "Use `AsyncSession` / `await session.scalars(...)`, or offload.",
             candidate_only: false,
             candidate_reason: None,
             with_only: false,
@@ -329,8 +355,16 @@ fn is_redis_client_factory(q: &str) -> bool {
     let method = q.rsplit_once('.').map(|(_, m)| m).unwrap_or(q);
     matches!(
         method,
-        "from_url" | "from_pool" | "__init__" | "__new__" | "Redis" | "StrictRedis"
+        "from_url" | "from_pool" | "__init__" | "__new__" | "Redis" | "StrictRedis" | "lock" // redis.Redis.lock(...) builds a Lock handle; no IO yet
     )
+}
+
+fn is_redis_sync_lock_acquire(q: &str) -> bool {
+    // redis.Lock / redis.client.Lock / redis.lock.Lock — not threading.Lock.
+    if q.contains("asyncio") || !q.starts_with("redis.") {
+        return false;
+    }
+    q.split('.').any(|seg| seg == "Lock") && (q.ends_with(".acquire") || q.ends_with(".__enter__"))
 }
 
 /// Label redis sync commands with the concrete method (not a blanket `execute_command`).
@@ -387,6 +421,9 @@ fn sqlalchemy_session_io_method(q: &str) -> Option<&'static str> {
         "close" => Some("close"),
         "scalar_one" => Some("scalar_one"),
         "scalar_one_or_none" => Some("scalar_one_or_none"),
+        "bulk_save_objects" => Some("bulk_save_objects"),
+        "bulk_insert_mappings" => Some("bulk_insert_mappings"),
+        "bulk_update_mappings" => Some("bulk_update_mappings"),
         _ => None,
     }
 }
@@ -408,7 +445,30 @@ fn sqlalchemy_session_sink_qualname(method: &str) -> &'static str {
         "close" => "sqlalchemy.orm.Session.close",
         "scalar_one" => "sqlalchemy.orm.Session.scalar_one",
         "scalar_one_or_none" => "sqlalchemy.orm.Session.scalar_one_or_none",
+        "bulk_save_objects" => "sqlalchemy.orm.Session.bulk_save_objects",
+        "bulk_insert_mappings" => "sqlalchemy.orm.Session.bulk_insert_mappings",
+        "bulk_update_mappings" => "sqlalchemy.orm.Session.bulk_update_mappings",
         _ => "sqlalchemy.orm.Session.execute",
+    }
+}
+
+/// Legacy `Query` iteration / fetch APIs emit SQL when consumed.
+fn sqlalchemy_query_io(q: &str) -> Option<&'static str> {
+    let method = q
+        .strip_prefix("sqlalchemy.orm.Query.")
+        .or_else(|| q.strip_prefix("sqlalchemy.orm.query.Query."))?;
+    match method {
+        "__iter__" => Some("__iter__"),
+        "all" => Some("all"),
+        "first" => Some("first"),
+        "one" => Some("one"),
+        "one_or_none" => Some("one_or_none"),
+        "scalar" => Some("scalar"),
+        "get" => Some("get"),
+        "count" => Some("count"),
+        "delete" => Some("delete"),
+        "update" => Some("update"),
+        _ => None,
     }
 }
 
