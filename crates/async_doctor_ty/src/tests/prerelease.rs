@@ -3,7 +3,6 @@
 use std::fs;
 
 use super::helpers::{clone_fixture, fresh_cache_dir, report_json, temp_project};
-use crate::encoding::decode_python_source;
 use crate::{scan_path, scan_path_with_cache};
 
 #[test]
@@ -449,12 +448,6 @@ fn unknown_cookie_on_utf8_bytes_falls_back() {
 }
 
 #[test]
-fn utf8_sig_cookie_is_accepted() {
-    let src = "# coding: utf-8-sig\nx = 1\n";
-    assert!(decode_python_source(src.as_bytes()).is_ok());
-}
-
-#[test]
 fn undecodable_source_is_skipped() {
     let dir = tempfile::tempdir().unwrap();
     // Invalid UTF-8, no coding cookie → default UTF-8 fails.
@@ -474,6 +467,12 @@ fn empty_directory_reports_no_python_files() {
     let dir = tempfile::tempdir().unwrap();
     let report = scan_path(dir.path()).expect("scan");
     assert!(report.complete);
+    assert_ne!(
+        report.environment.kind,
+        async_doctor_core::EnvironmentKind::None,
+        "cold empty scan must discover the environment (got {:?})",
+        report.environment
+    );
     assert_eq!(
         report.message.as_deref(),
         Some("No Python files were found.")

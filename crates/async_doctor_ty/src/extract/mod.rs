@@ -71,9 +71,13 @@ pub(crate) fn extract_path_with_cache_budget(
     // stay on the search path and are followed like site-packages when called.
     let files = discover_python_files(path.as_std_path())?;
     if files.is_empty() {
+        // Discover before returning so cold empty scans match warm cache hits
+        // (which refresh `environment` via `discover_scan_environment`).
+        let environment = crate::env_info::discover_scan_environment(&path)?;
         return Ok(ProjectFacts {
             complete: true,
             no_python_files: true,
+            environment,
             ..ProjectFacts::default()
         });
     }
