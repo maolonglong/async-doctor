@@ -506,7 +506,11 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             }
             // boto3 clients are dynamically typed (stubs often return `object`).
             // Prefer syntactic receivers before weak typed `{object}.get_object`.
+            // Never synthesize sync botocore ops for aioboto3/aiobotocore receivers
+            // (incl. `async with session.client(...) as x` / awaited calls on them).
             if aws_op_method_name(attr.attr.as_str())
+                && !self.expr_is_aio_boto_receiver(&attr.value)
+                && !(self.pending_is_awaited && self.expr_binds_aio_boto(&attr.value))
                 && self.expr_is_boto_factory_or_receiver(&attr.value)
             {
                 return Some(format!("botocore.client.BaseClient.{}", attr.attr.as_str()));
