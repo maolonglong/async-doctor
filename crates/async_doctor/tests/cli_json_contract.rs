@@ -120,10 +120,7 @@ fn environment_note_when_no_venv_and_missing_third_party() {
         "expected venv advisory note, got {env}"
     );
     assert!(
-        !v["locationLessCandidates"]
-            .as_array()
-            .unwrap()
-            .is_empty(),
+        !v["locationLessCandidates"].as_array().unwrap().is_empty(),
         "missing third-party aggregate must be location-less: {}",
         v["locationLessCandidates"]
     );
