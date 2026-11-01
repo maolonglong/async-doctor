@@ -11,9 +11,11 @@ text in the terminal. Inline suppressions: `# async-doctor: ignore[<rule-id>]: <
 
 ## blocking-socket
 
-Sync socket IO, blocking DNS (`getaddrinfo`), or SSL handshake on the loop thread.
+Sync socket IO, blocking DNS (`getaddrinfo`), SSL handshake, or sync
+`smtplib` / `ftplib` clients on the loop thread.
 
-**Fix:** asyncio connection/server APIs, or offload with `asyncio.to_thread`.
+**Fix:** asyncio connection/server APIs, `aiosmtplib` / async FTP, or offload
+with `asyncio.to_thread`.
 
 ## blocking-http
 
@@ -29,15 +31,18 @@ Sync HTTP clients (`urllib`, `requests`, sync `httpx` / `urllib3`).
 
 ## blocking-file
 
-`open`, path read/write, directory walks, and similar filesystem calls.
+`open`, path read/write, directory walks (`os.listdir` / `pathlib.Path.iterdir` /
+`glob`), archives (`zipfile` / `tarfile`), and blocking `input()` on the loop.
 
 **Fix:** async file helpers, or `await asyncio.to_thread(...)`.
 
 ## blocking-lock
 
-Threading locks, `queue.Queue`, and blocking `Future.result` on the loop.
+Threading locks, `queue.Queue`, blocking `concurrent.futures.Future.result`,
+`Executor.map` consumption, and `concurrent.futures.wait` on the loop.
 
-**Fix:** asyncio primitives, `asyncio.wrap_future`, or confine waits to workers.
+**Fix:** asyncio primitives, `asyncio.wrap_future` / `asyncio.wait`, or confine
+waits to workers.
 
 ## blocking-db
 

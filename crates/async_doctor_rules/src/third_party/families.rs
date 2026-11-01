@@ -225,20 +225,29 @@ pub(super) fn match_family(q: &str) -> Option<SinkHit> {
             "Use `motor` (async) instead of sync `pymongo`.",
         )));
     }
-    // boto3 / botocore
-    if (q.starts_with("boto3.") || q.starts_with("botocore."))
-        && (q.contains("client")
-            || q.contains("resource")
-            || q.contains(".call")
-            || q.ends_with("._make_api_call")
+    // boto3 / botocore — factories + dynamic client/resource ops only.
+    // Avoid matching arbitrary `*.client.*` helpers (e.g. BaseClient.meta).
+    if q.starts_with("boto3.") || q.starts_with("botocore.") {
+        let is_factory = matches!(
+            q,
+            "boto3.client"
+                | "boto3.resource"
+                | "boto3.session.Session.client"
+                | "boto3.session.Session.resource"
+                | "boto3.Session.client"
+                | "boto3.Session.resource"
+        ) || q.ends_with(".Session.client")
+            || q.ends_with(".Session.resource");
+        let is_api = q.ends_with("._make_api_call")
             || q.contains("make_api_call")
-            || method_looks_like_aws_op(q))
-    {
-        return Some(hit(&BuiltinSink::finding(
-            "botocore.client.BaseClient._make_api_call",
-            RULE_BLOCKING_HTTP,
-            "Use `aioboto3` / `aiobotocore` instead of sync `boto3`.",
-        )));
+            || method_looks_like_aws_op(q);
+        if is_factory || is_api {
+            return Some(hit(&BuiltinSink::finding(
+                "botocore.client.BaseClient._make_api_call",
+                RULE_BLOCKING_HTTP,
+                "Use `aioboto3` / `aiobotocore` instead of sync `boto3`.",
+            )));
+        }
     }
     // openai sync client / sync resource *public* methods only — never
     // `openai.lib._parsing._completions.*`, private `_Stream` helpers, or

@@ -63,10 +63,12 @@ hidden dirs are skipped (`--include-non-production` to include).
 ## What it detects
 
 - Sync/blocking IO reachable from `async def` (sleep, socket, file, subprocess,
-  locks) with prove-only conditions and entry labels
+  locks, smtplib/ftplib, zip/tar, glob/pathlib walks, `input`, futures waits)
+  with prove-only conditions and entry labels
 - Site-packages follow down to stdlib sinks; third-party hops marked in JSON
 - Third-party rules: `requests`, sync `httpx`, redis, SQLAlchemy, psycopg,
-  boto3, sync OpenAI/Anthropic, and more — async twins never fire as findings
+  boto3 client/resource calls, sync OpenAI/Anthropic, and more — async twins
+  never fire as findings
 - Higher-order / offload: `asyncio.to_thread`, executors, inferred wrappers
 - **Advice** (`offload-has-async-twin`): offload cuts that only reach sinks with
   a high-confidence same-package async twin installed in the scanned venv
