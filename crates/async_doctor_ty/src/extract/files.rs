@@ -99,6 +99,7 @@ pub(crate) fn extract_files(
     let mut class_methods: HashMap<(String, String), Vec<String>> = HashMap::new();
 
     let mut db = AsyncDoctorDb::open(project_root, None)?;
+    facts.environment = db.scan_environment().clone();
     let followable_extra_roots: Vec<PathBuf> = db
         .followable_extra_roots()
         .iter()
