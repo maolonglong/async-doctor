@@ -20,7 +20,7 @@ instead of piling up.
 |---|---|---|---|
 | `propagate/mod.rs` ~634 lines (over 500 target) | `crates/async_doctor_core/src/propagate/mod.rs` | Harder reviews; split-by-responsibility risk | 2026-11-01 |
 | `cache.rs` ~515 lines (over 500 target) | `crates/async_doctor_ty/src/cache.rs` | Same | 2026-11-01 |
-| `CallCollector` constructor duplicated 3× | `pass2.rs` (×2), `follow.rs` | Drift between extract paths | 2026-11-01 |
+| `stdlib/sinks.rs` ~615 lines (over 500 target) | `crates/async_doctor_rules/src/stdlib/sinks.rs` | Harder reviews; split by section (sleep/socket/file/locks/…) when next editing | 2026-11-01 |
 | Memory on very large repos (Home Assistant core OOM above ~6GB) | extract / pass-2 | Cannot scan some monorepos whole | 2026-11-01 |
 | GBK / legacy-encoded sources skipped with a warning | `encoding.rs` | Those files invisible to analysis | 2026-11-01 |
 | Serial pass-2 panic rollback does not undo changes to existing functions / `follow_targets` (deliberate) | `pass2.rs` | Partial facts after panic; document-only today | 2026-11-01 |
