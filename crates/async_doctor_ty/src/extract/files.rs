@@ -9,7 +9,6 @@
 use std::collections::{HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use async_doctor_core::{CallEdge, CalleeRef, EntryLabel, FunctionId, ProjectFacts};
 use ruff_db::files::system_path_to_file;
@@ -25,8 +24,8 @@ use super::follow::follow_third_party;
 use super::functions::{collect_functions, twin_name};
 use super::panic_util::panic_message;
 use super::pass2::{
-    Pass2FileResult, Pass2FileSpec, Pass2Shared, extract_one_file, merge_pass2_results,
-    run_pass2_parallel,
+    Pass2FileLens, Pass2FileSpec, Pass2Shared, merge_pass2_results, run_pass2_parallel,
+    visit_one_file_shared,
 };
 use super::path::{module_name_from_relative, relative_display};
 
@@ -220,6 +219,7 @@ pub(crate) fn extract_files(
             &property_defs,
             &mut task_targets,
             &mut follow_targets,
+            &mut package_meta,
             &followable_extra_roots,
         );
     }
@@ -263,6 +263,7 @@ fn run_pass2_batched(
     property_defs: &HashSet<DefKey>,
     task_targets: &mut TaskTargets,
     follow_targets: &mut HashMap<String, FollowTarget>,
+    package_meta: &mut PackageMetaMemo,
     followable_extra_roots: &[PathBuf],
 ) {
     let chunks = pass2_chunks(entries, batch_mode);
@@ -277,40 +278,38 @@ fn run_pass2_batched(
         if batch_idx > 0 {
             *db = db.fresh_empty();
         }
-        // Per-file local buffers (same as parallel): merge only on success so a
-        // mid-file panic cannot leave partial edges in the shared maps.
+        // Visit into shared maps (main's cost model). catch_unwind + lens
+        // rollback keeps per-file panic isolation without cloning def/qual/
+        // function tables for every file.
         for entry in chunk.iter() {
-            let shared = Pass2Shared {
-                functions: Arc::new(facts.functions.clone()),
-                def_map: Arc::new(def_map.clone()),
-                qual_map: Arc::new(qual_map.clone()),
-                property_defs: Arc::new(property_defs.clone()),
-                followable_extra_roots: Arc::new(followable_extra_roots.to_vec()),
-            };
             let spec = Pass2FileSpec {
                 system_path: entry.system_path.clone(),
                 rel: entry.rel.clone(),
                 module: entry.module.clone(),
             };
-            let base_fn_len = facts.functions.len();
-            let result =
-                match catch_unwind(AssertUnwindSafe(|| extract_one_file(db, &spec, &shared))) {
-                    Ok(r) => r,
-                    Err(payload) => {
-                        *db = db.fresh_empty();
-                        Pass2FileResult::skipped(&entry.rel, &panic_message(&payload))
-                    }
-                };
-            // Merge one file at a time so subsequent files see prior defs.
-            merge_pass2_results(
-                facts,
-                def_map,
-                qual_map,
-                follow_targets,
-                task_targets,
-                base_fn_len,
-                vec![result],
-            );
+            let lens = Pass2FileLens::capture(facts);
+            let panicked = catch_unwind(AssertUnwindSafe(|| {
+                visit_one_file_shared(
+                    db,
+                    &spec,
+                    facts,
+                    def_map,
+                    qual_map,
+                    property_defs,
+                    task_targets,
+                    follow_targets,
+                    package_meta,
+                    followable_extra_roots,
+                );
+            }));
+            if let Err(payload) = panicked {
+                lens.rollback(facts, def_map, qual_map, task_targets);
+                facts.complete = false;
+                facts
+                    .skipped
+                    .push(format!("{}: {}", entry.rel, panic_message(&payload)));
+                *db = db.fresh_empty();
+            }
         }
     }
 }
