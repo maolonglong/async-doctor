@@ -115,11 +115,11 @@ pub(crate) fn follow_third_party(
                     }
                 }
                 CalleeRef::External { qualname } => {
-                    // Known async APIs (name rules): never follow. Unknown
-                    // third-party `async def` (e.g. libz.fetch → time.sleep) still
-                    // follows; structural `callee_is_coroutine` blocks *seeding*
-                    // async callees that merely look like sync sinks by name.
-                    if edge.is_awaited && is_async_counterpart(qualname) {
+                    // Async-counterpart packages/types (e.g. `sqlalchemy.ext.asyncio.*`,
+                    // `redis.asyncio.*`, `httpx.AsyncClient`): never follow — sync
+                    // helpers like `AsyncSession.add` must not walk into sync Session
+                    // internals and re-seed as blocking-db.
+                    if is_async_counterpart(qualname) {
                         continue;
                     }
                     // Known sinks stay External forever — never follow/rewrite them.
@@ -269,7 +269,7 @@ pub(crate) fn follow_third_party(
                 let CalleeRef::External { qualname } = &edge.callee else {
                     continue;
                 };
-                if edge.is_awaited && is_async_counterpart(qualname) {
+                if is_async_counterpart(qualname) {
                     continue;
                 }
                 if sinks.lookup(qualname).is_some() {
@@ -664,6 +664,7 @@ pub(crate) fn extract_third_party_function(
         local_genexprs: HashMap::new(),
         idle_loop_locals: HashSet::new(),
         idle_loop_helpers: HashSet::new(),
+        unbounded_queues: HashSet::new(),
     };
     visitor.visit_body_seq(&func.body);
     Some(id)

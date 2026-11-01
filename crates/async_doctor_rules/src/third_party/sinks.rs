@@ -145,7 +145,7 @@ pub static THIRD_PARTY_SINKS: &[BuiltinSink] = &[
         RULE_BLOCKING_DB,
         "Use `redis.asyncio` pub/sub (`async for msg in pubsub.listen()`), or offload.",
     ),
-    // --- sqlalchemy sync ---
+    // --- sqlalchemy sync (IO methods only; identity-map helpers are not sinks) ---
     BuiltinSink::finding(
         "sqlalchemy.orm.Session.execute",
         RULE_BLOCKING_DB,
@@ -158,6 +158,46 @@ pub static THIRD_PARTY_SINKS: &[BuiltinSink] = &[
     ),
     BuiltinSink::finding(
         "sqlalchemy.orm.Session.scalar",
+        RULE_BLOCKING_DB,
+        "Use `sqlalchemy.ext.asyncio.AsyncSession` instead of sync `Session`.",
+    ),
+    BuiltinSink::finding(
+        "sqlalchemy.orm.Session.scalars",
+        RULE_BLOCKING_DB,
+        "Use `sqlalchemy.ext.asyncio.AsyncSession` instead of sync `Session`.",
+    ),
+    BuiltinSink::finding(
+        "sqlalchemy.orm.Session.get",
+        RULE_BLOCKING_DB,
+        "Use `sqlalchemy.ext.asyncio.AsyncSession` instead of sync `Session`.",
+    ),
+    BuiltinSink::finding(
+        "sqlalchemy.orm.Session.flush",
+        RULE_BLOCKING_DB,
+        "Use `sqlalchemy.ext.asyncio.AsyncSession` instead of sync `Session`.",
+    ),
+    BuiltinSink::finding(
+        "sqlalchemy.orm.Session.rollback",
+        RULE_BLOCKING_DB,
+        "Use `sqlalchemy.ext.asyncio.AsyncSession` instead of sync `Session`.",
+    ),
+    BuiltinSink::finding(
+        "sqlalchemy.orm.Session.refresh",
+        RULE_BLOCKING_DB,
+        "Use `sqlalchemy.ext.asyncio.AsyncSession` instead of sync `Session`.",
+    ),
+    BuiltinSink::finding(
+        "sqlalchemy.orm.Session.connection",
+        RULE_BLOCKING_DB,
+        "Use `sqlalchemy.ext.asyncio.AsyncSession` instead of sync `Session`.",
+    ),
+    BuiltinSink::finding(
+        "sqlalchemy.orm.Session.merge",
+        RULE_BLOCKING_DB,
+        "Use `sqlalchemy.ext.asyncio.AsyncSession` instead of sync `Session`.",
+    ),
+    BuiltinSink::finding(
+        "sqlalchemy.orm.Session.close",
         RULE_BLOCKING_DB,
         "Use `sqlalchemy.ext.asyncio.AsyncSession` instead of sync `Session`.",
     ),
