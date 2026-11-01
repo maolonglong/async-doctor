@@ -48,3 +48,22 @@ toml = "0.8"
 [profile.release]
 lto = "thin"
 codegen-units = 4
+
+# Dev/test: lightly optimize workspace crates; heavily optimize deps (ty/ruff/salsa).
+# Unoptimized deps make analysis-heavy tests spend minutes in ty/ruff on CI.
+# Measured tradeoff: first cold compile slower; incremental rebuilds of our crates
+# stay cheap; test runtime drops enough that PR CI stays under a few minutes.
+# See docs/quality.md (CI / test strategy).
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+# `cargo test` uses the test profile (inherits from dev); mirror package opts
+# explicitly so dependency optimization cannot silently drop on toolchain changes.
+[profile.test]
+opt-level = 1
+
+[profile.test.package."*"]
+opt-level = 3
