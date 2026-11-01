@@ -100,6 +100,11 @@ pub(crate) struct CallCollector<'a, 'db> {
     pub(super) expanding_genexprs: HashSet<*const ast::ExprGenerator>,
     /// Nesting depth of genexpr expansions (hard cap beyond the pointer set).
     pub(super) genexpr_expand_depth: u32,
+    /// Genexprs already expanded under the current consume (dedupes fan-out
+    /// like `g = (a for a in prev for b in prev)` so expansion stays linear).
+    pub(super) expanded_genexpr_memo: HashSet<*const ast::ExprGenerator>,
+    /// Total genexpr body visits this file (hard budget beyond depth/memo).
+    pub(super) genexpr_expand_visits: u32,
     /// Locals bound only when no event loop is running (ternary / idle-loop helper).
     /// `if name is not None:` (or truthy `if name:`) is a [`ConditionTag::NoRunningLoopGuard`].
     pub(super) idle_loop_locals: HashSet<String>,
@@ -108,6 +113,9 @@ pub(crate) struct CallCollector<'a, 'db> {
     /// Names bound to an unbounded `queue.Queue()` / `Queue(maxsize<=0)`.
     /// `put` on these never blocks.
     pub(super) unbounded_queues: HashSet<String>,
+    /// Names bound from `boto3.client` / `boto3.resource` (module or local).
+    /// Dynamic client methods often have no stubs — track syntactically.
+    pub(super) boto_receivers: HashSet<String>,
     /// Locals assigned from `asyncio.get_running_loop()` (incl. `= None` after
     /// `except RuntimeError`). Early-return `if name is not None` only guards
     /// when the name is in this set.
@@ -119,6 +127,8 @@ pub(crate) struct CallCollector<'a, 'db> {
 
 /// Hard cap on nested local-genexpr expansions (belt alongside the pointer set).
 pub(super) const MAX_GENEXPR_EXPAND_DEPTH: u32 = 64;
+/// Hard cap on total genexpr expansions per file (fan-out safety).
+pub(super) const MAX_GENEXPR_EXPAND_VISITS: u32 = 4096;
 
 impl<'a, 'db> CallCollector<'a, 'db> {
     pub(super) fn def_get(&self, key: &DefKey) -> Option<FunctionId> {

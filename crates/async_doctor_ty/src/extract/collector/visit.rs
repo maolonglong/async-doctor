@@ -27,13 +27,15 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 // Module-level unbounded queues remain visible inside functions;
                 // clone so local rebinds do not leak to sibling defs.
                 let prev_queues = self.unbounded_queues.clone();
+                let prev_boto = self.boto_receivers.clone();
                 self.current_fn = fid;
                 self.current_param_names = fid
                     .map(|id| self.facts.function(id).param_names.clone())
                     .unwrap_or_default();
-                // Parameters shadow module-level unbounded queue bindings.
+                // Parameters shadow module-level unbounded queue / boto bindings.
                 for p in &self.current_param_names {
                     self.unbounded_queues.remove(p);
+                    self.boto_receivers.remove(p);
                 }
                 self.fn_stack.push(func.name.as_str().to_string());
                 self.visit_body_seq(&func.body);
@@ -46,6 +48,7 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 self.running_loop_locals = prev_running_loop;
                 self.event_loop_locals = prev_event_loop;
                 self.unbounded_queues = prev_queues;
+                self.boto_receivers = prev_boto;
             }
             Stmt::ClassDef(class) => {
                 // Pre-scan methods so later-defined idle helpers are visible to
@@ -169,15 +172,25 @@ impl<'a, 'db> CallCollector<'a, 'db> {
     }
 
     /// Expand a genexpr under a consumer, guarding against self-referential
-    /// reassignment cycles (`out = (x for x in out)`).
+    /// reassignment cycles (`out = (x for x in out)`) and exponential fan-out
+    /// (`g = (a for a in prev for b in prev)`).
     fn expand_local_genexpr(&mut self, gexpr: &'a ruff_python_ast::ExprGenerator) {
         if self.genexpr_expand_depth >= super::MAX_GENEXPR_EXPAND_DEPTH {
             return;
         }
+        if self.genexpr_expand_visits >= super::MAX_GENEXPR_EXPAND_VISITS {
+            return;
+        }
         let ptr = std::ptr::from_ref(gexpr);
+        // Already fully expanded under this consume — skip duplicate fan-out arms.
+        if self.expanded_genexpr_memo.contains(&ptr) {
+            return;
+        }
         if !self.expanding_genexprs.insert(ptr) {
             return;
         }
+        self.expanded_genexpr_memo.insert(ptr);
+        self.genexpr_expand_visits += 1;
         self.genexpr_expand_depth += 1;
         self.visit_comprehension_like(&gexpr.elt, None, &gexpr.generators);
         self.genexpr_expand_depth -= 1;
