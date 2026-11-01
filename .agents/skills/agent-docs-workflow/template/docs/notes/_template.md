@@ -18,4 +18,4 @@
 
 ## Guardrail
 
-<!-- guide: The test, lint, check, or AGENTS.md line that now catches it, by name. "None yet" is allowed; the gardening pass will look at it. -->
+<!-- guide: The test, lint, check, or AGENTS.md line that now catches it, by name. "None yet" is allowed; the next docs audit will look at it. -->

@@ -1,6 +1,6 @@
 # Quality and tech debt
 
-Grades show where the codebase is solid and where agents should tread carefully. The debt tracker lists known shortcuts so they get paid down in small steps instead of piling up. The gardening pass updates both.
+Grades show where the codebase is solid and where agents should tread carefully. The debt tracker lists known shortcuts so they get paid down in small steps instead of piling up. The PR that adds or pays off debt updates them; a docs audit catches what drifted.
 
 <!-- guide: Areas are the code-map modules from ARCHITECTURE.md plus cross-cutting concerns. Grades: A (well tested, clear boundaries), B (works, some gaps), C (fragile or unclear; read carefully before changing). Each grade carries a one-line reason. Delete guide comments once filled. -->
 

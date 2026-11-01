@@ -2,17 +2,17 @@
 
 mod advice;
 mod basics;
+mod boto;
 mod budget;
 mod conditions;
 mod constants;
+mod corpus_gaps;
 mod entries;
+mod follow_and_cache;
+mod guards_and_archives;
 mod helpers;
-mod m2;
-mod m3a;
-mod m3a_precision;
-mod m3c;
+mod higher_order_and_narrowing;
 mod offload;
-mod p1_boto;
-mod p1_review;
 mod prerelease;
 mod scan_cache;
+mod search_paths_and_editables;

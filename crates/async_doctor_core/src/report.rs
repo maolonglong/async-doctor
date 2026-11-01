@@ -62,7 +62,7 @@ pub struct ChainStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package: Option<String>,
     /// How this hop was resolved (typed callee, project call, third-party follow, sink).
-    /// Additive in schema v1 — for `why` evidence and agents.
+    /// Included for `why` evidence and agents.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub resolution: String,
 }
@@ -135,10 +135,10 @@ pub struct Finding {
     pub fix: Fix,
     /// Runnable locator help: `async-doctor why file:line --path <scan-root>`.
     pub why: String,
-    /// Fragment into `docs/rules.md` (e.g. `#blocking-sleep`). Additive in schema v1.
+    /// Fragment into `docs/rules.md` (e.g. `#blocking-sleep`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub docs_anchor: String,
-    /// Absolute docs URL for installed binaries. Additive in schema v1.
+    /// Absolute docs URL for installed binaries.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub docs_url: String,
 }
@@ -154,10 +154,10 @@ pub struct Candidate {
     pub reason: String,
     pub fix: Fix,
     pub why: String,
-    /// Fragment into `docs/rules.md` (e.g. `#blocking-sleep`). Additive in schema v1.
+    /// Fragment into `docs/rules.md` (e.g. `#blocking-sleep`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub docs_anchor: String,
-    /// Absolute docs URL for installed binaries. Additive in schema v1.
+    /// Absolute docs URL for installed binaries.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub docs_url: String,
 }
@@ -214,9 +214,9 @@ pub struct UnusedSuppression {
 
 /// One concrete sink line and how many findings/entries reach it.
 ///
-/// Additive in schema v1 — agents use this to pick the few lines that clear
-/// the most findings. Optional choke-point fields name a shared intermediate
-/// hop that dominates paths to this sink (`chokePointFindingCount == 0` means none).
+/// Agents use this to pick the few lines that clear the most findings. Optional
+/// choke-point fields name a shared intermediate hop that dominates paths to
+/// this sink (`chokePointFindingCount == 0` means none).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SinkSiteSummary {
@@ -265,7 +265,7 @@ pub struct Report {
     #[serde(default)]
     pub skipped: Vec<String>,
     /// Human/agent-facing status when findings are empty for a special reason
-    /// (e.g. no Python files under the scan root). Additive in schema v1.
+    /// (e.g. no Python files under the scan root).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     /// Async entries omitted because they live under tests/docs/examples/… (zero-config).

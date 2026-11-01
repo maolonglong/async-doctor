@@ -19,9 +19,14 @@ DEFAULT_DOC_BUDGET = 500
 SOURCE_WARN_LINES = 800
 STALE_PLAN_DAYS = 14
 PLAN_SECTIONS = ["Purpose", "Progress", "Surprises", "Decision log", "Validation", "Outcomes"]
-DECISION_STATUS = re.compile(r"^Status: (proposed|accepted|rejected|superseded)\b", re.M)
+# Legal `Status:` values, as listed in docs/decisions/README.md.
+DECISION_STATUS = re.compile(r"^Status: (proposed|accepted|rejected: \S.*|superseded by .*\S)\s*$")
+# Sections that belong in an exec plan, not in an accepted decision.
+PLAN_ONLY_SECTIONS = ("plan", "acceptance criteria")
+SKILLS_DIR = Path(".agents/skills")
+SKILL_LINKS_DIR = Path(".claude/skills")
 # Directory *names* skipped anywhere in a path. Keep this list free of names that
-# also appear as real source modules (this repo has crates/.../third_party/).
+# also appear as real source modules (e.g. crates/.../third_party/).
 SKIP_DIRS = {".git", "node_modules", "target", "vendor", ".venv", "venv", "dist", "build", "fixtures", "snapshots"}
 # Top-level only (path part 0): vendored trees that are not project docs/sources.
 SKIP_ROOTS = {"third_party"}
@@ -109,9 +114,10 @@ def _anchors(path: Path) -> set[str]:
 
 
 def is_doc(f: Path) -> bool:
-    # Root maps (AGENTS.md, ARCHITECTURE.md, README.md, …) and everything under docs/.
-    # Nested copies inside vendored skills (e.g. template/AGENTS.md) are not project docs.
-    return f.suffix == ".md" and (len(f.parts) == 1 or f.parts[0] == "docs")
+    # Vendored skills (e.g. .agents/skills/*/template/AGENTS.md) are not project docs.
+    if f.parts[:2] == (".agents", "skills"):
+        return False
+    return f.suffix == ".md" and (len(f.parts) == 1 or f.parts[0] == "docs" or f.name == "AGENTS.md")
 
 
 def check_links(root: Path, f: Path, text: str) -> None:
@@ -153,10 +159,49 @@ def check_structure(root: Path, f: Path, text: str) -> None:
         if parts[2] == "active":
             check_stale_plan(root, f)
     elif parts[1] == "decisions" and len(parts) == 3:
-        if not DECISION_STATUS.search("\n".join(text.splitlines()[:10])):
-            fail(f, 1, "decision-status", "no `Status: proposed|accepted|rejected|superseded` line under the title. Add one.")
-        if not any(h.lower().startswith("alternatives considered") for h in headings):
-            fail(f, 1, "decision-alternatives", "missing `## Alternatives considered`. Record the options that were actually weighed.")
+        check_decision(root, f, text, headings)
+
+
+def check_decision(root: Path, f: Path, text: str, headings: list[str]) -> None:
+    status = next(((no, l) for no, l in enumerate(text.splitlines()[:10], 1) if l.startswith("Status:")), None)
+    if status is None:
+        fail(f, 1, "decision-status", "no `Status:` line under the title. Add one with a value from docs/decisions/README.md.")
+    elif not DECISION_STATUS.match(status[1]):
+        fail(f, status[0], "decision-status", f"`{status[1].strip()}` is not a legal status. Use `proposed`, `accepted`, "
+             "`rejected: <one-line reason>`, or `superseded by [<record>](<file>.md)`.")
+    elif status[1].startswith("Status: superseded by"):
+        targets = LINK.findall(status[1])
+        if not targets:
+            fail(f, status[0], "decision-superseded", "`superseded by` needs a Markdown link to the new record. Add it.")
+        for t in targets:
+            dest = (root / f).parent / t.partition("#")[0]
+            if not dest.is_file():
+                fail(f, status[0], "decision-superseded", f"`{t}` does not exist. Link the record that replaces this one.")
+    elif status[1].startswith("Status: accepted"):
+        for h in headings:
+            if h.strip().lower() in PLAN_ONLY_SECTIONS:
+                fail(f, 1, "decision-plan", f"accepted decision has `## {h}`. Move steps and acceptance criteria to an "
+                     "exec plan in docs/plans/ and link it.")
+    if not any(h.lower().startswith("alternatives considered") for h in headings):
+        fail(f, 1, "decision-alternatives", "missing `## Alternatives considered`. Record the options that were actually weighed.")
+
+
+def check_skill_links(root: Path) -> None:
+    """Each .agents/skills/<n> has .claude/skills/<n> -> ../../.agents/skills/<n>, and nothing else lives there."""
+    skills, links = root / SKILLS_DIR, root / SKILL_LINKS_DIR
+    if not skills.is_dir() and not links.exists():
+        return
+    names = sorted(p.name for p in skills.iterdir() if p.is_dir()) if skills.is_dir() else []
+    for n in names:
+        link, want = links / n, f"../../{SKILLS_DIR.as_posix()}/{n}"
+        if not link.is_symlink():
+            fail(SKILL_LINKS_DIR / n, 1, "skill-link", f"missing symlink for Claude Code. Run `ln -s {want} {SKILL_LINKS_DIR / n}`.")
+        elif os.readlink(link) != want:
+            fail(SKILL_LINKS_DIR / n, 1, "skill-link", f"points at `{os.readlink(link)}`. Recreate it with `ln -sfn {want} {SKILL_LINKS_DIR / n}`.")
+    for p in sorted(links.iterdir()) if links.is_dir() else []:
+        if p.name not in names:
+            fail(SKILL_LINKS_DIR / p.name, 1, "skill-link", f"no skill at `{SKILLS_DIR / p.name}`. Move the skill into "
+                 f"{SKILLS_DIR}/ and symlink it, or delete this entry.")
 
 
 def check_stale_plan(root: Path, f: Path) -> None:
@@ -195,6 +240,8 @@ def main() -> int:
         if index.exists() and len(f.parts) == 2 and f.parts[0] == "docs" and f.name != "README.md" \
                 and f"({f.name}" not in index_text:
             fail(f, 1, "orphan-doc", "not linked from docs/README.md. Add a one-line entry there.")
+
+    check_skill_links(root)
 
     for f in files:
         if f.suffix in SOURCE_EXTS and not is_doc(f):

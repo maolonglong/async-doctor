@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 
 /// Inputs that uniquely identify a finding for baseline / dedupe.
 ///
-/// M1 rule: hash `rule` + entry qualified name + sink qualified name + chain
+/// Hash `rule` + entry qualified name + sink qualified name + chain
 /// qualified names (+ occurrence ordinal). **Not** file/line/column.
 #[derive(Debug, Clone, Copy)]
 pub struct FindingIdParts<'a> {

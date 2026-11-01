@@ -9,8 +9,11 @@ building from source, after pre-release audit fixes and owner confirmation.
 
 - [x] 2026-11-01: Pre-release audit fixes merged — https://github.com/maolonglong/async-doctor/pull/32, https://github.com/maolonglong/async-doctor/pull/33, https://github.com/maolonglong/async-doctor/pull/34.
 - [x] 2026-11-01: P1 recall fixes (boto3 client/resource calls, `Future.result` / `Executor.map` / `wait`, smtplib/ftplib, zipfile/tarfile, glob/`Path.iterdir`, `input()`, chain-through-sinks, genexpr fan-out) — https://github.com/maolonglong/async-doctor/pull/36.
-- [ ] PyPI trusted publisher + `pypi` environment configured for the release workflow.
-- [ ] Resolve vendored `fast-rust` skill license (no upstream license) before open-sourcing / public release.
+- [x] 2026-11-01: PyPI trusted publisher + `pypi` environment configured for the release workflow.
+- [x] 2026-11-01: Removed unlicensed vendored `fast-rust` skill and updated agent docs workflow to v2.
+- [ ] Investigate and optimize peak memory on large monorepos (`home-assistant/core` OOM).
+- [ ] Re-run corpus audit and refresh `litellm` benchmark numbers.
+- [ ] Run `release.yml` workflow_dispatch dry-run and verify built wheel.
 - [ ] Owner confirmation before publish.
 - [ ] Tag/publish 0.1 and verify `uvx async-doctor --version`.
 

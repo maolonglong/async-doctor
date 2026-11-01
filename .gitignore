@@ -2,7 +2,7 @@
 **/target/
 .venv/
 venv/
-# Keep M2 fixture stub venvs (clean-room package stubs for type matching)
+# Keep fixture stub venvs (clean-room package stubs for type matching)
 !fixtures/
 !fixtures/**
 !fixtures/**/.venv/

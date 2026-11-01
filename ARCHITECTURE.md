@@ -123,8 +123,10 @@ analysis logic.
 
 ### `scripts/`
 
-Repo checks: `scripts/check_rust_file_length.sh` (≤800 lines under `crates/`),
-`scripts/check_docs.py` (doc links, budgets, plan/decision structure).
+Repo checks and corpus comparison: `scripts/check_rust_file_length.sh` (≤800
+lines under `crates/`), `scripts/check_docs.py` (doc links, budgets,
+plan/decision structure), `scripts/audit_compare.py` (audit corpus finding-ID
+and location diff).
 
 ### `bench/`
 
@@ -134,8 +136,9 @@ Numbers live in `docs/benchmark.md`.
 
 ### `fixtures/`
 
-Clean-room Python fixtures for rule families, offload, entries, M2/M3 cases,
-and cache multipkg scenarios. Exempt from the file-length ceiling.
+Clean-room Python fixtures for rule families, offload, entries, third-party
+follow, precision/recall cases, and multipackage cache scenarios. Exempt from
+the file-length ceiling.
 
 ### `skills/`
 
@@ -144,8 +147,9 @@ Not a repo-dev skill; packaging excludes it from the wheel.
 
 ### `.agents/skills/`
 
-Repo agent skills (`fast-rust`, `codebase-design`, `agent-docs-workflow`).
-Claude Code reaches them via symlinks under `.claude/skills/`.
+Repo agent skills (`codebase-design`, `agent-docs-workflow`,
+`async-doctor-review`). Claude Code reaches them via symlinks under
+`.claude/skills/`.
 
 ### `.github/`
 

@@ -53,7 +53,9 @@ flowchart LR
 - size budgets: `AGENTS.md` over 100 lines, `ARCHITECTURE.md` over 400, any other doc over 500;
 - unfilled template guidance (`<!-- guide:` comments) outside `_template.md` files;
 - top-level `docs/*.md` files not linked from `docs/README.md`;
-- exec plans missing a required section, and decisions missing a `Status:` line or an `Alternatives considered` section.
+- exec plans missing a required section;
+- decisions with a missing or illegal `Status:` value, a `superseded by` link that does not resolve, no `Alternatives considered` section, or (when accepted) a `## Plan` or `## Acceptance criteria` section;
+- a skill in `.agents/skills/<name>` without the symlink `.claude/skills/<name>` -> `../../.agents/skills/<name>`, or an entry in `.claude/skills/` with no matching skill.
 
 It warns (does not fail) on active plans untouched in git for 14 days: finish, update, or move them.
 

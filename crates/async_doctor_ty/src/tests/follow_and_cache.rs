@@ -1,4 +1,4 @@
-//! m2 integration tests.
+//! Third-party follow and package-cache integration tests.
 
 use async_doctor_core::AnalyzeOptions;
 use async_doctor_core::EntryLabel;
@@ -439,7 +439,7 @@ async def await_gather_sleep():
     ] {
         assert!(
             names.contains(&expected),
-            "missing M1 TP {expected}: findings={names:?} candidates={:?}",
+            "missing expected finding {expected}: findings={names:?} candidates={:?}",
             report
                 .candidates
                 .iter()

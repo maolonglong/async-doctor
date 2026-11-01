@@ -32,5 +32,6 @@ so `uvx async-doctor` works without a Rust toolchain on the user machine.
 ## Consequences
 
 Adapter upgrades are explicit PRs with benchmarks. Agents must not paste
-restricted upstream code into this tree. Before open-sourcing, vendored
-dev-skill license gaps (notably `fast-rust`) must be resolved separately.
+restricted upstream code into this tree. Vendored dev skills must carry an
+explicit permissive license (unlicensed skills such as `fast-rust` are removed
+before open-sourcing).

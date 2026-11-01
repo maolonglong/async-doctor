@@ -17,7 +17,7 @@ flowchart LR
   F --> G[Same PR: ARCHITECTURE, topic docs, notes]
   G --> H[check_docs.py + tests green]
   H --> I[Merge; finished plan -> plans/completed]
-  I --> J[Doc gardening on a schedule]
+  I --> J[Manual docs audit after large merges or before a release]
   J --> A
 ```
 
@@ -28,7 +28,7 @@ flowchart LR
 3. **Code with the plan open.** At every stopping point, update Progress (done vs remaining, with timestamps), Surprises & Discoveries (with evidence), and Decision log. Done when another agent could resume from the plan alone.
 4. **Docs in the same PR.** If the change moves a module, boundary, or invariant, edit `ARCHITECTURE.md`. If it changes user-visible behaviour, edit the topic doc. If something cost real time to figure out, add a note, and prefer turning it into a test or lint.
 5. **Close the plan.** Write Outcomes & Retrospective, move the file to `plans/completed/`, and add any leftover debt to `quality.md`.
-6. **Garden.** On a schedule (weekly is a good default) an agent runs the audit in the `agent-docs-workflow` skill: stale plans, docs that contradict code, notes ready to become lints, debt to pay down. It opens small fix-up PRs.
+6. **Audit by hand when it pays.** After a large merge or before a release, run the audit in the `agent-docs-workflow` skill: stale plans, docs that contradict code, process leakage, notes ready to become lints, debt to pay down. Fix what it finds in small PRs.
 
 ## Who updates what
 
@@ -38,8 +38,8 @@ flowchart LR
 | `ARCHITECTURE.md` | Agent doing the change | Module, boundary, or invariant changes | PR reviewer (agent or human) |
 | `plans/active/*` | Agent executing the plan | Every stopping point | Human skims Progress |
 | `decisions/*` | Agent proposing, human accepting | A choice with real alternatives; superseded by a new record, never rewritten into a different decision | Human for status `accepted` |
-| `notes/*` | Agent that hit the problem | Right after it is solved | Gardening pass |
-| `quality.md` | Gardening agent | Each gardening pass, and when a plan leaves debt | Human skims |
+| `notes/*` | Agent that hit the problem | Right after it is solved | Docs audit |
+| `quality.md` | Agent doing the change or the audit | When a plan leaves debt, a debt is paid, or an audit finds a stale grade | Human skims |
 
 ## Mechanical checks
 
@@ -50,7 +50,9 @@ flowchart LR
 - size budgets: `AGENTS.md` over 100 lines, `ARCHITECTURE.md` over 400, any other doc over 500;
 - unfilled template guidance (`<!-- guide:` comments) outside `_template.md` files;
 - top-level `docs/*.md` files not linked from `docs/README.md`;
-- exec plans missing a required section, and decisions missing a `Status:` line or an `Alternatives considered` section.
+- exec plans missing a required section;
+- decisions with a missing or illegal `Status:` value, a `superseded by` link that does not resolve, no `Alternatives considered` section, or (when accepted) a `## Plan` or `## Acceptance criteria` section;
+- a skill in `.agents/skills/<name>` without the symlink `.claude/skills/<name>` -> `../../.agents/skills/<name>`, or an entry in `.claude/skills/` with no matching skill.
 
 It warns (does not fail) on active plans untouched in git for 14 days: finish, update, or move them.
 

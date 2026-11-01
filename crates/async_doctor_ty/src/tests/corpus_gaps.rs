@@ -1,4 +1,4 @@
-//! M3a recall / precision gap regression tests.
+//! Corpus recall and precision regression tests.
 
 use std::fs;
 

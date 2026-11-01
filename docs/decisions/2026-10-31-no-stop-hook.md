@@ -21,8 +21,8 @@ https://github.com/maolonglong/async-doctor/pull/29.
 
 - **Keep `integrations/stop-hook/` and editor hooks.** Rejected: maintenance
   and auth surface without clear adoption upside versus `npx skills add`.
-- **MCP-only integration before a skill.** Deferred: MCP is post-M4 if needed;
-  the skill covers agent loops with `--changed` today.
+- **MCP-only integration before a skill.** Rejected: MCP adds a persistent
+  server process whereas the skill covers agent loops with `--changed`.
 
 ## Consequences
 

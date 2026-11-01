@@ -1,4 +1,4 @@
-//! M3a higher-order kwargs, type narrowing, and in-memory IO tests.
+//! Higher-order kwargs, type narrowing, and in-memory IO tests.
 
 use std::fs;
 

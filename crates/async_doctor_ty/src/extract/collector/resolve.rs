@@ -193,19 +193,8 @@ impl<'a, 'db> CallCollector<'a, 'db> {
     pub(crate) fn resolve_dunder(&self, expr: &Expr, dunder: &str) -> Option<CalleeRef> {
         let ty = expr.inferred_type(self.model)?;
         let env = self.model.program_environment();
-        // Look up attribute via definitions_for_attribute by synthesizing isn't possible;
-        // use member through display of Type::definition on attribute access via try_call-ish.
-        // Fall back: resolve `{dunder}` on the expression's type through definitions_for_attribute
-        // by building a temporary approach — use Type display + member isn't public enough.
-        // Practical approach: if ty is NominalInstance / etc., use definitions_for_attribute
-        // only works with ExprAttribute. So check inferred type of a virtual attribute via
-        // `definitions_for_attribute` requires AST. Instead, use Type::definition on the
-        // expression and then look for methods — too heavy.
-        //
-        // Cheap path: only resolve when `expr` type has a known definition class and we can
-        // find `dunder` in project/stdlib via attribute completions? attribute_completions exists!
         let _ = (ty, env, dunder);
-        // For M1: attempt type-based external name `{type}.{dunder}` when we can name the type.
+        // Synthesize type-based external name `{type}.{dunder}` when the receiver type is known.
         let type_name = self.type_instance_qualname(expr)?;
         Some(CalleeRef::External {
             qualname: format!("{type_name}.{dunder}"),

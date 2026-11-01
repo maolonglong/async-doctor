@@ -5,7 +5,7 @@
 name = "litellm"
 url = "https://github.com/BerriAI/litellm.git"
 commit = "5029d027a1b60d917e5fa11befe0d982bd11fe39"
-# Package root (proxy + library); matches prior M2 notes.
+# Package root (proxy + library).
 scan = "litellm"
 # Prefer the published package metadata over the monorepo's heavy extras.
 install = ["pip", "install", "-e", "."]

@@ -32,9 +32,10 @@ type PackageMetaValue = Option<(String, String, String)>;
 
 /// Per-scan memo for package meta lookups.
 ///
-/// `meta_for_path` used to re-`read_dir` + fingerprint on every call site; one
-/// large venv made that dominate wall/sys time. Owned by the scan context —
-/// never process-global — so concurrent scans cannot share or clobber state.
+/// Without memoization, `meta_for_path` would re-`read_dir` and fingerprint on
+/// every call site, which dominates wall and sys time on a large venv. Owned by
+/// the scan context — never process-global — so concurrent scans cannot share
+/// or clobber state.
 #[derive(Debug, Default)]
 pub struct PackageMetaMemo {
     map: HashMap<PackageMetaKey, PackageMetaValue>,

@@ -29,7 +29,7 @@ cargo test -p async_doctor --test concurrent_cache -- --ignored   # N=15/20 + N=
 
 ## Standing orders
 
-- Follow `.agents/skills/fast-rust` for all Rust work; follow `.agents/skills/codebase-design` when adding or restructuring modules (deep modules, small interfaces, seams where something actually varies).
+- Follow `.agents/skills/codebase-design` when adding or restructuring modules (deep modules, small interfaces, seams where something actually varies); follow `.agents/skills/async-doctor-review` when changing extraction, propagation, rules, or caching.
 - Keep source files near 500 lines; 800 is the hard ceiling (`scripts/check_rust_file_length.sh`). Split by responsibility into a module directory, keeping the public interface unchanged; large test suites go under `tests/` per area, not one growing `tests.rs`. Fixtures and generated data are exempt.
 - Stay zero-config: entries, rules, and offload boundaries are built-in or inferred; the only escape hatch is `# async-doctor: ignore[rule]: <reason>` ([why](docs/decisions/2026-10-30-zero-config.md)).
 - Clean-room only: public docs and crates; do not copy from react-doctor or unlicensed sources; all ty/ruff use stays in `async_doctor_ty` ([why](docs/decisions/2026-10-30-clean-room-mit.md)).
@@ -44,5 +44,5 @@ cargo test -p async_doctor --test concurrent_cache -- --ignored   # N=15/20 + N=
 
 - `cargo test --workspace` and `python3 scripts/check_docs.py` pass.
 - The exec plan (if any) shows the real state in Progress and Decision log; a finished plan moved to `docs/plans/completed/`.
-- `ARCHITECTURE.md` matches any module, boundary, or invariant this PR changed.
+- `ARCHITECTURE.md` matches any module, boundary, or invariant the change touched.
 - Anything learned the hard way is a note, a test, or a lint, so the next agent does not rediscover it.

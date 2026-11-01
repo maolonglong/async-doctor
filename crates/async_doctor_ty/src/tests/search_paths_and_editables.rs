@@ -1,4 +1,4 @@
-//! M3c recall: nested editable packages, search-path safety, self.engine.
+//! Nested editable packages, search-path safety, and attribute receiver resolution.
 
 use std::fs;
 

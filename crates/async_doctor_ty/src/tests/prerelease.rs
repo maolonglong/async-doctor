@@ -465,20 +465,35 @@ fn undecodable_source_is_skipped() {
 #[test]
 fn empty_directory_reports_no_python_files() {
     let dir = tempfile::tempdir().unwrap();
-    let report = scan_path(dir.path()).expect("scan");
-    assert!(report.complete);
-    assert_ne!(
-        report.environment.kind,
-        async_doctor_core::EnvironmentKind::None,
-        "cold empty scan must discover the environment (got {:?})",
-        report.environment
-    );
+    let cache = fresh_cache_dir("empty-dir");
+    let cold = scan_path_with_cache(dir.path(), Some(&cache)).expect("cold scan");
+    assert!(cold.complete);
+    assert_eq!(cold.message.as_deref(), Some("No Python files were found."));
+    let warm = scan_path_with_cache(dir.path(), Some(&cache)).expect("warm scan");
     assert_eq!(
-        report.message.as_deref(),
-        Some("No Python files were found.")
+        cold.environment, warm.environment,
+        "cold and warm empty scans must report the same environment"
+    );
+    // With an in-project `.venv`, cold empty scan must discover `Venv`.
+    let venv_site = dir.path().join(".venv/lib/python3.12/site-packages");
+    fs::create_dir_all(&venv_site).unwrap();
+    fs::write(
+        dir.path().join(".venv/pyvenv.cfg"),
+        "home = /usr/bin\nversion = 3.12.0\n",
+    )
+    .unwrap();
+    let cache_venv = fresh_cache_dir("empty-dir-venv");
+    let cold_venv = scan_path_with_cache(dir.path(), Some(&cache_venv)).expect("cold venv scan");
+    assert_eq!(
+        cold_venv.environment.kind,
+        async_doctor_core::EnvironmentKind::Venv,
+        "cold empty scan must discover the environment (got {:?})",
+        cold_venv.environment
     );
     let json = report_json(dir.path());
     assert!(json.contains("No Python files were found."), "{json}");
+    let _ = fs::remove_dir_all(&cache);
+    let _ = fs::remove_dir_all(&cache_venv);
 }
 
 #[test]

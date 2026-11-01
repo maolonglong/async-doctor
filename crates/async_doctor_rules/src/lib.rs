@@ -1,6 +1,6 @@
 //! Built-in rule / sink tables for async-doctor.
 //!
-//! Stdlib sinks (M1) plus third-party type-based rules (M2).
+//! Stdlib sinks plus third-party type-based rules.
 
 mod async_twin;
 mod docs;

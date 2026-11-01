@@ -270,7 +270,7 @@ pub struct UnresolvedImport {
     pub text: String,
 }
 
-/// All facts for one project scan (first-party + reachable third-party for M2).
+/// All facts for one project scan (first-party + reachable third-party).
 #[derive(Debug, Clone, Default)]
 pub struct ProjectFacts {
     pub functions: Vec<FunctionFact>,

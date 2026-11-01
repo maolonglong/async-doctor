@@ -1,4 +1,4 @@
-//! PR #36 review follow-ups: off-loop guards, genexpr memo, archives, boto meta.
+//! Off-loop thread guards, genexpr memo, in-memory archives, and boto meta helpers.
 
 use std::fs;
 

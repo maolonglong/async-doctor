@@ -1,4 +1,4 @@
-//! P1 boto3 / aioboto3 recall: receivers, stubs roots, factory finding ids.
+//! boto3 / aioboto3 recall and precision: receivers, stubs roots, factory finding ids.
 
 use std::fs;
 
@@ -7,8 +7,8 @@ use crate::scan_path_with_cache;
 
 #[test]
 fn p1_boto2_client_and_resource_ops() {
-    // Untyped stub: main cannot resolve dynamic get_object/get_item; this branch
-    // must find them via syntactic boto receiver tracking (not merely client()).
+    // Untyped stub: dynamic get_object/get_item do not resolve through ty;
+    // syntactic boto receiver tracking must flag them (not merely client()).
     let dir = clone_fixture("boto2");
     let cache = fresh_cache_dir("boto2");
     let report = scan_path_with_cache(&dir, Some(&cache)).unwrap();
