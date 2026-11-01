@@ -2,12 +2,13 @@
 
 use std::path::PathBuf;
 
-use async_doctor_core::{CallEdge, CallKind, CalleeRef, FunctionId, OffloadKind};
-use async_doctor_rules::aws_op_method_name;
+use async_doctor_core::{CallEdge, CallKind, CalleeRef, FunctionId, OffloadKind, SinkTable};
+use async_doctor_rules::{BuiltinSinkTable, aws_op_method_name};
 use ruff_db::files::FilePath;
 use ruff_db::parsed::parsed_module;
 use ruff_python_ast::Expr;
 use ruff_text_size::TextRange;
+use std::sync::OnceLock;
 use ty_python_core::definition::DefinitionKind;
 use ty_python_semantic::types::{Type, TypeDefinition};
 use ty_python_semantic::{
@@ -31,6 +32,21 @@ fn is_get_event_loop_qual(qualname: &str) -> bool {
             | "asyncio.runners.get_running_loop"
     ) || qualname.ends_with(".get_running_loop")
         || qualname.ends_with(".get_event_loop")
+}
+
+/// Occurrence counter key for an external callee.
+///
+/// Finding IDs hash the *canonical sink* qualname (after family aliases), not the
+/// original callee. Count occurrence on that same key so `boto3.client` and
+/// `boto3.Session.client` (both → sink `boto3.client`) get distinct ordinals.
+fn external_occurrence_key(qualname: &str) -> String {
+    static SINKS: OnceLock<BuiltinSinkTable> = OnceLock::new();
+    let sinks = SINKS.get_or_init(BuiltinSinkTable::new);
+    let key = sinks
+        .lookup(qualname)
+        .map(|h| h.sink_qualname)
+        .unwrap_or(qualname);
+    format!("E{key}")
 }
 
 use super::CallCollector;
@@ -72,7 +88,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 if is_get_event_loop_qual(qualname) {
                     self.try_saw_get_loop = true;
                 }
-                format!("E{qualname}")
+                external_occurrence_key(qualname)
             }
             CalleeRef::Unresolved { reason } => format!("U{reason}"),
             CalleeRef::Offload(k) => format!("O{}", k.as_str()),

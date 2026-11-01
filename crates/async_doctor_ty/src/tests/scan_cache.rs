@@ -52,8 +52,8 @@ fn scan_cache_warm_is_much_faster_when_unchanged() {
 
 fn async_doctor_ty_cache_schema() -> u32 {
     // Keep in sync with crate::cache::CACHE_SCHEMA_VERSION (not re-exported).
-    // v14: report schemaVersion 2 (environment + always-emitted arrays).
-    14
+    // v15: occurrence counted by canonical sink key for external edges.
+    15
 }
 
 #[test]
