@@ -70,11 +70,17 @@ pub(crate) struct BaseFnPatch {
 }
 
 /// Run pass 2 in parallel with per-thread DB clones and per-file work-stealing.
+///
+/// Each worker periodically resets its salsa DB (`fresh_empty`) after a bounded
+/// number of files so accumulated `SemanticModel` memos do not grow without
+/// bound on large monorepos.
 pub(crate) fn run_pass2_parallel(
     db: &AsyncDoctorDb,
     files: &[Pass2FileSpec],
     shared: &Pass2Shared,
 ) -> Vec<Pass2FileResult> {
+    const WORKER_DB_RESET_INTERVAL: usize = 64;
+
     if files.is_empty() {
         return Vec::new();
     }
@@ -95,18 +101,27 @@ pub(crate) fn run_pass2_parallel(
             let queue = &queue;
             handles.push(scope.spawn(move || {
                 let mut out = Vec::new();
+                let mut since_reset = 0usize;
                 loop {
                     let i = queue.lock().unwrap().pop_front();
                     let Some(i) = i else {
                         break;
                     };
+                    if since_reset >= WORKER_DB_RESET_INTERVAL {
+                        worker_db = worker_db.fresh_empty();
+                        since_reset = 0;
+                    }
                     let result = match catch_unwind(AssertUnwindSafe(|| {
                         extract_one_file(&worker_db, &files[i], shared)
                     })) {
-                        Ok(r) => r,
+                        Ok(r) => {
+                            since_reset += 1;
+                            r
+                        }
                         Err(payload) => {
                             // Salsa state may be poisoned — drop memos for the next file.
                             worker_db = worker_db.fresh_empty();
+                            since_reset = 0;
                             Pass2FileResult::skipped(&files[i].rel, &panic_message(&payload))
                         }
                     };
@@ -191,14 +206,13 @@ pub(crate) fn extract_one_file(
         return Pass2FileResult::empty();
     }
 
-    // Functions: copy-on-write scratch (CallCollector mutates base slots).
-    // def/qual maps: empty locals + shared base overlays (no full-map clone).
+    // Functions and def/qual maps: empty locals + shared read-only base overlays
+    // (no per-file clone of the full function or def/qual tables).
     let mut facts = ProjectFacts {
-        functions: Vec::with_capacity(base_len + 8),
+        functions: Vec::with_capacity(8),
         complete: true,
         ..ProjectFacts::default()
     };
-    facts.functions.extend(shared.functions.iter().cloned());
     let mut def_map: HashMap<DefKey, FunctionId> = HashMap::new();
     let mut qual_map: HashMap<(String, String), FunctionId> = HashMap::new();
     let mut follow_targets: HashMap<String, FollowTarget> = HashMap::new();
@@ -232,6 +246,7 @@ pub(crate) fn extract_one_file(
         true,
         &module_constants,
     );
+    visitor.functions_base = Some(shared.functions.as_slice());
     super::collector::loop_guards::collect_idle_loop_helpers(
         parsed.suite(),
         &mut visitor.idle_loop_helpers,
@@ -240,29 +255,33 @@ pub(crate) fn extract_one_file(
         visitor.visit_stmt(stmt);
     }
 
-    let mut base_patches = Vec::new();
-    let mut route_ids = HashSet::new();
-    let mut sync_route_ids = HashSet::new();
-    for (i, f) in facts.functions.iter().enumerate().take(base_len) {
-        let base = &shared.functions[i];
-        if f.label == async_doctor_core::EntryLabel::Route {
-            route_ids.insert(f.id);
-        }
-        if f.is_sync_route {
-            sync_route_ids.insert(f.id);
-        }
-        if f.is_offload_wrapper != base.is_offload_wrapper
-            || f.invokes_params != base.invokes_params
-        {
-            base_patches.push(BaseFnPatch {
-                id: f.id,
-                is_offload_wrapper: f.is_offload_wrapper,
-                invokes_params: f.invokes_params.clone(),
-            });
-        }
+    let mut modified_base_ids: Vec<FunctionId> = visitor
+        .base_offload_wrappers
+        .iter()
+        .chain(visitor.base_invokes_params.keys())
+        .copied()
+        .collect();
+    modified_base_ids.sort_by_key(|id| id.0);
+    modified_base_ids.dedup();
+    let mut base_patches = Vec::with_capacity(modified_base_ids.len());
+    for id in modified_base_ids {
+        let base = &shared.functions[id.index()];
+        let is_offload_wrapper =
+            base.is_offload_wrapper || visitor.base_offload_wrappers.contains(&id);
+        let invokes_params = visitor
+            .base_invokes_params
+            .remove(&id)
+            .unwrap_or_else(|| base.invokes_params.clone());
+        base_patches.push(BaseFnPatch {
+            id,
+            is_offload_wrapper,
+            invokes_params,
+        });
     }
+    let route_ids = visitor.base_route_ids;
+    let sync_route_ids = visitor.base_sync_route_ids;
 
-    let new_functions: Vec<FunctionFact> = facts.functions.drain(base_len..).collect();
+    let new_functions = facts.functions;
     let mut new_def_keys = Vec::with_capacity(def_map.len());
     for (key, id) in &def_map {
         let idx = id.0 as usize;

@@ -35,7 +35,7 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 let prev_archives = self.in_memory_archive_receivers.clone();
                 self.current_fn = fid;
                 self.current_param_names = fid
-                    .map(|id| self.facts.function(id).param_names.clone())
+                    .map(|id| self.function(id).param_names.clone())
                     .unwrap_or_default();
                 // Parameters shadow module-level unbounded queue / boto bindings.
                 for p in &self.current_param_names {

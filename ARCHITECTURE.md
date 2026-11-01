@@ -53,10 +53,11 @@ reports (`env_info.rs`), and twin resolution against the scanned venv
 (`twin_resolve.rs`).
 
 `extract/`: path discovery (`files.rs`, `path.rs`), pass-1 function collection
-(`functions.rs`), pass-2 typed edges (`pass2.rs` — default parallel per-thread
-salsa clones), per-file `CallCollector` (`extract/collector/`), and third-party
-follow with budget (`follow.rs`). Package cache: `cache.rs`. Whole-scan report
-cache: `scan_cache.rs`. Site-packages helpers: `sitepkgs/`.
+(`functions.rs` with periodic Salsa resets), pass-2 typed edges (`pass2.rs` —
+default parallel per-thread Salsa clones with periodic resets and a shared read-only
+pass-1 function slice overlay), per-file `CallCollector` (`extract/collector/`), and
+third-party follow with budget (`follow.rs`). Package cache: `cache.rs`. Whole-scan
+report cache: `scan_cache.rs`. Site-packages helpers: `sitepkgs/`.
 
 **Architecture invariant:** no ty/ruff types cross into `async_doctor_core`;
 only plain `ProjectFacts` / `Report` values leave this crate.

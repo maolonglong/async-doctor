@@ -30,6 +30,9 @@ pub(crate) struct CallCollector<'a, 'db> {
     pub(super) ctx: &'a FileCtx<'db>,
     pub(super) model: &'a SemanticModel<'db>,
     pub(super) facts: &'a mut ProjectFacts,
+    /// Optional shared base functions for parallel pass-2 so workers do not
+    /// clone the full pass-1 function table per file.
+    pub(super) functions_base: Option<&'a [async_doctor_core::FunctionFact]>,
     pub(super) def_map: &'a mut HashMap<DefKey, FunctionId>,
     /// Optional shared base for parallel pass-2: lookups fall through here so
     /// `def_map` only holds this file's inserts (no per-file full-map clone).
@@ -143,6 +146,14 @@ pub(crate) struct CallCollector<'a, 'db> {
     /// Receivers proven `.done()` in the current branch (`fut`, `self.x`, …) —
     /// matching `.result()` is non-blocking.
     pub(super) future_done_receivers: HashSet<String>,
+    /// Base functions marked as offload wrappers while visiting with `functions_base`.
+    pub(super) base_offload_wrappers: HashSet<FunctionId>,
+    /// Base functions that invoke a positional parameter while visiting with `functions_base`.
+    pub(super) base_invokes_params: HashMap<FunctionId, Vec<u32>>,
+    /// Base functions labeled as routes while visiting with `functions_base`.
+    pub(super) base_route_ids: HashSet<FunctionId>,
+    /// Base sync functions labeled as routes while visiting with `functions_base`.
+    pub(super) base_sync_route_ids: HashSet<FunctionId>,
 }
 
 /// Hard cap on nested local-genexpr expansions (belt alongside the pointer set).
@@ -174,6 +185,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             ctx,
             model,
             facts,
+            functions_base: None,
             def_map,
             def_map_base,
             qual_map,
@@ -231,6 +243,99 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             buffer_locals: HashSet::new(),
             in_memory_archive_receivers: HashSet::new(),
             future_done_receivers: HashSet::new(),
+            base_offload_wrappers: HashSet::new(),
+            base_invokes_params: HashMap::new(),
+            base_route_ids: HashSet::new(),
+            base_sync_route_ids: HashSet::new(),
+        }
+    }
+
+    pub(super) fn function(&self, id: FunctionId) -> &async_doctor_core::FunctionFact {
+        if let Some(base) = self.functions_base {
+            let base_len = base.len();
+            let idx = id.index();
+            if idx < base_len {
+                return &base[idx];
+            }
+            return &self.facts.functions[idx - base_len];
+        }
+        self.facts.function(id)
+    }
+
+    pub(super) fn next_function_id(&self) -> FunctionId {
+        let base_len = self.functions_base.map(|b| b.len()).unwrap_or(0);
+        FunctionId((base_len + self.facts.functions.len()) as u32)
+    }
+
+    pub(super) fn mark_offload_wrapper(&mut self, id: FunctionId) {
+        if let Some(base) = self.functions_base {
+            let base_len = base.len();
+            let idx = id.index();
+            if idx < base_len {
+                self.base_offload_wrappers.insert(id);
+            } else {
+                self.facts.functions[idx - base_len].is_offload_wrapper = true;
+            }
+        } else {
+            self.facts.functions[id.index()].is_offload_wrapper = true;
+        }
+    }
+
+    pub(super) fn record_param_invoke(&mut self, id: FunctionId, param_idx: u32) {
+        if let Some(base) = self.functions_base {
+            let base_len = base.len();
+            let idx = id.index();
+            if idx < base_len {
+                let entry = self
+                    .base_invokes_params
+                    .entry(id)
+                    .or_insert_with(|| base[idx].invokes_params.clone());
+                if !entry.contains(&param_idx) {
+                    entry.push(param_idx);
+                }
+            } else {
+                let invokes = &mut self.facts.functions[idx - base_len].invokes_params;
+                if !invokes.contains(&param_idx) {
+                    invokes.push(param_idx);
+                }
+            }
+        } else {
+            let invokes = &mut self.facts.functions[id.index()].invokes_params;
+            if !invokes.contains(&param_idx) {
+                invokes.push(param_idx);
+            }
+        }
+    }
+
+    pub(super) fn mark_imperative_route(&mut self, id: FunctionId) {
+        if let Some(base) = self.functions_base {
+            let base_len = base.len();
+            let idx = id.index();
+            if idx < base_len {
+                let f = &base[idx];
+                if f.label == async_doctor_core::EntryLabel::Other {
+                    self.base_route_ids.insert(id);
+                }
+                if !f.is_async {
+                    self.base_sync_route_ids.insert(id);
+                }
+            } else {
+                let f = &mut self.facts.functions[idx - base_len];
+                if f.label == async_doctor_core::EntryLabel::Other {
+                    f.label = async_doctor_core::EntryLabel::Route;
+                }
+                if !f.is_async {
+                    f.is_sync_route = true;
+                }
+            }
+        } else {
+            let f = &mut self.facts.functions[id.index()];
+            if f.label == async_doctor_core::EntryLabel::Other {
+                f.label = async_doctor_core::EntryLabel::Route;
+            }
+            if !f.is_async {
+                f.is_sync_route = true;
+            }
         }
     }
 

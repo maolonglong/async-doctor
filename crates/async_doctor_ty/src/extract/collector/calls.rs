@@ -272,7 +272,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 && let Expr::Name(n) = arg
                 && self.current_param_names.iter().any(|p| p == n.id.as_str())
             {
-                self.facts.functions[caller.index()].is_offload_wrapper = true;
+                self.mark_offload_wrapper(caller);
             }
             // Prefer structural coroutine-ness of the offloaded target when known.
             let target_coro = call
@@ -318,7 +318,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             } else if self.consuming_generator
                 && (matches!(
                     &callee,
-                    CalleeRef::Project(id) if self.facts.function(*id).is_generator
+                    CalleeRef::Project(id) if self.function(*id).is_generator
                 ) || matches!(&callee, CalleeRef::External { .. }))
             {
                 // Project generators and external consume-only sinks (`listen()`).
@@ -494,7 +494,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             attr.range(),
             CallKind::PropertyGet,
             false,
-            Some(self.facts.function(fid).is_async),
+            Some(self.function(fid).is_async),
         );
     }
 
@@ -505,13 +505,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         let Some(fid) = self.resolve_project_function(handler) else {
             return;
         };
-        let f = &mut self.facts.functions[fid.index()];
-        if f.label == EntryLabel::Other {
-            f.label = EntryLabel::Route;
-        }
-        if !f.is_async {
-            f.is_sync_route = true;
-        }
+        self.mark_imperative_route(fid);
     }
 
     pub(crate) fn note_task_spawn(&mut self, call: &ast::ExprCall) {
@@ -620,7 +614,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         if let Some(id) = self.def_get(&key) {
             return id;
         }
-        let id = FunctionId(self.facts.functions.len() as u32);
+        let id = self.next_function_id();
         let qualname = format!("<lambda@{}>", self.ctx.line_of(lam.range.start()));
         let param_names: Vec<String> = lam
             .parameters
@@ -660,7 +654,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         let prev_in = self.in_lambda;
         let depths = self.take_enclosing_depths();
         self.current_fn = Some(id);
-        self.current_param_names = self.facts.function(id).param_names.clone();
+        self.current_param_names = self.function(id).param_names.clone();
         self.in_lambda = false;
         self.visit_expr(&lam.body);
         self.in_lambda = prev_in;

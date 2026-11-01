@@ -109,9 +109,14 @@ pub(crate) fn extract_files(
 
     // Pass 1: collect functions (parse only — no SemanticModel).
     {
-        let program = db.program();
+        const PASS1_RESET_INTERVAL: usize = 512;
         let mut kept: Vec<FileRef> = Vec::with_capacity(catalog.len());
+        let mut since_reset = 0usize;
         for entry in catalog {
+            if since_reset >= PASS1_RESET_INTERVAL {
+                db = db.fresh_empty();
+                since_reset = 0;
+            }
             let file = match system_path_to_file(&db, &entry.system_path) {
                 Ok(f) => f,
                 Err(err) => {
@@ -122,6 +127,7 @@ pub(crate) fn extract_files(
                     continue;
                 }
             };
+            let program = db.program();
             let program_file = program.program_file(&db, file);
             let source = source_text(&db, file);
             if let Some(err) = source.read_error() {
@@ -162,9 +168,12 @@ pub(crate) fn extract_files(
                 &mut property_defs,
             );
             kept.push(entry);
+            since_reset += 1;
         }
         catalog = kept;
     }
+    // Drop pass-1 AST/source memos before spawning pass-2 workers.
+    db = db.fresh_empty();
 
     for func in &mut facts.functions {
         if let Some((class, method)) = func.qualname.rsplit_once('.') {

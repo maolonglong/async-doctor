@@ -11,7 +11,7 @@ building from source, after pre-release audit fixes and owner confirmation.
 - [x] 2026-11-01: P1 recall fixes (boto3 client/resource calls, `Future.result` / `Executor.map` / `wait`, smtplib/ftplib, zipfile/tarfile, glob/`Path.iterdir`, `input()`, chain-through-sinks, genexpr fan-out) — https://github.com/maolonglong/async-doctor/pull/36.
 - [x] 2026-11-01: PyPI trusted publisher + `pypi` environment configured for the release workflow.
 - [x] 2026-11-01: Removed unlicensed vendored `fast-rust` skill and updated agent docs workflow to v2.
-- [ ] Investigate and optimize peak memory on large monorepos (`home-assistant/core` OOM).
+- [x] 2026-11-01: Investigated and optimized peak memory on large monorepos (`home-assistant/core` peak RSS cut from 6.5 GB to 1.95 GB, wall time from 143s to 33.6s).
 - [ ] Re-run corpus audit and refresh `litellm` benchmark numbers.
 - [ ] Run `release.yml` workflow_dispatch dry-run and verify built wheel.
 - [ ] Owner confirmation before publish.
@@ -21,8 +21,12 @@ building from source, after pre-release audit fixes and owner confirmation.
 
 - Incremental per-file cache rejected on speed grounds despite correctness
   ([../../decisions/2026-11-01-reject-incremental-file-cache.md](../../decisions/2026-11-01-reject-incremental-file-cache.md)).
-- Home Assistant core OOM above ~6GB remains an open memory risk for “scan the
-  whole monorepo” workflows.
+- Home Assistant core (20,329 `.py` files, ~75k functions) previously peaked at
+  6.5 GB RSS and 143s because each pass-2 file cloned the full pass-1
+  `Vec<FunctionFact>` and Salsa memos accumulated across thousands of files per
+  worker. Sharing the pass-1 function slice read-only with sparse mutation indices
+  and periodically resetting `AsyncDoctorDb` cut peak RSS to 1.95 GB and cold wall
+  time to 33.6s with byte-identical output.
 
 ## Decision log
 

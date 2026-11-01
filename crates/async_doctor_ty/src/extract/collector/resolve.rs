@@ -69,7 +69,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
     ) {
         // Bare generator call (`g = gen()`) must not propagate; only when consumed.
         if let CalleeRef::Project(id) = &callee
-            && self.facts.function(*id).is_generator
+            && self.function(*id).is_generator
             && !self.consuming_generator
             && kind != CallKind::GeneratorConsume
         {
@@ -78,7 +78,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
 
         // Project callees always know async-ness from FunctionFact.
         let callee_is_coroutine = match &callee {
-            CalleeRef::Project(id) => Some(self.facts.function(*id).is_async),
+            CalleeRef::Project(id) => Some(self.function(*id).is_async),
             _ => callee_is_coroutine,
         };
 
@@ -129,7 +129,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
     /// included). `None` when the definition cannot be recovered.
     pub(crate) fn resolve_callee_is_coroutine(&self, func: &Expr) -> Option<bool> {
         if let Some(fid) = self.resolve_project_function(func) {
-            return Some(self.facts.function(fid).is_async);
+            return Some(self.function(fid).is_async);
         }
         let resolved = match func {
             Expr::Name(name) => definitions_for_name(
@@ -330,10 +330,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         {
             let index = idx as u32;
             if let Some(fid) = self.current_fn {
-                let invokes = &mut self.facts.functions[fid.index()].invokes_params;
-                if !invokes.contains(&index) {
-                    invokes.push(index);
-                }
+                self.record_param_invoke(fid, index);
             }
             return Some(CalleeRef::ParamInvoke { index });
         }
