@@ -85,9 +85,11 @@ pub fn analyze_with_options(
     let mut report = Report {
         schema_version: SCHEMA_VERSION,
         complete: facts.complete,
+        environment: facts.environment.clone(),
         findings: Vec::new(),
         candidates: Vec::new(),
         advice: Vec::new(),
+        location_less_candidates: Vec::new(),
         skipped: facts.skipped.clone(),
         omitted_non_production_entries: 0,
         hidden_unresolved_candidates: 0,
@@ -502,46 +504,46 @@ pub fn analyze_with_options(
         });
     }
 
-    // Missing third-party packages: one aggregated note (never per-import).
-    let n_tp = facts.unresolved_third_party_modules.len();
+    // Missing third-party packages: one location-less note (never per-import).
+    // Always emitted under `locationLessCandidates` so env degradation is visible
+    // without `--show-unresolved` (empty entry.file/chain stay out of `candidates`).
+    let n_tp = facts.unresolved_third_party_modules.len() as u32;
+    report.environment.unresolved_third_party = n_tp;
+    report.environment.refresh_note();
     if n_tp > 0 {
         let pattern = format!("{n_tp} third-party modules not installed; run in the project venv");
         let agg = unresolved_agg.entry(pattern.clone()).or_default();
-        agg.0 = n_tp as u32;
-        if !options.show_unresolved {
-            report.hidden_unresolved_candidates += 1;
-        } else {
-            let sink_key = "unresolved-import:third-party-not-installed";
-            let id = finding_id(FindingIdParts {
-                rule: "unresolved-import",
-                entry_qualname: "third-party-not-installed",
-                sink_qualname: sink_key,
-                chain_qualnames: &[sink_key],
-                occurrence: 0,
+        agg.0 = n_tp;
+        let sink_key = "unresolved-import:third-party-not-installed";
+        let id = finding_id(FindingIdParts {
+            rule: "unresolved-import",
+            entry_qualname: "third-party-not-installed",
+            sink_qualname: sink_key,
+            chain_qualnames: &[sink_key],
+            occurrence: 0,
+        });
+        if emitted.insert(id.clone()) {
+            report.location_less_candidates.push(Candidate {
+                id,
+                rule: "unresolved-import".to_string(),
+                entry: Entry {
+                    file: String::new(),
+                    line: 0,
+                    name: "third-party-not-installed".into(),
+                    label: crate::report::EntryLabel::Other,
+                },
+                chain: Vec::new(),
+                conditions: Vec::new(),
+                reason: pattern,
+                fix: Fix {
+                    hint: "Install project dependencies into the active venv, then re-scan."
+                        .to_string(),
+                    fix_group_id: fix_group_id("unresolved-import", sink_key),
+                },
+                why: "async-doctor why — activate the project venv or set VIRTUAL_ENV".into(),
+                docs_anchor: "#unresolved-call".into(),
+                docs_url: "https://github.com/maolonglong/async-doctor/blob/main/docs/rules.md#unresolved-call".into(),
             });
-            if emitted.insert(id.clone()) {
-                raw_candidates.push(Candidate {
-                    id,
-                    rule: "unresolved-import".to_string(),
-                    entry: Entry {
-                        file: String::new(),
-                        line: 0,
-                        name: "third-party-not-installed".into(),
-                        label: crate::report::EntryLabel::Other,
-                    },
-                    chain: Vec::new(),
-                    conditions: Vec::new(),
-                    reason: pattern,
-                    fix: Fix {
-                        hint: "Install project dependencies into the active venv, then re-scan."
-                            .to_string(),
-                        fix_group_id: fix_group_id("unresolved-import", sink_key),
-                    },
-                    why: "async-doctor --show-unresolved".into(),
-                    docs_anchor: "#unresolved-call".into(),
-                    docs_url: "https://github.com/maolonglong/async-doctor/blob/main/docs/rules.md#unresolved-call".into(),
-                });
-            }
         }
     }
 
@@ -554,7 +556,12 @@ pub fn analyze_with_options(
         options.include_non_production,
         &mut emitted,
     ));
-    report.candidates = raw_candidates;
+    // Empty entry.file/chain belong in locationLessCandidates, not candidates.
+    let (located, location_less): (Vec<_>, Vec<_>) = raw_candidates
+        .into_iter()
+        .partition(|c| !(c.entry.file.is_empty() && c.chain.is_empty()));
+    report.candidates = located;
+    report.location_less_candidates.extend(location_less);
     report.advice =
         collect_offload_twin_advice(facts, sinks, &reverse, options.include_non_production);
 

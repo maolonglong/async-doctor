@@ -1,5 +1,6 @@
 //! Plain call-graph facts emitted by the ty adapter (no ty types leak here).
 
+use crate::environment::ScanEnvironment;
 use crate::report::EntryLabel;
 
 /// Stable index into [`ProjectFacts::functions`].
@@ -287,6 +288,8 @@ pub struct ProjectFacts {
     /// during extract). Used by advice rules that require the async twin (and
     /// its `needs`) to be installed.
     pub resolved_symbols: std::collections::BTreeSet<String>,
+    /// Interpreter / venv discovered for this extract (copied onto the report).
+    pub environment: ScanEnvironment,
 }
 
 impl ProjectFacts {
