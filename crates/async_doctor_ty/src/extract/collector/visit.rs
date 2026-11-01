@@ -29,6 +29,7 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 // clone so local rebinds do not leak to sibling defs.
                 let prev_queues = self.unbounded_queues.clone();
                 let prev_boto = self.boto_receivers.clone();
+                let prev_boto_session = self.boto_session_receivers.clone();
                 let prev_aio_boto = self.aio_boto_receivers.clone();
                 let prev_buffers = self.buffer_locals.clone();
                 let prev_archives = self.in_memory_archive_receivers.clone();
@@ -40,6 +41,7 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 for p in &self.current_param_names {
                     self.unbounded_queues.remove(p);
                     self.boto_receivers.remove(p);
+                    self.boto_session_receivers.remove(p);
                     self.aio_boto_receivers.remove(p);
                     self.buffer_locals.remove(p);
                     self.in_memory_archive_receivers.remove(p);
@@ -56,6 +58,7 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 self.event_loop_locals = prev_event_loop;
                 self.unbounded_queues = prev_queues;
                 self.boto_receivers = prev_boto;
+                self.boto_session_receivers = prev_boto_session;
                 self.aio_boto_receivers = prev_aio_boto;
                 self.buffer_locals = prev_buffers;
                 self.in_memory_archive_receivers = prev_archives;

@@ -123,6 +123,9 @@ pub(crate) struct CallCollector<'a, 'db> {
     /// Names bound from `boto3.client` / `boto3.resource` (module or local).
     /// Dynamic client methods often have no stubs — track syntactically.
     pub(super) boto_receivers: HashSet<String>,
+    /// Names bound from sync `boto3.Session()` — `.client` / `.resource` on these
+    /// are factories even when stubs do not resolve the attribute.
+    pub(super) boto_session_receivers: HashSet<String>,
     /// Names rooted in `aioboto3` / `aiobotocore` (Session, client, resource).
     /// Never treated as sync boto receivers for AWS-op synthesis.
     pub(super) aio_boto_receivers: HashSet<String>,
@@ -221,6 +224,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             idle_loop_helpers: HashSet::new(),
             unbounded_queues: HashSet::new(),
             boto_receivers: HashSet::new(),
+            boto_session_receivers: HashSet::new(),
             aio_boto_receivers: HashSet::new(),
             running_loop_locals: HashSet::new(),
             event_loop_locals: HashSet::new(),
