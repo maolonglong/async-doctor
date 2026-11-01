@@ -199,6 +199,23 @@ pub(super) fn merge_file_io_findings(findings: Vec<Finding>) -> Vec<Finding> {
     // while still collapsing `open`+`read`/`write` for a single with-block.
     // When several opens share a prefix, bind each rw to the nearest preceding
     // open by sink line (so write after a second open is not glued to the first).
+    // Snapshot prefix/line *before* absorption — pushing rw hops onto `open.chain`
+    // would otherwise change the terminal hop and block later reads/writes.
+    struct OpenMeta {
+        prefix: Vec<(String, u32, String)>,
+        line: u32,
+        file: String,
+        name: String,
+    }
+    let open_meta: Vec<OpenMeta> = opens
+        .iter()
+        .map(|o| OpenMeta {
+            prefix: chain_prefix_before_sink(&o.chain),
+            line: o.chain.last().map(|c| c.line).unwrap_or(0),
+            file: o.entry.file.clone(),
+            name: o.entry.name.clone(),
+        })
+        .collect();
     let mut absorbed: HashSet<usize> = HashSet::new();
     for (i, rw) in others.iter().enumerate() {
         if rw.rule != "blocking-file"
@@ -209,23 +226,19 @@ pub(super) fn merge_file_io_findings(findings: Vec<Finding>) -> Vec<Finding> {
         let rw_line = rw.chain.last().map(|c| c.line).unwrap_or(0);
         let rw_prefix = chain_prefix_before_sink(&rw.chain);
         let mut best: Option<usize> = None;
-        for (oi, open) in opens.iter().enumerate() {
-            if rw.entry.file != open.entry.file || rw.entry.name != open.entry.name {
+        for (oi, meta) in open_meta.iter().enumerate() {
+            if rw.entry.file != meta.file || rw.entry.name != meta.name {
                 continue;
             }
-            if chain_prefix_before_sink(&open.chain) != rw_prefix {
+            if meta.prefix != rw_prefix {
                 continue;
             }
-            let open_line = open.chain.last().map(|c| c.line).unwrap_or(0);
-            if open_line > rw_line {
+            if meta.line > rw_line {
                 continue;
             }
             let better = match best {
                 None => true,
-                Some(bi) => {
-                    let bl = opens[bi].chain.last().map(|c| c.line).unwrap_or(0);
-                    open_line >= bl
-                }
+                Some(bi) => meta.line >= open_meta[bi].line,
             };
             if better {
                 best = Some(oi);
@@ -256,7 +269,10 @@ pub(super) fn merge_file_io_findings(findings: Vec<Finding>) -> Vec<Finding> {
 
 pub(super) fn is_open_call_text(text: &str) -> bool {
     let t = text.trim();
-    t.starts_with("open(") || t.contains(".open(")
+    t.starts_with("open(")
+        || t.contains(".open(")
+        || t.contains("ZipFile(")
+        || t.contains("TarFile(")
 }
 
 /// Chain hops before the terminal sink (empty when the sink is inside the entry).
@@ -277,6 +293,98 @@ pub(super) fn is_file_rw_text(text: &str) -> bool {
         || t.contains(".readlines(")
         || t.contains(".write(")
         || t.contains(".writelines(")
+        || t.contains(".writestr(")
+        || t.contains(".extract(")
+        || t.contains(".extractall(")
+        || t.contains(".add(")
+        || t.contains(".addfile(")
+}
+
+/// Collapse `SMTP(...).sendmail(...)` / `ZipFile(...).extractall()` into one
+/// finding: keep the method sink, absorb the same-line constructor hop.
+pub(super) fn merge_same_line_ctor_call_findings(findings: Vec<Finding>) -> Vec<Finding> {
+    if findings.len() < 2 {
+        return findings;
+    }
+    let n = findings.len();
+    let mut drop_ctor: HashSet<usize> = HashSet::new();
+    let mut absorb_into: HashMap<usize, Vec<usize>> = HashMap::new();
+    for i in 0..n {
+        if drop_ctor.contains(&i) {
+            continue;
+        }
+        let Some(i_sink) = findings[i].chain.last() else {
+            continue;
+        };
+        for j in (i + 1)..n {
+            if drop_ctor.contains(&j) {
+                continue;
+            }
+            if findings[i].entry.file != findings[j].entry.file
+                || findings[i].entry.name != findings[j].entry.name
+            {
+                continue;
+            }
+            let Some(j_sink) = findings[j].chain.last() else {
+                continue;
+            };
+            if i_sink.file != j_sink.file || i_sink.line != j_sink.line {
+                continue;
+            }
+            let (method_i, ctor_i) = if i_sink.text.contains(j_sink.text.as_str())
+                && i_sink.text.len() > j_sink.text.len()
+                && looks_like_ctor_call_text(&j_sink.text)
+            {
+                (i, j)
+            } else if j_sink.text.contains(i_sink.text.as_str())
+                && j_sink.text.len() > i_sink.text.len()
+                && looks_like_ctor_call_text(&i_sink.text)
+            {
+                (j, i)
+            } else {
+                continue;
+            };
+            drop_ctor.insert(ctor_i);
+            absorb_into.entry(method_i).or_default().push(ctor_i);
+        }
+    }
+    if drop_ctor.is_empty() {
+        return findings;
+    }
+    let ctor_chains: HashMap<usize, Vec<ChainStep>> = drop_ctor
+        .iter()
+        .map(|&i| (i, findings[i].chain.clone()))
+        .collect();
+    let mut out = Vec::with_capacity(n - drop_ctor.len());
+    for (i, mut f) in findings.into_iter().enumerate() {
+        if drop_ctor.contains(&i) {
+            continue;
+        }
+        if let Some(ctors) = absorb_into.get(&i) {
+            for &ci in ctors {
+                for step in &ctor_chains[&ci] {
+                    if !f.chain.iter().any(|s| {
+                        s.file == step.file && s.line == step.line && s.text == step.text
+                    }) {
+                        f.chain.push(step.clone());
+                    }
+                }
+            }
+        }
+        out.push(f);
+    }
+    out
+}
+
+fn looks_like_ctor_call_text(text: &str) -> bool {
+    let t = text.trim();
+    // `smtplib.SMTP(...)` / `zipfile.ZipFile(...)` — capitalized type callee.
+    let Some(open) = t.find('(') else {
+        return false;
+    };
+    let head = &t[..open];
+    let method = head.rsplit('.').next().unwrap_or(head);
+    method.chars().next().is_some_and(|c| c.is_uppercase())
 }
 
 pub(super) struct PathToEntry {

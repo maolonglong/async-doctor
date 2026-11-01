@@ -35,6 +35,15 @@ impl SinkTable for TestSinks {
                 with_only: false,
                 consume_only: false,
             }),
+            "io.TextIOWrapper.write" => Some(SinkHit {
+                rule: "blocking-file",
+                sink_qualname: "io.TextIOWrapper.write",
+                fix_hint: "offload",
+                candidate_only: false,
+                candidate_reason: None,
+                with_only: false,
+                consume_only: false,
+            }),
             "os.stat" => Some(SinkHit {
                 rule: "blocking-file",
                 sink_qualname: "os.stat",
@@ -356,6 +365,67 @@ fn merges_open_and_read() {
             .any(|c| c.text.contains("read")),
         "{:?}",
         report.findings[0].chain
+    );
+}
+
+#[test]
+fn merges_multiple_writes_into_one_open() {
+    // Snapshot prefixes before absorption so the second write is not orphaned.
+    let facts = ProjectFacts {
+        functions: vec![fn_fact(0, "handler", true, "a.py", 1)],
+        edges: vec![
+            edge(
+                0,
+                CalleeRef::External {
+                    qualname: "builtins.open".into(),
+                },
+                2,
+                "open(p, 'w')",
+                vec![ConditionTag::Unconditional, ConditionTag::AllPaths],
+            ),
+            edge(
+                0,
+                CalleeRef::External {
+                    qualname: "io.TextIOWrapper.write".into(),
+                },
+                3,
+                "f.write('a')",
+                vec![ConditionTag::Unconditional, ConditionTag::AllPaths],
+            ),
+            {
+                let mut e = edge(
+                    0,
+                    CalleeRef::External {
+                        qualname: "io.TextIOWrapper.write".into(),
+                    },
+                    4,
+                    "f.write('b')",
+                    vec![ConditionTag::Unconditional, ConditionTag::AllPaths],
+                );
+                e.occurrence = 1;
+                e
+            },
+        ],
+        complete: true,
+        ..Default::default()
+    };
+    let report = analyze(&facts, &TestSinks);
+    assert_eq!(
+        report.findings.len(),
+        1,
+        "expected one merged finding, got {:?}",
+        report.findings
+    );
+    let texts: Vec<_> = report.findings[0]
+        .chain
+        .iter()
+        .map(|c| c.text.as_str())
+        .collect();
+    assert!(texts.iter().any(|t| t.contains("open")), "{texts:?}");
+    assert_eq!(
+        texts.iter().filter(|t| t.contains("write")).count(),
+        2,
+        "{texts:?}"
     );
 }
 
