@@ -177,7 +177,7 @@ pub fn is_excluded_from_twin_advice(qualname: &str) -> bool {
         return true;
     }
     // boto3 / botocore — aioboto3 is a different package.
-    if q.starts_with("boto3.") || q.starts_with("botocore.") {
+    if crate::is_sync_boto_package_qual(q) {
         return true;
     }
     // File IO / pathlib / os filesystem.

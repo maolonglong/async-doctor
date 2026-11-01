@@ -13,7 +13,10 @@ use async_doctor_core::{AsyncTwinHit, SinkHit, SinkTable};
 use crate::async_twin::async_twin_for_sink;
 use crate::{BuiltinSink, StdlibSinkTable};
 
-pub use families::aws_op_method_name;
+pub use families::{
+    aws_op_method_name, is_aioboto_package_qual, is_sync_boto_factory_qualname,
+    is_sync_boto_package_qual, normalize_stubs_package_root,
+};
 use families::{is_redis_pipeline_buffering, match_family};
 use sinks::THIRD_PARTY_ALIASES;
 pub use sinks::THIRD_PARTY_SINKS;
@@ -90,11 +93,11 @@ fn is_async_counterpart_raw(q: &str) -> bool {
         return true;
     }
     // databases / asyncpg / motor / aiomysql / aiobotocore / aioboto3
+    // (`aioboto3-stubs.*` is normalized before this via [`normalize_third_party`]).
     if q.starts_with("asyncpg.")
         || q.starts_with("motor.")
         || q.starts_with("aiomysql.")
-        || q.starts_with("aiobotocore.")
-        || q.starts_with("aioboto3.")
+        || is_aioboto_package_qual(q)
         || q.starts_with("aiofiles.")
     {
         return true;
@@ -163,7 +166,8 @@ fn lookup_third_party(qualname: &str) -> Option<SinkHit> {
 }
 
 fn normalize_third_party(qualname: &str) -> String {
-    let mut q = qualname.to_string();
+    // `boto3-stubs.session.*` → `boto3.session.*` (and aioboto3-stubs → aioboto3).
+    let mut q = normalize_stubs_package_root(qualname);
     // Common stub / runtime layout aliases.
     let replacements = [
         ("requests.sessions.Session.", "requests.Session."),
