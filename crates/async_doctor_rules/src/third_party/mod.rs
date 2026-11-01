@@ -177,6 +177,7 @@ fn normalize_third_party(qualname: &str) -> String {
         // Pipeline; bare mixin quals are not sync-IO evidence.
         ("sqlalchemy.engine.base.", "sqlalchemy.engine."),
         ("sqlalchemy.orm.session.", "sqlalchemy.orm."),
+        ("sqlalchemy.orm.query.", "sqlalchemy.orm."),
         ("botocore.client.", "botocore.client."),
         ("boto3.resources.factory.", "boto3."),
         ("openai.resources.", "openai.resources."),

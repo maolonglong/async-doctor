@@ -202,6 +202,26 @@ pub static THIRD_PARTY_SINKS: &[BuiltinSink] = &[
         "Use `sqlalchemy.ext.asyncio.AsyncSession` instead of sync `Session`.",
     ),
     BuiltinSink::finding(
+        "sqlalchemy.orm.Session.bulk_save_objects",
+        RULE_BLOCKING_DB,
+        "Use `sqlalchemy.ext.asyncio.AsyncSession` instead of sync `Session`.",
+    ),
+    BuiltinSink::finding(
+        "sqlalchemy.orm.Session.bulk_insert_mappings",
+        RULE_BLOCKING_DB,
+        "Use `sqlalchemy.ext.asyncio.AsyncSession` instead of sync `Session`.",
+    ),
+    BuiltinSink::finding(
+        "sqlalchemy.orm.Session.bulk_update_mappings",
+        RULE_BLOCKING_DB,
+        "Use `sqlalchemy.ext.asyncio.AsyncSession` instead of sync `Session`.",
+    ),
+    BuiltinSink::finding(
+        "sqlalchemy.orm.Query.__iter__",
+        RULE_BLOCKING_DB,
+        "Use `AsyncSession` / `await session.scalars(...)`, or offload.",
+    ),
+    BuiltinSink::finding(
         "sqlalchemy.engine.Engine.connect",
         RULE_BLOCKING_DB,
         "Use `sqlalchemy.ext.asyncio.create_async_engine` / `AsyncEngine`.",

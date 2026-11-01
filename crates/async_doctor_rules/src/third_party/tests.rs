@@ -73,6 +73,21 @@ fn sqlalchemy_non_io_session_methods_never_fire() {
     assert_eq!(commit.sink_qualname, "sqlalchemy.orm.Session.commit");
     let get = t.lookup("sqlalchemy.orm.Session.get").unwrap();
     assert_eq!(get.sink_qualname, "sqlalchemy.orm.Session.get");
+    assert!(
+        t.lookup("sqlalchemy.orm.Session.bulk_save_objects")
+            .is_some()
+    );
+    assert!(
+        t.lookup("sqlalchemy.orm.Session.bulk_insert_mappings")
+            .is_some()
+    );
+    assert!(
+        t.lookup("sqlalchemy.orm.Session.bulk_update_mappings")
+            .is_some()
+    );
+    let qiter = t.lookup("sqlalchemy.orm.Query.__iter__").unwrap();
+    assert_eq!(qiter.sink_qualname, "sqlalchemy.orm.Query.__iter__");
+    assert!(t.lookup("redis.Redis.lock").is_none());
 }
 
 #[test]
