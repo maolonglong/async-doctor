@@ -20,7 +20,22 @@ and ship type-based third-party rules with async-twin hints.
 - Attribute Externals prefer receiver type over mixin defining classes (redis `Pipeline` vs `CoreCommands`).
 - Project subclasses of `redis.Redis` / `redis.asyncio.Redis` inherit sink status from receiver MRO.
 - Only the Call that is the direct operand of `await` / `async for` / `async with` is `is_awaited`.
-- Content fingerprint is coarse (RECORD/METADATA/one-level `.py`); nested non-`.py` / C-ext edits can miss.
+- Awaited sync sinks still seed; reverse propagation stops at third-party async.
+- PIL-style parameter/branch guards on third-party sinks demote to candidates.
+- Imperative FastAPI/Starlette routes / `include_router` recognized as entries.
+- `--show-unresolved` aggregates by callee pattern; first-party
+  `unresolved-import:…` once per file+module; on-disk relative imports not
+  recorded; missing third-party → one note.
+- Outside-scan-root editables are follow-only; scanning a package dir adds its
+  parent for self-imports.
+- Content fingerprint is coarse (RECORD/METADATA/one-level `.py`); nested
+  non-`.py` / C-ext edits can miss. Identical RECORD + unchanged dist-info
+  mtime can reuse a package cache entry after an in-place `.py` patch
+  (editable installs that refresh dist-info mtime invalidate correctly).
+
+Current behaviour for these policies lives in
+[`../../../ARCHITECTURE.md`](../../../ARCHITECTURE.md) (ty follow / search-path
+section and whole-scan cache key).
 
 ## Decision log
 
