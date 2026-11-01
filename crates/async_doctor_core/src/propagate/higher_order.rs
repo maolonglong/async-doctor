@@ -1,11 +1,25 @@
 //! Higher-order callable / offload-wrapper materialization before propagation.
 
+use std::borrow::Cow;
+
 use crate::graph::{CalleeRef, ProjectFacts};
 
 /// Link higher-order `ParamInvoke` edges using caller argument bindings, and
 /// promote inferred offload wrappers onto call sites.
-pub(super) fn materialize_higher_order(facts: &ProjectFacts) -> ProjectFacts {
+pub(super) fn materialize_higher_order(facts: &ProjectFacts) -> Cow<'_, ProjectFacts> {
     use crate::graph::{CallEdge, OffloadKind};
+
+    let needs_materialization = facts.edges.iter().any(|edge| match edge.callee {
+        CalleeRef::Project(fid) => facts
+            .functions
+            .get(fid.index())
+            .is_some_and(|f| f.is_offload_wrapper),
+        CalleeRef::ParamInvoke { .. } => true,
+        _ => false,
+    });
+    if !needs_materialization {
+        return Cow::Borrowed(facts);
+    }
 
     let mut out = facts.clone();
 
@@ -110,5 +124,5 @@ pub(super) fn materialize_higher_order(facts: &ProjectFacts) -> ProjectFacts {
         }
     }
     out.edges.extend(extras);
-    out
+    Cow::Owned(out)
 }

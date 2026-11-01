@@ -488,24 +488,29 @@ fn sqlalchemy_query_io(q: &str) -> Option<&'static str> {
     }
 }
 
+/// Strip a trailing `-stubs` from the top-level package segment without
+/// allocating when no `-stubs` suffix is present.
+pub(super) fn normalize_stubs_package_root_cow(qualname: &str) -> std::borrow::Cow<'_, str> {
+    let Some((root, rest)) = qualname.split_once('.') else {
+        return std::borrow::Cow::Borrowed(qualname.strip_suffix("-stubs").unwrap_or(qualname));
+    };
+    match root.strip_suffix("-stubs") {
+        Some(stripped) => std::borrow::Cow::Owned(format!("{stripped}.{rest}")),
+        None => std::borrow::Cow::Borrowed(qualname),
+    }
+}
+
 /// Strip a trailing `-stubs` from the top-level package segment.
 ///
 /// `boto3-stubs.session.Session.client` → `boto3.session.Session.client`,
 /// `aioboto3-stubs.session.Session` → `aioboto3.session.Session`.
 pub fn normalize_stubs_package_root(qualname: &str) -> String {
-    let Some((root, rest)) = qualname.split_once('.') else {
-        return qualname
-            .strip_suffix("-stubs")
-            .unwrap_or(qualname)
-            .to_string();
-    };
-    let root = root.strip_suffix("-stubs").unwrap_or(root);
-    format!("{root}.{rest}")
+    normalize_stubs_package_root_cow(qualname).into_owned()
 }
 
 /// True for sync `boto3` / `botocore` package roots (after `-stubs` normalize).
 pub fn is_sync_boto_package_qual(qualname: &str) -> bool {
-    let q = normalize_stubs_package_root(qualname);
+    let q = normalize_stubs_package_root_cow(qualname);
     if is_aioboto_package_qual(&q) {
         return false;
     }
@@ -514,7 +519,7 @@ pub fn is_sync_boto_package_qual(qualname: &str) -> bool {
 
 /// True for `aioboto3` / `aiobotocore` roots (including `*-stubs` packages).
 pub fn is_aioboto_package_qual(qualname: &str) -> bool {
-    let q = normalize_stubs_package_root(qualname);
+    let q = normalize_stubs_package_root_cow(qualname);
     q == "aioboto3"
         || q == "aiobotocore"
         || q.starts_with("aioboto3.")
@@ -523,12 +528,12 @@ pub fn is_aioboto_package_qual(qualname: &str) -> bool {
 
 /// Sync `boto3.client` / `Session.client` factories — never aioboto3.
 pub fn is_sync_boto_factory_qualname(qualname: &str) -> bool {
-    let q = normalize_stubs_package_root(qualname);
+    let q = normalize_stubs_package_root_cow(qualname);
     if is_aioboto_package_qual(&q) {
         return false;
     }
     matches!(
-        q.as_str(),
+        q.as_ref(),
         "boto3.client"
             | "boto3.resource"
             | "boto3.session.Session.client"
@@ -592,7 +597,7 @@ pub fn aws_op_method_name(method: &str) -> bool {
 /// `ComponentLocator`, or other non-client internals — those expose many
 /// `get_*` helpers that are local metadata, not HTTP.
 pub fn is_boto_client_or_resource_api_qual(qualname: &str) -> bool {
-    let q = normalize_stubs_package_root(qualname);
+    let q = normalize_stubs_package_root_cow(qualname);
     if is_aioboto_package_qual(&q) {
         return false;
     }

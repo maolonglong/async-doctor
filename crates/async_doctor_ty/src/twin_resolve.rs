@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 
 use async_doctor_rules::twin_resolution_symbols;
 
+use crate::scan_cache::{resolve_venv_prefix, site_packages_roots_for_prefix};
+
 /// Populate `resolved_symbols` for every twin / needs entry that exists in the
 /// active venv (or in-project `.venv` / `venv` under `scan_root`).
 pub fn collect_resolved_twin_symbols(scan_root: &Path) -> BTreeSet<String> {
@@ -27,54 +29,12 @@ pub fn collect_resolved_twin_symbols(scan_root: &Path) -> BTreeSet<String> {
 }
 
 fn site_packages_roots(scan_root: &Path) -> Vec<PathBuf> {
-    let mut roots = Vec::new();
     // Prefer a single active prefix (same policy as scan_cache): VIRTUAL_ENV,
     // else in-project `.venv`/`venv`. Do not union multiple venvs — that would
     // let a foreign VIRTUAL_ENV satisfy `needs` for an isolated fixture.
-    let prefix = resolve_venv_prefix(scan_root);
-    let prefixes: Vec<PathBuf> = prefix.into_iter().collect();
-    for prefix in prefixes {
-        let lib = prefix.join("lib");
-        if let Ok(entries) = fs::read_dir(&lib) {
-            for ent in entries.flatten() {
-                let name = ent.file_name();
-                let name = name.to_string_lossy();
-                if name.starts_with("python") {
-                    let sp = ent.path().join("site-packages");
-                    if sp.is_dir() {
-                        roots.push(sp);
-                    }
-                }
-            }
-        }
-        let sp = prefix.join("Lib").join("site-packages");
-        if sp.is_dir() {
-            roots.push(sp);
-        }
-    }
-    roots.sort();
-    roots.dedup();
-    roots
-}
-
-fn resolve_venv_prefix(scan_root: &Path) -> Option<PathBuf> {
-    if let Ok(v) = std::env::var("VIRTUAL_ENV")
-        && !v.is_empty()
-    {
-        let p = PathBuf::from(v);
-        if p.is_dir() {
-            return Some(p);
-        }
-    }
-    for base in [scan_root, scan_root.parent().unwrap_or(scan_root)] {
-        for name in [".venv", "venv"] {
-            let p = base.join(name);
-            if p.is_dir() {
-                return Some(p);
-            }
-        }
-    }
-    None
+    resolve_venv_prefix(scan_root)
+        .map(|prefix| site_packages_roots_for_prefix(&prefix))
+        .unwrap_or_default()
 }
 
 fn symbol_available(site_roots: &[PathBuf], symbol: &str) -> bool {

@@ -28,6 +28,14 @@ struct ScanCacheFile {
     report: Report,
 }
 
+#[derive(Serialize)]
+struct ScanCacheFileRef<'a> {
+    schema_version: u32,
+    tool_version: &'a str,
+    input_fingerprint: &'a str,
+    report: &'a Report,
+}
+
 fn scan_cache_dir(root: &Path) -> PathBuf {
     root.join(format!("v{CACHE_SCHEMA_VERSION}"))
         .join(sanitize_component(TOOL_VERSION))
@@ -58,18 +66,20 @@ pub fn save_scan_report(root: &Path, fingerprint: &str, report: &Report) -> std:
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let cached = ScanCacheFile {
+    let cached = ScanCacheFileRef {
         schema_version: CACHE_SCHEMA_VERSION,
-        tool_version: TOOL_VERSION.to_string(),
-        input_fingerprint: fingerprint.to_string(),
-        report: report.clone(),
+        tool_version: TOOL_VERSION,
+        input_fingerprint: fingerprint,
+        report,
     };
-    let data = serde_json::to_string(&cached)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
     {
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(data.as_bytes())?;
+        let f = fs::File::create(&tmp)?;
+        let mut writer = std::io::BufWriter::with_capacity(64 * 1024, f);
+        serde_json::to_writer(&mut writer, &cached)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        writer.flush()?;
+        let f = writer.into_inner().map_err(|e| e.into_error())?;
         f.sync_all()?;
     }
     fs::rename(&tmp, &path)?;
@@ -217,7 +227,7 @@ pub fn venv_fingerprint(scan_root: &Path) -> String {
 }
 
 /// Prefer `VIRTUAL_ENV`, then in-project / parent `.venv`/`venv`.
-fn resolve_venv_prefix(scan_root: &Path) -> Option<PathBuf> {
+pub(crate) fn resolve_venv_prefix(scan_root: &Path) -> Option<PathBuf> {
     if let Ok(v) = std::env::var("VIRTUAL_ENV")
         && !v.is_empty()
     {
@@ -237,8 +247,8 @@ fn resolve_venv_prefix(scan_root: &Path) -> Option<PathBuf> {
     None
 }
 
-fn fingerprint_site_packages(venv_prefix: &Path) -> Vec<String> {
-    let mut out = Vec::new();
+/// Enumerate sorted, deduplicated `site-packages` directories under `venv_prefix`.
+pub(crate) fn site_packages_roots_for_prefix(venv_prefix: &Path) -> Vec<PathBuf> {
     let mut site_roots = Vec::new();
     let lib = venv_prefix.join("lib");
     if let Ok(entries) = fs::read_dir(&lib) {
@@ -260,8 +270,12 @@ fn fingerprint_site_packages(venv_prefix: &Path) -> Vec<String> {
     }
     site_roots.sort();
     site_roots.dedup();
+    site_roots
+}
 
-    for site in site_roots {
+fn fingerprint_site_packages(venv_prefix: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for site in site_packages_roots_for_prefix(venv_prefix) {
         let Ok(entries) = fs::read_dir(&site) else {
             continue;
         };

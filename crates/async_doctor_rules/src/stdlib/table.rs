@@ -1,5 +1,7 @@
 //! Stdlib sink table with qualname normalization.
 
+use std::borrow::Cow;
+
 use async_doctor_core::{SinkHit, SinkTable};
 
 use super::sinks::STDLIB_SINKS;
@@ -13,8 +15,8 @@ impl StdlibSinkTable {
         Self
     }
 
-    fn normalize(qualname: &str) -> String {
-        let mut q = qualname.to_string();
+    fn normalize(qualname: &str) -> Cow<'_, str> {
+        let mut q = Cow::Borrowed(qualname);
         // Apply in order; some need multiple passes (e.g. `_thread.lock.acquire`).
         let replacements = [
             ("_io.", "io."),
@@ -43,14 +45,16 @@ impl StdlibSinkTable {
         ];
         for (from, to) in replacements {
             if let Some(rest) = q.strip_prefix(from) {
-                q = format!("{to}{rest}");
+                q = Cow::Owned(format!("{to}{rest}"));
             }
         }
         if q == "open" {
-            return "builtins.open".to_string();
+            return Cow::Borrowed("builtins.open");
         }
         // `_thread.lock` is the runtime type behind `threading.Lock()`.
-        q = q.replace("_thread.lock.", "threading.Lock.");
+        if q.contains("_thread.lock.") {
+            q = Cow::Owned(q.replace("_thread.lock.", "threading.Lock."));
+        }
         // ty may surface `LockType.acquire` / `LockType.release` for
         // `threading.Lock()` instances — map only those methods (not
         // `__enter__`, which would flood short-lock candidates).
@@ -61,7 +65,7 @@ impl StdlibSinkTable {
             ("threading.LockType.release", "threading.Lock.release"),
         ] {
             if q == from {
-                return to.to_string();
+                return Cow::Borrowed(to);
             }
         }
         q

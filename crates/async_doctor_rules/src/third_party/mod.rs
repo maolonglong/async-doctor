@@ -8,6 +8,8 @@ mod sinks;
 #[cfg(test)]
 mod tests;
 
+use std::borrow::Cow;
+
 use async_doctor_core::{AsyncTwinHit, SinkHit, SinkTable};
 
 use crate::async_twin::async_twin_for_sink;
@@ -17,7 +19,7 @@ pub use families::{
     aws_op_method_name, is_aioboto_package_qual, is_boto_client_or_resource_api_qual,
     is_sync_boto_factory_qualname, is_sync_boto_package_qual, normalize_stubs_package_root,
 };
-use families::{is_redis_pipeline_buffering, match_family};
+use families::{is_redis_pipeline_buffering, match_family, normalize_stubs_package_root_cow};
 use sinks::THIRD_PARTY_ALIASES;
 pub use sinks::THIRD_PARTY_SINKS;
 
@@ -37,10 +39,11 @@ impl BuiltinSinkTable {
 
 impl SinkTable for BuiltinSinkTable {
     fn lookup(&self, qualname: &str) -> Option<SinkHit> {
-        if is_async_counterpart(qualname) {
+        let normalized = normalize_third_party(qualname);
+        if is_async_counterpart_with_norm(qualname, &normalized) {
             return None;
         }
-        if let Some(hit) = lookup_third_party(qualname) {
+        if let Some(hit) = lookup_third_party_with_norm(qualname, &normalized) {
             return Some(hit);
         }
         self.stdlib.lookup(qualname)
@@ -56,16 +59,18 @@ pub(super) fn hit(sink: &BuiltinSink) -> SinkHit {
 }
 
 pub fn is_async_counterpart(qualname: &str) -> bool {
+    let normalized = normalize_third_party(qualname);
+    is_async_counterpart_with_norm(qualname, &normalized)
+}
+
+fn is_async_counterpart_with_norm(qualname: &str, normalized: &str) -> bool {
     // Normalize stub/runtime layouts (`httpx._client.AsyncClient` → `httpx.AsyncClient`)
     // before matching — follow and lookup must agree, and definition-qualified
     // paths from ty must not slip past the public-type checks.
-    let normalized = normalize_third_party(qualname);
-    for q in [qualname, normalized.as_str()] {
-        if is_async_counterpart_raw(q) {
-            return true;
-        }
+    if is_async_counterpart_raw(qualname) {
+        return true;
     }
-    false
+    normalized != qualname && is_async_counterpart_raw(normalized)
 }
 
 fn is_async_counterpart_raw(q: &str) -> bool {
@@ -137,13 +142,12 @@ fn is_async_counterpart_raw(q: &str) -> bool {
     false
 }
 
-fn lookup_third_party(qualname: &str) -> Option<SinkHit> {
+fn lookup_third_party_with_norm(qualname: &str, normalized: &str) -> Option<SinkHit> {
     // Pipeline buffering methods are never sinks (even if aliased to Redis.*).
     if is_redis_pipeline_buffering(qualname) {
         return None;
     }
-    let normalized = normalize_third_party(qualname);
-    if is_redis_pipeline_buffering(&normalized) {
+    if normalized != qualname && is_redis_pipeline_buffering(normalized) {
         return None;
     }
     for sink in THIRD_PARTY_SINKS {
@@ -159,15 +163,15 @@ fn lookup_third_party(qualname: &str) -> Option<SinkHit> {
         }
     }
     // Prefix / suffix heuristics for method families on known sync types.
-    if let Some(hit) = match_family(&normalized) {
+    if let Some(hit) = match_family(normalized) {
         return Some(hit);
     }
     None
 }
 
-fn normalize_third_party(qualname: &str) -> String {
+fn normalize_third_party(qualname: &str) -> Cow<'_, str> {
     // `boto3-stubs.session.*` → `boto3.session.*` (and aioboto3-stubs → aioboto3).
-    let mut q = normalize_stubs_package_root(qualname);
+    let mut q = normalize_stubs_package_root_cow(qualname);
     // Common stub / runtime layout aliases.
     let replacements = [
         ("requests.sessions.Session.", "requests.Session."),
@@ -183,10 +187,7 @@ fn normalize_third_party(qualname: &str) -> String {
         ("sqlalchemy.engine.base.", "sqlalchemy.engine."),
         ("sqlalchemy.orm.session.", "sqlalchemy.orm."),
         ("sqlalchemy.orm.query.", "sqlalchemy.orm."),
-        ("botocore.client.", "botocore.client."),
         ("boto3.resources.factory.", "boto3."),
-        ("openai.resources.", "openai.resources."),
-        ("anthropic.resources.", "anthropic.resources."),
         ("kafka.producer.kafka.", "kafka."),
         ("kafka.consumer.group.", "kafka."),
         ("elasticsearch.client.", "elasticsearch."),
@@ -202,7 +203,7 @@ fn normalize_third_party(qualname: &str) -> String {
     ];
     for (from, to) in replacements {
         if let Some(rest) = q.strip_prefix(from) {
-            q = format!("{to}{rest}");
+            q = Cow::Owned(format!("{to}{rest}"));
         }
     }
     q

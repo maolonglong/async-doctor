@@ -203,6 +203,9 @@ pub fn analyze_with_options(
     let mut raw_findings: Vec<Finding> = Vec::new();
     let mut raw_candidates: Vec<Candidate> = Vec::new();
     let mut paths_cache: HashMap<FunctionId, Vec<PathToEntry>> = HashMap::new();
+    let func_full_qualnames: Vec<String> =
+        facts.functions.iter().map(|f| f.full_qualname()).collect();
+    let mut edge_resolutions: Vec<Option<String>> = vec![None; facts.edges.len()];
 
     for seed in seeds {
         let seed_edge = &facts.edges[seed.edge_idx];
@@ -210,6 +213,25 @@ pub fn analyze_with_options(
         let paths = paths_cache
             .entry(seed_caller)
             .or_insert_with(|| shortest_paths_to_async_entries(facts, &reverse, seed_caller));
+        if paths.is_empty() {
+            continue;
+        }
+        let seed_why = format!("async-doctor why {}:{}", seed_edge.file, seed_edge.line);
+        let seed_sink_meta = match &seed.kind {
+            SeedKind::Sink(hit) => {
+                let docs_anchor = format!("#{}", hit.rule);
+                let docs_url = format!(
+                    "https://github.com/maolonglong/async-doctor/blob/main/docs/rules.md{docs_anchor}"
+                );
+                Some((
+                    format!("blocking sink `{}`", hit.sink_qualname),
+                    fix_group_id(hit.rule, hit.sink_qualname),
+                    docs_anchor,
+                    docs_url,
+                ))
+            }
+            SeedKind::Unresolved { .. } => None,
+        };
 
         for path in paths {
             let entry_id = path.entry;
@@ -248,7 +270,7 @@ pub fn analyze_with_options(
                 if already {
                     continue;
                 }
-                let Some(bind_e) = facts.edges.iter().find(|be| {
+                let Some((bind_idx, bind_e)) = facts.edges.iter().enumerate().find(|(_, be)| {
                     be.caller == binder
                         && matches!(be.callee, CalleeRef::Project(id) if id == e.caller)
                         && (!be.positional_callables.is_empty() || !be.keyword_callables.is_empty())
@@ -256,12 +278,15 @@ pub fn analyze_with_options(
                     continue;
                 };
                 let binder_fn = facts.function(binder);
+                let res = edge_resolutions[bind_idx]
+                    .get_or_insert_with(|| resolution_for_edge(facts, bind_e))
+                    .clone();
                 chain_steps.push(chain_step_for(
                     binder_fn,
                     bind_e.file.clone(),
                     bind_e.line,
                     bind_e.text.clone(),
-                    resolution_for_edge(facts, bind_e),
+                    res,
                 ));
                 condition_tags.extend(bind_e.conditions.iter().copied());
             }
@@ -269,28 +294,33 @@ pub fn analyze_with_options(
             for &edge_idx in &path.edges {
                 let e = &facts.edges[edge_idx];
                 let caller_fn = facts.function(e.caller);
+                let res = edge_resolutions[edge_idx]
+                    .get_or_insert_with(|| resolution_for_edge(facts, e))
+                    .clone();
                 chain_steps.push(chain_step_for(
                     caller_fn,
                     e.file.clone(),
                     e.line,
                     e.text.clone(),
-                    resolution_for_edge(facts, e),
+                    res,
                 ));
                 if let CalleeRef::Project(fid) = e.callee {
-                    let callee_fn = facts.function(fid);
-                    chain_qualnames.push(callee_fn.full_qualname());
+                    chain_qualnames.push(func_full_qualnames[fid.index()].clone());
                 }
                 condition_tags.extend(e.conditions.iter().copied());
             }
 
             let seed_caller_fn = facts.function(seed_caller);
             // Seed hop resolution is finalized after we know Sink vs Unresolved.
+            let seed_res = edge_resolutions[seed.edge_idx]
+                .get_or_insert_with(|| resolution_for_edge(facts, seed_edge))
+                .clone();
             let mut seed_step = chain_step_for(
                 seed_caller_fn,
                 seed_edge.file.clone(),
                 seed_edge.line,
                 seed_edge.text.clone(),
-                resolution_for_edge(facts, seed_edge),
+                seed_res,
             );
             condition_tags.extend(seed_edge.conditions.iter().copied());
             if let Some(g) = seed_edge.param_guard {
@@ -333,14 +363,18 @@ pub fn analyze_with_options(
 
             match &seed.kind {
                 SeedKind::Sink(hit) => {
-                    seed_step.resolution = format!("blocking sink `{}`", hit.sink_qualname);
+                    let (seed_resolution, seed_fix_group_id, seed_docs_anchor, seed_docs_url) =
+                        seed_sink_meta
+                            .as_ref()
+                            .expect("seed_sink_meta present for SeedKind::Sink");
+                    seed_step.resolution = seed_resolution.clone();
                     chain_steps.push(seed_step);
                     chain_qualnames.push(hit.sink_qualname.to_string());
                     let chain_refs: Vec<&str> =
                         chain_qualnames.iter().map(String::as_str).collect();
                     let id = finding_id(FindingIdParts {
                         rule: hit.rule,
-                        entry_qualname: &entry.full_qualname(),
+                        entry_qualname: &func_full_qualnames[entry_id.index()],
                         sink_qualname: hit.sink_qualname,
                         chain_qualnames: &chain_refs,
                         occurrence: seed_edge.occurrence,
@@ -389,14 +423,12 @@ pub fn analyze_with_options(
                         label: entry.label,
                     };
                     // CLI rewrites `--path` to the actual scan root after analysis.
-                    let why = format!("async-doctor why {}:{}", seed_edge.file, seed_edge.line);
-                    let docs_anchor = format!("#{}", hit.rule);
-                    let docs_url = format!(
-                        "https://github.com/maolonglong/async-doctor/blob/main/docs/rules.md{docs_anchor}"
-                    );
+                    let why = seed_why.clone();
+                    let docs_anchor = seed_docs_anchor.clone();
+                    let docs_url = seed_docs_url.clone();
                     let fix = Fix {
                         hint,
-                        fix_group_id: fix_group_id(hit.rule, hit.sink_qualname),
+                        fix_group_id: seed_fix_group_id.clone(),
                     };
 
                     if hit.candidate_only || force_conditional {
@@ -449,7 +481,7 @@ pub fn analyze_with_options(
                         chain_qualnames.iter().map(String::as_str).collect();
                     let id = finding_id(FindingIdParts {
                         rule: "unresolved-call",
-                        entry_qualname: &entry.full_qualname(),
+                        entry_qualname: &func_full_qualnames[entry_id.index()],
                         sink_qualname: &sink_key,
                         chain_qualnames: &chain_refs,
                         occurrence: seed_edge.occurrence,
@@ -473,7 +505,7 @@ pub fn analyze_with_options(
                             hint: "Could not resolve call target; inspect dynamically.".to_string(),
                             fix_group_id: fix_group_id("unresolved-call", &sink_key),
                         },
-                        why: format!("async-doctor why {}:{}", seed_edge.file, seed_edge.line),
+                        why: seed_why.clone(),
                         docs_anchor: "#unresolved-call".into(),
                         docs_url: "https://github.com/maolonglong/async-doctor/blob/main/docs/rules.md#unresolved-call".into(),
                     });
