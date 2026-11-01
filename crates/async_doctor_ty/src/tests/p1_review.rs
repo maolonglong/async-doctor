@@ -19,11 +19,20 @@ fn p1_off_loop_thread_and_done_guards() {
         "bare Future.result must still fire: {names:?} {:?}",
         report.findings
     );
+    assert!(
+        names.contains("lock_owner_get_ident_still_blocks"),
+        "lk.owner != get_ident() must NOT be treated as off-loop: {names:?} {:?}",
+        report.findings
+    );
     for clean in [
         "off_loop_get_ident_result_ok",
+        "off_loop_attr_loop_thread_id_ok",
         "off_loop_main_thread_result_ok",
         "on_loop_else_result_ok",
         "done_guard_result_ok",
+        "done_guard_attr_and_ok",
+        "done_guard_ternary_ok",
+        "done_guard_attr_if_ok",
     ] {
         assert!(
             !names.contains(clean),
@@ -60,7 +69,7 @@ fn p1_inmemory_archive_and_ctor_call_collapse() {
         .collect();
     assert!(
         !names.contains("zip_bytesio_ok"),
-        "ZipFile(BytesIO) must stay clean: {names:?} {:?}",
+        "ZipFile(BytesIO)+writestr must stay clean: {names:?} {:?}",
         report.findings
     );
     assert!(
@@ -73,10 +82,18 @@ fn p1_inmemory_archive_and_ctor_call_collapse() {
         "{names:?} {:?}",
         report.findings
     );
-    assert!(
-        names.contains("zip_path_blocks"),
-        "path ZipFile must still fire: {names:?}"
-    );
+    for blocked in [
+        "zip_bytesio_write_path_blocks",
+        "zip_bytesio_extractall_blocks",
+        "tar_bytesio_add_blocks",
+        "zip_path_blocks",
+    ] {
+        assert!(
+            names.contains(blocked),
+            "{blocked} must still fire (disk-touching / path archive): {names:?} {:?}",
+            report.findings
+        );
+    }
     let zip_n = report
         .findings
         .iter()
@@ -92,15 +109,26 @@ fn p1_inmemory_archive_and_ctor_call_collapse() {
             .filter(|f| f.entry.name == "zip_path_blocks")
             .collect::<Vec<_>>()
     );
-    let smtp_n = report
+    let smtp = report
         .findings
         .iter()
-        .filter(|f| f.entry.name == "ctor_sendmail_one_finding")
-        .count();
+        .find(|f| f.entry.name == "ctor_sendmail_one_finding")
+        .expect("SMTP finding");
     assert_eq!(
-        smtp_n, 1,
+        report
+            .findings
+            .iter()
+            .filter(|f| f.entry.name == "ctor_sendmail_one_finding")
+            .count(),
+        1,
         "SMTP(...).sendmail must be one finding: {:?}",
         report.findings
+    );
+    let last = smtp.chain.last().expect("chain");
+    assert!(
+        last.text.contains("sendmail"),
+        "merged finding must terminate on method sink, got {:?}",
+        smtp.chain
     );
     let _ = fs::remove_dir_all(&dir);
 }
