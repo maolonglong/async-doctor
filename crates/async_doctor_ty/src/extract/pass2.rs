@@ -421,3 +421,154 @@ fn remap_edge_ids(edge: &mut CallEdge, remap: &HashMap<FunctionId, FunctionId>) 
         *id = nid;
     }
 }
+
+/// Lengths of shared pass-2 buffers before visiting one file (serial path).
+pub(crate) struct Pass2FileLens {
+    functions: usize,
+    edges: usize,
+    unresolved_imports: usize,
+    unresolved_third_party_modules: usize,
+    resolved_third_party_modules: usize,
+}
+
+impl Pass2FileLens {
+    pub(crate) fn capture(facts: &ProjectFacts) -> Self {
+        Self {
+            functions: facts.functions.len(),
+            edges: facts.edges.len(),
+            unresolved_imports: facts.unresolved_imports.len(),
+            unresolved_third_party_modules: facts.unresolved_third_party_modules.len(),
+            resolved_third_party_modules: facts.resolved_third_party_modules.len(),
+        }
+    }
+
+    /// Drop mid-file writes after a panic. Base-function field patches are left
+    /// as-is (scan is already `complete=false`); map entries pointing past the
+    /// truncated function list are removed.
+    pub(crate) fn rollback(
+        &self,
+        facts: &mut ProjectFacts,
+        def_map: &mut HashMap<DefKey, FunctionId>,
+        qual_map: &mut HashMap<(String, String), FunctionId>,
+        task_targets: &mut TaskTargets,
+    ) {
+        facts.functions.truncate(self.functions);
+        facts.edges.truncate(self.edges);
+        facts.unresolved_imports.truncate(self.unresolved_imports);
+        facts
+            .unresolved_third_party_modules
+            .truncate(self.unresolved_third_party_modules);
+        facts
+            .resolved_third_party_modules
+            .truncate(self.resolved_third_party_modules);
+        def_map.retain(|_, id| id.index() < self.functions);
+        qual_map.retain(|_, id| id.index() < self.functions);
+        task_targets.0.retain(|id| id.index() < self.functions);
+    }
+}
+
+/// Serial pass-2 visit: write into the shared maps (no per-file clones). Caller
+/// wraps this in `catch_unwind` and rolls back with [`Pass2FileLens`] on panic.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn visit_one_file_shared(
+    db: &AsyncDoctorDb,
+    spec: &Pass2FileSpec,
+    facts: &mut ProjectFacts,
+    def_map: &mut HashMap<DefKey, FunctionId>,
+    qual_map: &mut HashMap<(String, String), FunctionId>,
+    property_defs: &HashSet<DefKey>,
+    task_targets: &mut TaskTargets,
+    follow_targets: &mut HashMap<String, FollowTarget>,
+    package_meta: &mut PackageMetaMemo,
+    followable_extra_roots: &[PathBuf],
+) {
+    maybe_test_panic(&spec.rel);
+    let file = match system_path_to_file(db, &spec.system_path) {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+    let program = db.program();
+    let program_file = program.program_file(db, file);
+    let source = source_text(db, file);
+    if let Some(err) = source.read_error() {
+        facts.complete = false;
+        facts.skipped.push(format!("{}: {err}", spec.rel));
+        return;
+    }
+    let index = line_index(db, file);
+    let parsed = parsed_module(db, program_file.python_file(db)).load(db);
+    if parsed.has_invalid_syntax() {
+        return;
+    }
+    let model = SemanticModel::new(db, program_file);
+    let ctx = FileCtx {
+        db,
+        program_file,
+        file,
+        rel: spec.rel.clone(),
+        module: spec.module.clone(),
+        source: source.as_str().to_string(),
+        index,
+    };
+    let module_constants = collect_module_constants(parsed.suite());
+    let mut visitor = CallCollector {
+        ctx: &ctx,
+        model: &model,
+        facts,
+        def_map,
+        def_map_base: None,
+        qual_map,
+        qual_map_base: None,
+        property_defs,
+        task_targets,
+        follow_targets,
+        package_meta,
+        followable_extra_roots,
+        record_unresolved_imports: true,
+        module_constants: &module_constants,
+        current_fn: None,
+        current_param_names: Vec::new(),
+        class_stack: Vec::new(),
+        fn_stack: Vec::new(),
+        dead_depth: 0,
+        loop_depth: 0,
+        branch_depth: 0,
+        cache_miss_depth: 0,
+        no_running_loop_depth: 0,
+        try_saw_get_loop: false,
+        active_param_guard: None,
+        consuming_generator: false,
+        in_lambda: false,
+        skip_lambda_body: false,
+        in_callee_position: false,
+        pending_is_awaited: false,
+        pending_with_enter: false,
+        in_eager_offload_arg: false,
+        async_with_receivers: HashMap::new(),
+        redis_family_memo: HashMap::new(),
+        occurrence_counter: HashMap::new(),
+        pending_literals: Vec::new(),
+        pending_callables: Vec::new(),
+        pending_externals: Vec::new(),
+        pending_constructed_receivers: Vec::new(),
+        pending_constructed_receiver: None,
+        pending_keyword_callables: Vec::new(),
+        narrowed_locals: HashMap::new(),
+        local_lambdas: HashMap::new(),
+        local_genexprs: HashMap::new(),
+        expanding_genexprs: HashSet::new(),
+        genexpr_expand_depth: 0,
+        idle_loop_locals: HashSet::new(),
+        idle_loop_helpers: HashSet::new(),
+        unbounded_queues: HashSet::new(),
+        running_loop_locals: HashSet::new(),
+        event_loop_locals: HashSet::new(),
+    };
+    super::collector::loop_guards::collect_idle_loop_helpers(
+        parsed.suite(),
+        &mut visitor.idle_loop_helpers,
+    );
+    for stmt in parsed.suite() {
+        visitor.visit_stmt(stmt);
+    }
+}
