@@ -21,6 +21,8 @@ pub use third_party::{
 pub const RULE_OFFLOAD_HAS_ASYNC_TWIN: &str = "offload-has-async-twin";
 pub const RULE_NESTED_EVENT_LOOP: &str = "nested-event-loop";
 pub const RULE_OFFLOAD_COROUTINE: &str = "offload-coroutine";
+pub const RULE_SYNC_WITH_ASYNC_CM: &str = "sync-with-async-cm";
+pub const RULE_DANGLING_TASK: &str = "dangling-task";
 
 use async_doctor_core::SinkHit;
 

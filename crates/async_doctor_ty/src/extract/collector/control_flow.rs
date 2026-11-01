@@ -542,6 +542,13 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             && !with_stmt.is_async
         {
             for item in &with_stmt.items {
+                if self.is_sync_with_async_cm(&item.context_expr) {
+                    self.push_sync_with_async_cm_edge(caller, &item.context_expr);
+                    if let Expr::Call(call) = &item.context_expr {
+                        self.walk_call_children(call);
+                    }
+                    continue;
+                }
                 // `with engine.begin() as conn:` — the Call itself is the enter site
                 // for with_only sinks (Engine.begin). Dunder __enter__ on the *return*
                 // type is secondary and often unnamed for stubs.

@@ -71,19 +71,21 @@ async-doctor explain offload-coroutine
 async-doctor why path/to/file.py:42 --path .
 ```
 
-### Advice: `offload-has-async-twin`
+### Advice: `offload-has-async-twin` / `dangling-task`
 
-Fires only at offload cut sites (`to_thread`, `run_in_executor`, anyio/starlette
-threadpool, `asgiref.sync.sync_to_async`, inferred wrappers) when every
-unconditionally reached sink has a high-confidence same-package async twin
-installed in the scanned venv (`httpx.AsyncClient` including module `httpx.get`,
-`redis.asyncio`, `AsyncOpenAI` / `AsyncAzureOpenAI`, `AsyncAnthropic`,
-`AsyncElasticsearch`+`aiohttp`, `psycopg.AsyncConnection`). Offload-site try/if/loop
-guards do not suppress advice. Sync-caller exemption when the offloaded fn is
-also called from sync-only code. Excludes pymongo / requests / boto3 / file IO /
-subprocess / CPU.
+- **offload-has-async-twin** — fires only at offload cut sites (`to_thread`, `run_in_executor`, anyio/starlette
+  threadpool, `asgiref.sync.sync_to_async`, inferred wrappers) when every
+  unconditionally reached sink has a high-confidence same-package async twin
+  installed in the scanned venv (`httpx.AsyncClient` including module `httpx.get`,
+  `redis.asyncio`, `AsyncOpenAI` / `AsyncAzureOpenAI`, `AsyncAnthropic`,
+  `AsyncElasticsearch`+`aiohttp`, `psycopg.AsyncConnection`). Offload-site try/if/loop
+  guards do not suppress advice. Sync-caller exemption when the offloaded fn is
+  also called from sync-only code. Excludes pymongo / requests / boto3 / file IO /
+  subprocess / CPU.
+- **dangling-task** — bare `asyncio.create_task` / `loop.create_task` / `asyncio.ensure_future`
+  statement that discards the returned `Task` (weak loop reference can be GC'd mid-execution).
 
-### Errors: `nested-event-loop` / `offload-coroutine`
+### Errors: `nested-event-loop` / `offload-coroutine` / `sync-with-async-cm`
 
 - **nested-event-loop** — `asyncio.run` / `Runner.run` / `run_until_complete` /
   `run_forever` / `anyio.run` / `trio.run` reachable from async without an
@@ -91,6 +93,7 @@ subprocess / CPU.
   `get_running_loop`, `not loop.is_running()`, …) are dropped. Other conditional
   sites stay findings.
 - **offload-coroutine** — offload target is `async def` (coroutine never awaited).
+- **sync-with-async-cm** — sync `with` enters an async-only context manager (`__aenter__` without `__enter__`).
 
 ## Suppressions (no config file)
 

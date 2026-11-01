@@ -104,8 +104,8 @@ Call graph types (`graph.rs`: `ProjectFacts`, `CallEdge`, `ConditionTag`,
 
 `propagate/`: mark sinks, materialize higher-order bindings
 (`higher_order.rs`), reverse BFS + condition reconciliation (`grade.rs`),
-special findings (`special.rs`: nested event loop, offload-coroutine), and
-non-blocking advice (`advice.rs`).
+special findings (`special.rs`: nested event loop, offload-coroutine, sync-with-async-cm), and
+non-blocking advice (`advice.rs`: offload-has-async-twin, dangling-task).
 
 **Architecture invariant:** this crate must not depend on ty or ruff.
 

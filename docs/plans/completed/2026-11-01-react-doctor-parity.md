@@ -11,7 +11,7 @@ Close the highest-leverage product and analysis gaps relative to `react-doctor` 
 
 - [x] 2026-11-01T17:17Z: P0 — Terminal UX (TTY color via `anstyle`/`anstream`, scan footer, framework detection in banner) and `--format markdown`.
 - [x] 2026-11-01T17:24Z: P1 — Deterministic `0–100` health score (`--score`, `Report::score`) and `async-doctor install-skill`.
-- [ ] 2026-11-01: P2 — Async anti-pattern rules (`sync-with-async-cm` finding, `dangling-task` correctness advice).
+- [x] 2026-11-01T17:34Z: P2 — Async anti-pattern rules (`sync-with-async-cm` finding, `dangling-task` correctness advice).
 
 ## Surprises & Discoveries
 
@@ -48,4 +48,7 @@ Close the highest-leverage product and analysis gaps relative to `react-doctor` 
 
 ## Outcomes & Retrospective
 
-(Active — fill on completion.)
+All three milestones (P0, P1, P2) were implemented, verified with E2E integration tests, and committed separately:
+- P0 (`ac36a60`): added TTY-aware ANSI styling (`anstyle`/`anstream`), scan summary footer (`Scanned N file(s) · M async entr(y|ies) in Xms`), `.dist-info` async framework detection in `ScanEnvironment::frameworks`, and `--format markdown`.
+- P1 (`376d6f9`): added deterministic `0–100` health score (`Report::score` + `--score`) aligned with `exit_code()` (`score >= 85` iff zero findings and zero unused suppressions) and `async-doctor install-skill [--path DIR]`.
+- P2: added `sync-with-async-cm` (`findings[]`) and `dangling-task` (`advice[]` with `AdviceCategory::Correctness`) along with `explain` docs and E2E tests in `crates/async_doctor/tests/cli_anti_patterns.rs`.

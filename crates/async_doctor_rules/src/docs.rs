@@ -188,6 +188,32 @@ work does not execute.",
 - Await the coroutine directly from async code.\n\
 - Or pass a sync function into the offload.",
     },
+    RuleDoc {
+        id: "sync-with-async-cm",
+        title: "Sync with on an async-only context manager",
+        summary: "Sync `with` enters an async-only context manager (`__aenter__` without `__enter__`).",
+        body: "\
+Async-only context managers (`httpx.AsyncClient`, `aiohttp.ClientSession`,\n\
+`asyncio.Lock` / `Semaphore` / `TaskGroup` / `timeout`, `AsyncSession`, or classes\n\
+that implement `__aenter__` without `__enter__`) do not implement the synchronous\n\
+context protocol and raise `TypeError` at runtime when entered with `with`.",
+        fix: "\
+- Use `async with ...:` instead of `with ...:`.",
+    },
+    RuleDoc {
+        id: "dangling-task",
+        title: "Fire-and-forget task without a stored reference (advice)",
+        summary: "Bare `asyncio.create_task` / `ensure_future` discards the returned `Task`.",
+        body: "\
+The asyncio event loop only holds weak references to scheduled tasks. A task\n\
+created via a bare `asyncio.create_task(coro())` statement with no variable\n\
+reference can be garbage-collected mid-execution, and unhandled task exceptions\n\
+go unobserved. This is correctness advice and never fails the exit code.",
+        fix: "\
+- Await the task or `asyncio.TaskGroup` when structured concurrency fits.\n\
+- For intentional background tasks, store the task in a set (`bg_tasks.add(t)`)\n\
+  and register `t.add_done_callback(bg_tasks.discard)`.",
+    },
 ];
 
 /// Look up a rule by id (`blocking-sleep`) or docs anchor (`#blocking-sleep`).
@@ -221,7 +247,8 @@ mod tests {
         use crate::{
             RULE_BLOCKING_DB, RULE_BLOCKING_FILE, RULE_BLOCKING_HTTP, RULE_BLOCKING_LOCK,
             RULE_BLOCKING_SLEEP, RULE_BLOCKING_SOCKET, RULE_BLOCKING_SUBPROCESS,
-            RULE_NESTED_EVENT_LOOP, RULE_OFFLOAD_COROUTINE, RULE_OFFLOAD_HAS_ASYNC_TWIN,
+            RULE_DANGLING_TASK, RULE_NESTED_EVENT_LOOP, RULE_OFFLOAD_COROUTINE,
+            RULE_OFFLOAD_HAS_ASYNC_TWIN, RULE_SYNC_WITH_ASYNC_CM,
         };
         for id in [
             RULE_BLOCKING_SLEEP,
@@ -234,6 +261,8 @@ mod tests {
             RULE_OFFLOAD_HAS_ASYNC_TWIN,
             RULE_NESTED_EVENT_LOOP,
             RULE_OFFLOAD_COROUTINE,
+            RULE_SYNC_WITH_ASYNC_CM,
+            RULE_DANGLING_TASK,
         ] {
             assert!(rule_doc(id).is_some(), "missing RuleDoc for {id}");
         }

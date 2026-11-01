@@ -99,6 +99,10 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 super::imports::note_if_import(self, stmt);
                 walk_stmt(self, stmt);
             }
+            Stmt::Expr(expr_stmt) => {
+                walk_stmt(self, stmt);
+                self.maybe_record_dangling_task(expr_stmt);
+            }
             other => walk_stmt(self, other),
         }
     }

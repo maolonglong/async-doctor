@@ -73,12 +73,15 @@ hidden dirs are skipped (`--include-non-production` to include).
   boto3 client/resource calls, sync OpenAI/Anthropic, and more — async twins
   never fire as findings
 - Higher-order / offload: `asyncio.to_thread`, executors, inferred wrappers
-- **Advice** (`offload-has-async-twin`): offload cuts that only reach sinks with
-  a high-confidence same-package async twin installed in the scanned venv
+- **Advice** (`offload-has-async-twin`, `dangling-task`): offload cuts that only reach sinks with
+  a high-confidence same-package async twin installed in the scanned venv, and
+  bare `asyncio.create_task` / `ensure_future` statements that discard the
+  returned `Task`
   (non-blocking; SARIF `note`; text **Advice** section, capped unless `--expand`)
 - **Errors:** `nested-event-loop` (`asyncio.run` / … from async without offload;
   loop-state guards like `if loop is None` / early-return `if loop is not None:
-  return` are dropped), `offload-coroutine` (offload target is `async def`)
+  return` are dropped), `offload-coroutine` (offload target is `async def`),
+  `sync-with-async-cm` (sync `with` entering an async-only context manager)
 
 ## GitHub Actions (SARIF / code scanning)
 

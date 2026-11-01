@@ -13,9 +13,22 @@ use super::grade::{
 
 pub(super) const RULE_NESTED_EVENT_LOOP: &str = "nested-event-loop";
 pub(super) const RULE_OFFLOAD_COROUTINE: &str = "offload-coroutine";
+pub(super) const RULE_SYNC_WITH_ASYNC_CM: &str = "sync-with-async-cm";
 
-/// Seed a nested-event-loop hit when the external qualname is a nested-loop API.
+/// Seed a special finding hit (`nested-event-loop` or `sync-with-async-cm`).
 pub(super) fn nested_event_loop_hit(qualname: &str) -> Option<SinkHit> {
+    if qualname == RULE_SYNC_WITH_ASYNC_CM {
+        return Some(SinkHit {
+            rule: RULE_SYNC_WITH_ASYNC_CM,
+            sink_qualname: RULE_SYNC_WITH_ASYNC_CM,
+            fix_hint: "Use `async with ...:` instead of sync `with ...:` — \
+                       this context manager only implements the async context protocol (`__aenter__` / `__aexit__`).",
+            candidate_only: false,
+            candidate_reason: None,
+            with_only: true,
+            consume_only: false,
+        });
+    }
     if is_nested_event_loop_qual(qualname) {
         Some(SinkHit {
             rule: RULE_NESTED_EVENT_LOOP,

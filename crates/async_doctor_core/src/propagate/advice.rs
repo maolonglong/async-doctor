@@ -19,6 +19,7 @@ use super::grade::{chain_step_for, resolution_for_edge, shortest_paths_to_async_
 use super::{AsyncTwinHit, SinkTable};
 
 pub(super) const RULE_OFFLOAD_HAS_ASYNC_TWIN: &str = "offload-has-async-twin";
+pub(super) const RULE_DANGLING_TASK: &str = "dangling-task";
 
 /// Collect `offload-has-async-twin` advice items for the graded report.
 pub(super) fn collect_offload_twin_advice(
@@ -189,6 +190,14 @@ pub(super) fn collect_offload_twin_advice(
         }
     }
 
+    collect_dangling_task_advice(
+        facts,
+        reverse,
+        include_non_production,
+        &mut advice,
+        &mut emitted,
+    );
+
     // Sort by offload site file/line (last chain hop), not fixGroupId hash.
     advice.sort_by(|a, b| {
         let (af, al) = match a.chain.last() {
@@ -202,6 +211,95 @@ pub(super) fn collect_offload_twin_advice(
         (af, al, a.id.as_str()).cmp(&(bf, bl, b.id.as_str()))
     });
     advice
+}
+
+fn collect_dangling_task_advice(
+    facts: &ProjectFacts,
+    reverse: &[Vec<usize>],
+    include_non_production: bool,
+    advice: &mut Vec<Advice>,
+    emitted: &mut HashSet<String>,
+) {
+    for edge in &facts.edges {
+        let CalleeRef::External { qualname } = &edge.callee else {
+            continue;
+        };
+        if qualname != RULE_DANGLING_TASK {
+            continue;
+        }
+        let paths = shortest_paths_to_async_entries(facts, reverse, edge.caller);
+        for path in paths {
+            let entry_id = path.entry;
+            let entry = facts.function(entry_id);
+            if entry.is_sync_route || !entry.is_async || entry.is_third_party {
+                continue;
+            }
+            if !include_non_production && is_non_production_entry_path(&entry.file) {
+                continue;
+            }
+
+            let mut chain_steps: Vec<ChainStep> = Vec::new();
+            let mut chain_qualnames: Vec<String> = Vec::new();
+            for &eidx in &path.edges {
+                let e = &facts.edges[eidx];
+                let caller_fn = facts.function(e.caller);
+                chain_steps.push(chain_step_for(
+                    caller_fn,
+                    e.file.clone(),
+                    e.line,
+                    e.text.clone(),
+                    resolution_for_edge(facts, e),
+                ));
+                if let CalleeRef::Project(fid) = e.callee {
+                    chain_qualnames.push(facts.function(fid).full_qualname());
+                }
+            }
+            let caller_fn = facts.function(edge.caller);
+            chain_steps.push(chain_step_for(
+                caller_fn,
+                edge.file.clone(),
+                edge.line,
+                edge.text.clone(),
+                "fire-and-forget task (`Task` reference discarded)".to_string(),
+            ));
+            chain_qualnames.push(RULE_DANGLING_TASK.to_string());
+            let chain_refs: Vec<&str> = chain_qualnames.iter().map(String::as_str).collect();
+            let id = finding_id(FindingIdParts {
+                rule: RULE_DANGLING_TASK,
+                entry_qualname: &entry.full_qualname(),
+                sink_qualname: RULE_DANGLING_TASK,
+                chain_qualnames: &chain_refs,
+                occurrence: edge.occurrence,
+            });
+            if !emitted.insert(id.clone()) {
+                continue;
+            }
+            advice.push(Advice {
+                id,
+                rule: RULE_DANGLING_TASK.to_string(),
+                category: AdviceCategory::Correctness,
+                entry: Entry {
+                    file: entry.file.clone(),
+                    line: entry.line,
+                    name: entry.qualname.clone(),
+                    label: entry.label,
+                },
+                chain: chain_steps,
+                fix: Fix {
+                    hint: "Keep a strong reference to the returned `Task` (e.g. `tasks.add(t); \
+                           t.add_done_callback(tasks.discard)`), use `asyncio.TaskGroup`, or \
+                           `await` the task so it cannot be garbage-collected mid-execution."
+                        .to_string(),
+                    fix_group_id: fix_group_id(RULE_DANGLING_TASK, RULE_DANGLING_TASK),
+                },
+                why: format!("async-doctor why {}:{}", edge.file, edge.line),
+                docs_anchor: "#dangling-task".into(),
+                docs_url:
+                    "https://github.com/maolonglong/async-doctor/blob/main/docs/rules.md#dangling-task"
+                        .into(),
+            });
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

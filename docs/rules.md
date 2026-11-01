@@ -136,3 +136,28 @@ callable; passing a coroutine function builds a coroutine object that is never
 awaited, so the work never runs.
 
 **Fix:** await the coroutine directly, or pass a sync function to the offload.
+
+## sync-with-async-cm
+
+A synchronous `with` statement enters an async-only context manager
+(`httpx.AsyncClient`, `aiohttp.ClientSession`, `asyncio.Lock` / `Semaphore` /
+`Condition` / `TaskGroup` / `timeout`, `sqlalchemy.ext.asyncio.AsyncSession` /
+`AsyncEngine.begin`, `aioboto3.Session.client`, `redis.asyncio.Redis.pipeline`,
+or a project class that defines `__aenter__` without `__enter__`). Entering an
+async-only context manager with sync `with` raises `TypeError` at runtime.
+
+**Fix:** replace `with ...:` with `async with ...:`.
+
+## dangling-task
+
+**Advice (correctness)** — never fails the exit code.
+
+A bare `asyncio.create_task(...)`, `loop.create_task(...)`, or
+`asyncio.ensure_future(...)` expression statement discards the returned `Task`.
+Because the event loop only holds weak references to scheduled tasks, an
+unreferenced task may be garbage-collected mid-execution and any unhandled
+exception goes unobserved. Assigned, awaited, returned, passed-as-argument, or
+`asyncio.TaskGroup.create_task` calls are not reported.
+
+**Fix:** await the task, use `asyncio.TaskGroup`, or keep a strong reference in
+a task set (`tasks.add(t); t.add_done_callback(tasks.discard)`).

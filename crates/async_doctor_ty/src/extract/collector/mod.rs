@@ -1,5 +1,6 @@
 //! Call-graph edge collection over a single Python file.
 
+mod async_anti_patterns;
 mod boto;
 mod buffers;
 mod calls;

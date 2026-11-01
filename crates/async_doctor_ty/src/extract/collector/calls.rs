@@ -332,7 +332,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         self.clear_pending_call_args();
     }
 
-    fn clear_pending_call_args(&mut self) {
+    pub(crate) fn clear_pending_call_args(&mut self) {
         self.pending_literals.clear();
         self.pending_callables.clear();
         self.pending_externals.clear();
