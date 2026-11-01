@@ -4,6 +4,19 @@ Cold/warm timings for `async-doctor` on pinned public asyncio corpora.
 Numbers from this VM (Linux x86_64, release binary, isolated
 `XDG_CACHE_HOME` per corpus, `VIRTUAL_ENV` pointed at each clone’s `.venv`).
 
+## Targets (calibrate against)
+
+| Scenario | Target |
+| --- | --- |
+| ~1000 project files, first run with site-packages | under 10s |
+| Second run (deps / whole-scan cached) | under 2s |
+| `--changed` small diff | ~1s |
+
+Public corpora used for calibration: full-stack-fastapi-template, open-webui,
+litellm, langgraph, home-assistant core, plus small fixtures per rule/pattern.
+Measured numbers below are the current baseline; regress carefully against both
+targets and these tables.
+
 ## Results
 
 | Corpus | Commit | Scan | Files | Findings | Candidates | Cold | Warm | Peak RSS | Identical |
