@@ -21,6 +21,10 @@ uvx --from ./target/wheels/async_doctor-*.whl async-doctor --version
 cargo install --git https://github.com/maolonglong/async-doctor async_doctor
 ```
 
+Activate the project venv (or set `VIRTUAL_ENV`) before scanning so third-party
+imports resolve. Without a project environment, results silently degrade —
+`async-doctor` reports the interpreter/venv it used and prints a short note.
+
 ## Quick start
 
 ```bash
@@ -29,7 +33,7 @@ async-doctor --format json .
 async-doctor --format sarif . > async-doctor.sarif
 
 async-doctor explain blocking-sleep
-async-doctor why helpers.py:5 --path fixtures/m1_multihop
+async-doctor why app.py:12 --path .
 
 # CI / agent loops (full analysis; filtered reporting):
 async-doctor --changed .
@@ -69,6 +73,45 @@ hidden dirs are skipped (`--include-non-production` to include).
   loop-state guards like `if loop is None` are dropped), `offload-coroutine`
   (offload target is `async def`)
 
+## GitHub Actions (SARIF / code scanning)
+
+Upload SARIF so findings appear in GitHub code scanning:
+
+```yaml
+name: async-doctor
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - name: Install project deps
+        run: uv sync --frozen
+      - name: Run async-doctor
+        run: |
+          source .venv/bin/activate
+          uvx async-doctor --format sarif . > async-doctor.sarif
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: async-doctor.sarif
+```
+
+## Large repositories / memory
+
+Very large monorepos can use substantial peak RSS (for example, a full litellm
+tree peaked around **~6.9 GB** in our benchmarks). Prefer scanning the package
+subdirectory you care about (`async-doctor path/to/pkg`) rather than the whole
+repo when memory is tight. Warm runs reuse the whole-scan cache when inputs are
+unchanged.
+
 ## Benchmark
 
 Public cold/warm numbers on pinned asyncio corpora:
@@ -80,7 +123,8 @@ Public cold/warm numbers on pinned asyncio corpora:
 npx skills add maolonglong/async-doctor
 ```
 
-Works once the repo is public. For GitHub code scanning, see `--format sarif` above.
+Works once the repo is public. For GitHub code scanning, see the SARIF workflow
+above.
 
 ## License
 
