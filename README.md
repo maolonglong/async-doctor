@@ -3,7 +3,9 @@
 **Your agent blocks the event loop. This catches it.**
 
 Zero-config static analysis for Python: finds sync/blocking IO reachable from
-`async def` code, and reports evidence an agent can act on.
+`async def` code, and reports evidence an agent can act on. Non-goals (no
+runtime probing, no Trio-only / gevent-eventlet modelling) live in
+[ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Install
 

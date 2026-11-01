@@ -32,7 +32,8 @@ cargo test -p async_doctor --test concurrent_cache -- --ignored   # cold-cache r
 - Clean-room only: public docs and crates; do not copy from react-doctor or unlicensed sources; all ty/ruff use stays in `async_doctor_ty` ([why](docs/decisions/2026-10-30-clean-room-mit.md)).
 - False positives are correctness bugs: uncertain cases go to `candidates` or `advice`, never `findings`; advice never changes the exit code ([why](docs/decisions/2026-10-31-advice-tier.md)).
 - Prefer the react-doctor product shape: ship the CLI and `skills/async-doctor/SKILL.md` install path; no editor stop hooks ([why](docs/decisions/2026-10-31-no-stop-hook.md)).
-- Keep the whole-scan cache (content + executable hash); do not revive per-file incremental caches without a new decision ([why](docs/decisions/2026-11-01-reject-incremental-file-cache.md)).
+- Keep the whole-scan cache (full key in [ARCHITECTURE.md](ARCHITECTURE.md)); do not revive per-file incremental caches without a new decision ([why](docs/decisions/2026-11-01-reject-incremental-file-cache.md)).
+- Concurrent cold-cache stress details: [docs/notes/2026-10-concurrent-cache-stress.md](docs/notes/2026-10-concurrent-cache-stress.md).
 - Docs change in the same PR as the behaviour they describe.
 - All repo docs are English only.
 
