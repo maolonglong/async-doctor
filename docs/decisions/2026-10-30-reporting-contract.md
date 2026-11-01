@@ -12,15 +12,15 @@ findings trains agents to ignore the tool.
 
 - **Tiers:** prove-only `findings[]`; uncertain cases go to `candidates[]`
   (with `reason`); never guess a finding by name alone.
-- **Exit codes:** `0` no findings (and no unused suppressions); `1` findings
-  present (even if analysis is incomplete); `2` tool error only. Incomplete
-  analysis sets `complete=false` plus `skipped` / stderr warning — not exit 2.
-  Candidates (and later advice) never affect exit code.
+- **Exit codes:** home is [`../json-contract.md`](../json-contract.md)
+  (`0` / `1` / `2`; incomplete analysis is `complete=false`, not exit 2;
+  candidates and advice never affect exit code).
 - **JSON (`schemaVersion` 2):** always emit top-level arrays even when empty;
   include `environment` (interpreter/venv/site-packages + advisory `note`) and
   `locationLessCandidates`; `why --path` is relative to the scan cwd, never an
   absolute machine path. Default human text; `--format json` / `sarif` for
-  agents and code scanning.
+  agents and code scanning. Field table and condition tags:
+  [`../json-contract.md`](../json-contract.md).
 - **Entry labels** (`route` / `lifecycle` / `task` / `other`) are auto-inferred
   and affect ordering/presentation only.
 - **Async twin names** appear in `fix.hint` for findings; they are not a
