@@ -11,21 +11,18 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
 use async_doctor_core::{CalleeRef, EntryLabel, FunctionId, ProjectFacts};
-use ruff_db::files::system_path_to_file;
-use ruff_db::parsed::parsed_module;
-use ruff_db::source::{line_index, source_text};
 use ruff_db::system::{SystemPath, SystemPathBuf};
 
 use crate::db::AsyncDoctorDb;
 use crate::sitepkgs::{FollowTarget, PackageMetaMemo};
 
-use super::ctx::{DefKey, FileCtx, TaskTargets};
+use super::ctx::{DefKey, TaskTargets};
 use super::follow::follow_third_party;
-use super::functions::{collect_functions, twin_name};
+use super::functions::{Pass1FileOutcome, merge_pass1_file_data, twin_name};
 use super::panic_util::panic_message;
 use super::pass2::{
-    Pass2FileLens, Pass2FileSpec, Pass2Shared, merge_pass2_results, run_pass2_parallel,
-    visit_one_file_shared,
+    Pass2FileLens, Pass2FileSpec, Pass2Shared, extract_pass1_one_file, merge_pass2_results,
+    run_pass1_parallel, run_pass2_parallel, visit_one_file_shared,
 };
 use super::path::{module_name_from_relative, relative_display};
 
@@ -107,8 +104,80 @@ pub(crate) fn extract_files(
         .map(|p| PathBuf::from(p.as_str()))
         .collect();
 
-    // Pass 1: collect functions (parse only — no SemanticModel).
-    {
+    let batch_mode = pass2_batch_mode();
+    let mut task_targets = TaskTargets::default();
+    let mut follow_targets: HashMap<String, FollowTarget> = HashMap::new();
+
+    if matches!(batch_mode, Pass2BatchMode::None) {
+        let pass1_specs: Vec<Pass2FileSpec> = catalog
+            .iter()
+            .map(|e| Pass2FileSpec {
+                system_path: e.system_path.clone(),
+                rel: e.rel.clone(),
+                module: e.module.clone(),
+            })
+            .collect();
+        let (outcomes, workers) = run_pass1_parallel(&db, &pass1_specs);
+        let mut kept_specs: Vec<Pass2FileSpec> = Vec::with_capacity(pass1_specs.len());
+        let mut catalog_to_kept: Vec<Option<usize>> = vec![None; pass1_specs.len()];
+        for (idx, (spec, outcome)) in pass1_specs.into_iter().zip(outcomes).enumerate() {
+            match outcome {
+                Pass1FileOutcome::Skipped(msg) => {
+                    facts.complete = false;
+                    facts.skipped.push(msg);
+                }
+                Pass1FileOutcome::Ok(data) => {
+                    merge_pass1_file_data(
+                        &spec.rel,
+                        &spec.module,
+                        data,
+                        &mut facts,
+                        &mut def_map,
+                        &mut qual_map,
+                        &mut class_methods,
+                        &mut property_defs,
+                    );
+                    catalog_to_kept[idx] = Some(kept_specs.len());
+                    kept_specs.push(spec);
+                }
+            }
+        }
+
+        for func in &mut facts.functions {
+            if let Some((class, method)) = func.qualname.rsplit_once('.') {
+                let key = (func.module.clone(), class.to_string());
+                if let Some(methods) = class_methods.get(&key)
+                    && let Some(t) = twin_name(method, methods)
+                {
+                    func.async_twins.push((method.to_string(), t));
+                }
+            }
+        }
+
+        if !kept_specs.is_empty() {
+            let base_fn_len = facts.functions.len();
+            let results = {
+                let shared = Pass2Shared {
+                    functions: &facts.functions,
+                    def_map: &def_map,
+                    qual_map: &qual_map,
+                    property_defs: &property_defs,
+                    followable_extra_roots: &followable_extra_roots,
+                };
+                run_pass2_parallel(workers, &kept_specs, &catalog_to_kept, &shared)
+            };
+            merge_pass2_results(
+                &mut facts,
+                &mut def_map,
+                &mut qual_map,
+                &mut follow_targets,
+                &mut task_targets,
+                base_fn_len,
+                results,
+            );
+        }
+    } else {
+        // Batched / locality mode: sequential Pass 1 + batched Pass 2.
         const PASS1_RESET_INTERVAL: usize = 512;
         let mut kept: Vec<FileRef> = Vec::with_capacity(catalog.len());
         let mut since_reset = 0usize;
@@ -117,109 +186,46 @@ pub(crate) fn extract_files(
                 db = db.fresh_empty();
                 since_reset = 0;
             }
-            let file = match system_path_to_file(&db, &entry.system_path) {
-                Ok(f) => f,
-                Err(err) => {
-                    facts.complete = false;
-                    facts
-                        .skipped
-                        .push(format!("{}: {err}", entry.system_path.as_str()));
-                    continue;
-                }
-            };
-            let program = db.program();
-            let program_file = program.program_file(&db, file);
-            let source = source_text(&db, file);
-            if let Some(err) = source.read_error() {
-                facts.complete = false;
-                facts.skipped.push(format!("{}: {err}", entry.rel));
-                continue;
-            }
-            let parsed = parsed_module(&db, program_file.python_file(&db)).load(&db);
-            if parsed.has_invalid_syntax() {
-                facts.complete = false;
-                let detail = parsed
-                    .errors()
-                    .first()
-                    .map(|e| e.to_string())
-                    .unwrap_or_else(|| "syntax error".to_string());
-                facts.skipped.push(format!("{}: {detail}", entry.rel));
-                continue;
-            }
-            let index = line_index(&db, file);
-            let ctx = FileCtx {
-                db: &db,
-                program_file,
-                file,
+            let spec = Pass2FileSpec {
+                system_path: entry.system_path.clone(),
                 rel: entry.rel.clone(),
                 module: entry.module.clone(),
-                source: source.as_str().to_string(),
-                index,
             };
-            // Pass 1 is parse-only (no SemanticModel); panics are unexpected.
-            // Isolation for analysis panics lives in pass 2.
-            collect_functions(
-                &ctx,
-                parsed.suite(),
-                &mut facts,
-                &mut def_map,
-                &mut qual_map,
-                &mut class_methods,
-                &mut property_defs,
-            );
-            kept.push(entry);
-            since_reset += 1;
-        }
-        catalog = kept;
-    }
-    // Drop pass-1 AST/source memos before spawning pass-2 workers.
-    db = db.fresh_empty();
-
-    for func in &mut facts.functions {
-        if let Some((class, method)) = func.qualname.rsplit_once('.') {
-            let key = (func.module.clone(), class.to_string());
-            if let Some(methods) = class_methods.get(&key)
-                && let Some(t) = twin_name(method, methods)
-            {
-                func.async_twins.push((method.to_string(), t));
+            match extract_pass1_one_file(&db, &spec) {
+                Pass1FileOutcome::Skipped(msg) => {
+                    facts.complete = false;
+                    facts.skipped.push(msg);
+                }
+                Pass1FileOutcome::Ok(data) => {
+                    merge_pass1_file_data(
+                        &entry.rel,
+                        &entry.module,
+                        data,
+                        &mut facts,
+                        &mut def_map,
+                        &mut qual_map,
+                        &mut class_methods,
+                        &mut property_defs,
+                    );
+                    kept.push(entry);
+                    since_reset += 1;
+                }
             }
         }
-    }
+        db = db.fresh_empty();
 
-    let mut task_targets = TaskTargets::default();
-    let mut follow_targets: HashMap<String, FollowTarget> = HashMap::new();
-    let entries: Vec<&FileRef> = catalog.iter().collect();
-    let batch_mode = pass2_batch_mode();
-    if matches!(batch_mode, Pass2BatchMode::None) && !entries.is_empty() {
-        let base_fn_len = facts.functions.len();
-        let specs: Vec<Pass2FileSpec> = entries
-            .iter()
-            .map(|e| Pass2FileSpec {
-                system_path: e.system_path.clone(),
-                rel: e.rel.clone(),
-                module: e.module.clone(),
-            })
-            .collect();
-        let results = {
-            let shared = Pass2Shared {
-                functions: &facts.functions,
-                def_map: &def_map,
-                qual_map: &qual_map,
-                property_defs: &property_defs,
-                followable_extra_roots: &followable_extra_roots,
-            };
-            run_pass2_parallel(&db, &specs, &shared)
-        };
-        merge_pass2_results(
-            &mut facts,
-            &mut def_map,
-            &mut qual_map,
-            &mut follow_targets,
-            &mut task_targets,
-            base_fn_len,
-            results,
-        );
-    } else {
+        for func in &mut facts.functions {
+            if let Some((class, method)) = func.qualname.rsplit_once('.') {
+                let key = (func.module.clone(), class.to_string());
+                if let Some(methods) = class_methods.get(&key)
+                    && let Some(t) = twin_name(method, methods)
+                {
+                    func.async_twins.push((method.to_string(), t));
+                }
+            }
+        }
+
+        let entries: Vec<&FileRef> = kept.iter().collect();
         run_pass2_batched(
             &mut db,
             &entries,
@@ -233,6 +239,7 @@ pub(crate) fn extract_files(
             &mut package_meta,
             &followable_extra_roots,
         );
+        db = db.fresh_empty();
     }
 
     for &fid in &task_targets.0 {
@@ -241,9 +248,6 @@ pub(crate) fn extract_files(
             f.label = EntryLabel::Task;
         }
     }
-
-    // Drop first-party SemanticModel memos before follow for stable RSS/identity.
-    db = db.fresh_empty();
 
     follow_third_party(
         &mut db,

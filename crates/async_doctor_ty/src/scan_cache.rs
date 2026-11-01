@@ -9,6 +9,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use async_doctor_core::{AnalyzeOptions, Report};
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,29 @@ use crate::cache::{
     CACHE_SCHEMA_VERSION, TOOL_VERSION, build_id, package_content_fingerprint, sanitize_component,
     short_hash,
 };
+
+static LAST_SCAN_IGNORE_CANDIDATES: Mutex<Option<(PathBuf, Vec<PathBuf>)>> = Mutex::new(None);
+
+/// Take the list of `.py` files under `scan_root` that contained `"async-doctor"`
+/// during the most recent directory `scan_input_fingerprint` call, if `scan_root`
+/// matches.
+pub fn take_ignore_candidate_files(scan_root: &Path) -> Option<Vec<PathBuf>> {
+    let root_canon = scan_root
+        .canonicalize()
+        .unwrap_or_else(|_| scan_root.to_path_buf());
+    let mut guard = LAST_SCAN_IGNORE_CANDIDATES.lock().ok()?;
+    if guard.as_ref().is_some_and(|(r, _)| r == &root_canon) {
+        guard.take().map(|(_, files)| files)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn clear_ignore_candidate_files() {
+    if let Ok(mut guard) = LAST_SCAN_IGNORE_CANDIDATES.lock() {
+        *guard = None;
+    }
+}
 
 /// On-disk envelope so stale schema/tool versions never deserialize as a hit.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -49,8 +73,8 @@ fn scan_cache_path(root: &Path, fingerprint: &str) -> PathBuf {
 /// Load a cached report when present and compatible with this tool/schema.
 pub fn load_scan_report(root: &Path, fingerprint: &str) -> Option<Report> {
     let path = scan_cache_path(root, fingerprint);
-    let data = fs::read_to_string(path).ok()?;
-    let cached: ScanCacheFile = serde_json::from_str(&data).ok()?;
+    let data = fs::read(path).ok()?;
+    let cached: ScanCacheFile = serde_json::from_slice(&data).ok()?;
     if cached.schema_version != CACHE_SCHEMA_VERSION || cached.tool_version != TOOL_VERSION {
         return None;
     }
@@ -79,8 +103,6 @@ pub fn save_scan_report(root: &Path, fingerprint: &str, report: &Report) -> std:
         serde_json::to_writer(&mut writer, &cached)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         writer.flush()?;
-        let f = writer.into_inner().map_err(|e| e.into_error())?;
-        f.sync_all()?;
     }
     fs::rename(&tmp, &path)?;
     Ok(())
@@ -117,16 +139,29 @@ pub fn scan_input_fingerprint(
         .unwrap_or_else(|_| scan_root.to_path_buf());
     blob.push_str(&format!("root:{}\n", root_canon.display()));
 
-    let fp_one = |path: &PathBuf| -> (String, String) {
+    let fp_one = |path: &PathBuf| -> (String, String, Option<PathBuf>) {
         let rel = path
             .strip_prefix(&root_canon)
             .or_else(|_| path.strip_prefix(scan_root))
             .unwrap_or(path);
-        let rel = rel.to_string_lossy().replace('\\', "/");
-        let fp = content_fingerprint(path).unwrap_or_else(|| "0".to_string());
-        (rel, fp)
+        let rel_cow = rel.to_string_lossy();
+        let rel = if rel_cow.contains('\\') {
+            rel_cow.replace('\\', "/")
+        } else {
+            rel_cow.into_owned()
+        };
+        let is_py = !rel.ends_with(".pyi");
+        match fs::read(path) {
+            Ok(bytes) => {
+                let fp = short_hash(&bytes);
+                let has_ignore = is_py
+                    && std::str::from_utf8(&bytes).map_or(true, |s| s.contains("async-doctor"));
+                (rel, fp, has_ignore.then(|| path.clone()))
+            }
+            Err(_) => (rel, "0".to_string(), is_py.then(|| path.clone())),
+        }
     };
-    let mut files: Vec<(String, String)> = if first_party_files.len() >= 64 {
+    let raw_files: Vec<(String, String, Option<PathBuf>)> = if first_party_files.len() >= 64 {
         let nthreads = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1)
@@ -146,6 +181,17 @@ pub fn scan_input_fingerprint(
     } else {
         first_party_files.iter().map(fp_one).collect()
     };
+    let mut ignore_candidates = Vec::new();
+    let mut files: Vec<(String, String)> = Vec::with_capacity(raw_files.len());
+    for (rel, fp, cand) in raw_files {
+        if let Some(p) = cand {
+            ignore_candidates.push(p);
+        }
+        files.push((rel, fp));
+    }
+    if let Ok(mut guard) = LAST_SCAN_IGNORE_CANDIDATES.lock() {
+        *guard = Some((root_canon.clone(), ignore_candidates));
+    }
     files.sort();
     for (rel, fp) in &files {
         // Tag by extension so .py vs .pyi with the same stem cannot collide.

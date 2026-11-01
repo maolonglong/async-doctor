@@ -19,6 +19,7 @@ pub use extract::{discover_python_files, extract_path, extract_path_with_cache};
 pub use scan::{
     scan_path, scan_path_with_cache, scan_path_with_options, scan_path_with_options_and_cache,
 };
+pub use scan_cache::take_ignore_candidate_files;
 
 #[cfg(test)]
 mod tests;

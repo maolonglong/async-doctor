@@ -14,7 +14,9 @@ use crate::extract::{
     DEFAULT_FOLLOW_BUDGET, absolute_utf8, discover_python_and_stub_files, extract_discovered_files,
     extract_path_with_cache_budget,
 };
-use crate::scan_cache::{load_scan_report, save_scan_report, scan_input_fingerprint};
+use crate::scan_cache::{
+    clear_ignore_candidate_files, load_scan_report, save_scan_report, scan_input_fingerprint,
+};
 use crate::timing::PhaseTiming;
 
 /// Scan a project directory or a single `.py` file with default options.
@@ -90,6 +92,9 @@ fn scan_path_with_options_cache_budget(
         options,
         follow_budget,
     );
+    if abs.as_std_path().is_file() {
+        clear_ignore_candidate_files();
+    }
     timing.span("fingerprint", t_fp);
 
     let t_load = Instant::now();

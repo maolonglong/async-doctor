@@ -1,6 +1,7 @@
 //! Per-file extraction context and shared keys.
 
 use ruff_db::files::File;
+use ruff_db::source::SourceText;
 use ruff_source_file::OneIndexed;
 use ruff_text_size::{TextRange, TextSize};
 use ty_python_core::ProgramFile;
@@ -24,7 +25,7 @@ pub(crate) struct FileCtx<'db> {
     pub(crate) file: File,
     pub(crate) rel: String,
     pub(crate) module: String,
-    pub(crate) source: String,
+    pub(crate) source: SourceText,
     pub(crate) index: ruff_source_file::LineIndex,
 }
 
@@ -35,10 +36,11 @@ impl<'db> FileCtx<'db> {
     }
 
     pub(crate) fn snippet(&self, range: TextRange) -> String {
+        let s = self.source.as_str();
         let start = usize::from(range.start());
-        let end = usize::from(range.end()).min(self.source.len());
+        let end = usize::from(range.end()).min(s.len());
         let start = start.min(end);
-        self.source[start..end].trim().to_string()
+        s[start..end].trim().to_string()
     }
 }
 

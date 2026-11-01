@@ -627,7 +627,7 @@ pub(crate) fn extract_third_party_function(
         file,
         rel,
         module,
-        source: source.as_str().to_string(),
+        source,
         index,
     };
     let model = SemanticModel::new(db, program_file);

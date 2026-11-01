@@ -352,12 +352,17 @@ fn parse_ignore_comment(comment: &str) -> IgnoreParse {
 }
 
 fn files_to_scan<'a>(report: &'a Report, root: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    let mut paths = HashSet::new();
+    if let Some(candidates) = async_doctor_ty::take_ignore_candidate_files(root) {
+        return Ok(candidates);
+    }
+    let mut paths: HashSet<PathBuf> = async_doctor_ty::discover_python_files(root)?
+        .into_iter()
+        .collect();
     let mut rel_seen: HashSet<&'a str> = HashSet::new();
     let mut add = |paths: &mut HashSet<PathBuf>, rel: &'a str| {
         if !rel.is_empty() && rel_seen.insert(rel) {
             let p = root.join(rel);
-            if p.is_file() {
+            if !paths.contains(&p) && p.is_file() {
                 paths.insert(p);
             }
         }
@@ -374,11 +379,6 @@ fn files_to_scan<'a>(report: &'a Report, root: &Path) -> anyhow::Result<Vec<Path
         for s in &c.chain {
             add(&mut paths, &s.file);
         }
-    }
-    // Same first-party set extraction uses — required so unused suppressions in
-    // clean files are still reported, without re-walking gitignored trees.
-    for p in async_doctor_ty::discover_python_files(root)? {
-        paths.insert(p);
     }
     Ok(paths.into_iter().collect())
 }

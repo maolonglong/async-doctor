@@ -409,6 +409,9 @@ pub fn path_str_contains_site_packages(s: &str) -> bool {
 /// True when `path` is under a venv/user `site-packages` or system `dist-packages`
 /// tree. Both are treated as third-party (followed, never entries).
 pub fn path_str_is_third_party_python(s: &str) -> bool {
+    if !s.contains('\\') {
+        return s.contains("/site-packages/") || s.contains("/dist-packages/");
+    }
     let s = s.replace('\\', "/");
     s.contains("/site-packages/") || s.contains("/dist-packages/")
 }

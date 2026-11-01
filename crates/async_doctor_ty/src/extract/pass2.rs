@@ -26,7 +26,106 @@ use crate::sitepkgs::{FollowTarget, PackageMetaMemo};
 use super::collector::CallCollector;
 use super::constants::collect_module_constants;
 use super::ctx::{DefKey, FileCtx, TaskTargets};
+use super::functions::{Pass1FileOutcome, collect_functions_standalone};
 use super::panic_util::panic_message;
+
+/// Worker state carried from parallel Pass 1 into parallel Pass 2 so already
+/// parsed `source_text` / `line_index` / `parsed_module` memos stay warm.
+pub(crate) struct Pass1Worker {
+    pub(crate) db: AsyncDoctorDb,
+    pub(crate) warm_catalog_indices: Vec<usize>,
+}
+
+/// Parse one file in Pass 1 and collect its function definitions.
+pub(crate) fn extract_pass1_one_file(db: &AsyncDoctorDb, spec: &Pass2FileSpec) -> Pass1FileOutcome {
+    let file = match system_path_to_file(db, &spec.system_path) {
+        Ok(f) => f,
+        Err(err) => {
+            return Pass1FileOutcome::Skipped(format!("{}: {err}", spec.system_path.as_str()));
+        }
+    };
+    let program = db.program();
+    let program_file = program.program_file(db, file);
+    let source = source_text(db, file);
+    if let Some(err) = source.read_error() {
+        return Pass1FileOutcome::Skipped(format!("{}: {err}", spec.rel));
+    };
+    let parsed = parsed_module(db, program_file.python_file(db)).load(db);
+    if parsed.has_invalid_syntax() {
+        let detail = parsed
+            .errors()
+            .first()
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "syntax error".to_string());
+        return Pass1FileOutcome::Skipped(format!("{}: {detail}", spec.rel));
+    }
+    let index = line_index(db, file);
+    Pass1FileOutcome::Ok(collect_functions_standalone(&index, parsed.suite()))
+}
+
+/// Run Pass 1 in parallel across worker threads, returning ordered per-file
+/// outcomes and the warm per-worker Salsa databases for reuse in Pass 2.
+pub(crate) fn run_pass1_parallel(
+    db: &AsyncDoctorDb,
+    files: &[Pass2FileSpec],
+) -> (Vec<Pass1FileOutcome>, Vec<Pass1Worker>) {
+    const PASS1_WORKER_RESET_INTERVAL: usize = 256;
+
+    if files.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let nthreads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(files.len())
+        .max(1);
+    let queue = Mutex::new((0..files.len()).collect::<VecDeque<_>>());
+    let mut indexed: Vec<(usize, Pass1FileOutcome)> = Vec::with_capacity(files.len());
+    let mut workers: Vec<Pass1Worker> = Vec::with_capacity(nthreads);
+
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(nthreads);
+        for _ in 0..nthreads {
+            let mut worker_db = db.clone();
+            let queue = &queue;
+            handles.push(scope.spawn(move || {
+                let mut out = Vec::new();
+                let mut warm_catalog_indices = Vec::new();
+                loop {
+                    let i = queue.lock().unwrap().pop_front();
+                    let Some(i) = i else {
+                        break;
+                    };
+                    if warm_catalog_indices.len() >= PASS1_WORKER_RESET_INTERVAL {
+                        worker_db = worker_db.fresh_empty();
+                        warm_catalog_indices.clear();
+                    }
+                    let outcome = extract_pass1_one_file(&worker_db, &files[i]);
+                    if matches!(outcome, Pass1FileOutcome::Ok(_)) {
+                        warm_catalog_indices.push(i);
+                    }
+                    out.push((i, outcome));
+                }
+                (
+                    Pass1Worker {
+                        db: worker_db,
+                        warm_catalog_indices,
+                    },
+                    out,
+                )
+            }));
+        }
+        for h in handles {
+            let (worker, out) = h.join().expect("pass1 worker");
+            workers.push(worker);
+            indexed.extend(out);
+        }
+    });
+
+    indexed.sort_by_key(|(i, _)| *i);
+    let outcomes = indexed.into_iter().map(|(_, o)| o).collect();
+    (outcomes, workers)
+}
 
 /// Inputs shared read-only across pass-2 workers.
 pub(crate) struct Pass2Shared<'a> {
@@ -69,42 +168,67 @@ pub(crate) struct BaseFnPatch {
     pub invokes_params: Vec<u32>,
 }
 
-/// Run pass 2 in parallel with per-thread DB clones and per-file work-stealing.
+/// Run pass 2 in parallel with per-thread DBs reused from pass 1 and affinity
+/// work-stealing so files already parsed in a worker's DB hit cached ASTs.
 ///
 /// Each worker periodically resets its salsa DB (`fresh_empty`) after a bounded
 /// number of files so accumulated `SemanticModel` memos do not grow without
 /// bound on large monorepos.
 pub(crate) fn run_pass2_parallel(
-    db: &AsyncDoctorDb,
+    workers: Vec<Pass1Worker>,
     files: &[Pass2FileSpec],
+    catalog_to_kept: &[Option<usize>],
     shared: &Pass2Shared,
 ) -> Vec<Pass2FileResult> {
-    const WORKER_DB_RESET_INTERVAL: usize = 64;
+    const WORKER_DB_RESET_INTERVAL: usize = 160;
 
-    if files.is_empty() {
+    if files.is_empty() || workers.is_empty() {
         return Vec::new();
     }
-    let nthreads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
-        .min(files.len())
-        .max(1);
-    let queue = Mutex::new((0..files.len()).collect::<VecDeque<_>>());
+    let nthreads = workers.len();
+    let mut worker_deques: Vec<VecDeque<usize>> = vec![VecDeque::new(); nthreads];
+    let mut assigned = vec![false; files.len()];
+    for (t, w) in workers.iter().enumerate() {
+        for &cat_idx in &w.warm_catalog_indices {
+            if let Some(Some(kept_idx)) = catalog_to_kept.get(cat_idx)
+                && !assigned[*kept_idx]
+            {
+                assigned[*kept_idx] = true;
+                worker_deques[t].push_back(*kept_idx);
+            }
+        }
+    }
+    let mut rr = 0usize;
+    for (kept_idx, &is_assigned) in assigned.iter().enumerate() {
+        if !is_assigned {
+            worker_deques[rr % nthreads].push_back(kept_idx);
+            rr += 1;
+        }
+    }
+    let queues: Vec<Mutex<VecDeque<usize>>> = worker_deques.into_iter().map(Mutex::new).collect();
     let mut indexed: Vec<(usize, Pass2FileResult)> = Vec::with_capacity(files.len());
 
     std::thread::scope(|scope| {
         let mut handles = Vec::with_capacity(nthreads);
-        for _ in 0..nthreads {
-            // Clone on this thread — Storage is !Sync so rayon map_init cannot
-            // capture `&AsyncDoctorDb`.
-            let mut worker_db = db.clone();
-            let queue = &queue;
+        let queues_ref = &queues;
+        for (t, worker) in workers.into_iter().enumerate() {
+            let mut worker_db = worker.db;
             handles.push(scope.spawn(move || {
                 let mut out = Vec::new();
                 let mut since_reset = 0usize;
                 loop {
-                    let i = queue.lock().unwrap().pop_front();
-                    let Some(i) = i else {
+                    let mut next_idx = queues_ref[t].lock().unwrap().pop_front();
+                    if next_idx.is_none() {
+                        for k in 1..nthreads {
+                            let victim = (t + k) % nthreads;
+                            let stolen = queues_ref[victim].lock().unwrap().pop_back();
+                            if stolen.is_some() {
+                                next_idx = stolen;
+                                break;
+                            }
+                        }
+                    }
+                    let Some(i) = next_idx else {
                         break;
                     };
                     if since_reset >= WORKER_DB_RESET_INTERVAL {
@@ -127,6 +251,7 @@ pub(crate) fn run_pass2_parallel(
                     };
                     out.push((i, result));
                 }
+                drop(worker_db);
                 out
             }));
         }
@@ -226,7 +351,7 @@ pub(crate) fn extract_one_file(
         file,
         rel: spec.rel.clone(),
         module: spec.module.clone(),
-        source: source.as_str().to_string(),
+        source,
         index,
     };
     let module_constants = collect_module_constants(parsed.suite());
@@ -489,7 +614,7 @@ pub(crate) fn visit_one_file_shared(
         file,
         rel: spec.rel.clone(),
         module: spec.module.clone(),
-        source: source.as_str().to_string(),
+        source,
         index,
     };
     let module_constants = collect_module_constants(parsed.suite());

@@ -4,51 +4,42 @@ use std::collections::{HashMap, HashSet};
 
 use async_doctor_core::{EntryLabel, FunctionFact, FunctionId, ProjectFacts};
 use ruff_python_ast::{self as ast, Expr, Stmt};
+use ruff_source_file::{LineIndex, OneIndexed};
 
 use super::constants::body_has_yield;
-use super::ctx::{DefKey, FileCtx, scope_qualname};
+use super::ctx::{DefKey, scope_qualname};
 
-pub(crate) fn twin_name(method: &str, methods: &[String]) -> Option<String> {
-    let candidates = [
-        format!("a{method}"),
-        format!("async_{method}"),
-        format!("{method}_async"),
-    ];
-    candidates
-        .into_iter()
-        .find(|c| methods.iter().any(|m| m == c))
+pub(crate) struct Pass1Fn {
+    pub(crate) name_start: u32,
+    pub(crate) line: u32,
+    pub(crate) qualname: String,
+    pub(crate) is_async: bool,
+    pub(crate) is_generator: bool,
+    pub(crate) label: EntryLabel,
+    pub(crate) is_sync_route: bool,
+    pub(crate) param_names: Vec<String>,
 }
 
-pub(crate) fn decorator_is_property(expr: &Expr) -> bool {
-    match expr {
-        Expr::Call(call) => decorator_is_property(&call.func),
-        Expr::Name(n) => n.id.as_str() == "property",
-        Expr::Attribute(a) => a.attr.as_str() == "property",
-        _ => false,
-    }
+pub(crate) struct Pass1FileData {
+    pub(crate) functions: Vec<Pass1Fn>,
+    pub(crate) class_methods: Vec<(String, String)>,
+    pub(crate) property_name_starts: Vec<u32>,
 }
 
-pub(crate) fn collect_functions(
-    ctx: &FileCtx<'_>,
-    suite: &[Stmt],
-    facts: &mut ProjectFacts,
-    def_map: &mut HashMap<DefKey, FunctionId>,
-    qual_map: &mut HashMap<(String, String), FunctionId>,
-    class_methods: &mut HashMap<(String, String), Vec<String>>,
-    property_defs: &mut HashSet<DefKey>,
-) {
-    struct Collector<'a, 'db> {
-        ctx: &'a FileCtx<'db>,
-        facts: &'a mut ProjectFacts,
-        def_map: &'a mut HashMap<DefKey, FunctionId>,
-        qual_map: &'a mut HashMap<(String, String), FunctionId>,
-        class_methods: &'a mut HashMap<(String, String), Vec<String>>,
-        property_defs: &'a mut HashSet<DefKey>,
+pub(crate) enum Pass1FileOutcome {
+    Skipped(String),
+    Ok(Pass1FileData),
+}
+
+pub(crate) fn collect_functions_standalone(index: &LineIndex, suite: &[Stmt]) -> Pass1FileData {
+    struct Collector<'a> {
+        index: &'a LineIndex,
+        data: Pass1FileData,
         class_stack: Vec<String>,
         fn_stack: Vec<String>,
     }
 
-    impl Collector<'_, '_> {
+    impl Collector<'_> {
         fn visit_body(&mut self, body: &[Stmt]) {
             for stmt in body {
                 self.visit_stmt(stmt);
@@ -67,55 +58,39 @@ pub(crate) fn collect_functions(
                         scope_qualname(&self.class_stack, &self.fn_stack, func.name.as_str());
                     if !self.class_stack.is_empty() && self.fn_stack.is_empty() {
                         let class = self.class_stack.join(".");
-                        self.class_methods
-                            .entry((self.ctx.module.clone(), class))
-                            .or_default()
-                            .push(func.name.as_str().to_string());
+                        self.data
+                            .class_methods
+                            .push((class, func.name.as_str().to_string()));
                     }
 
                     let label = infer_entry_label(func);
                     let is_sync_route = !func.is_async && label == EntryLabel::Route;
-                    let id = FunctionId(self.facts.functions.len() as u32);
-                    let key = DefKey {
-                        file: self.ctx.rel.clone(),
-                        name_start: u32::from(func.name.range.start()),
-                    };
+                    let name_start = u32::from(func.name.range.start());
                     if func
                         .decorator_list
                         .iter()
                         .any(|d| decorator_is_property(&d.expression))
                     {
-                        self.property_defs.insert(key.clone());
+                        self.data.property_name_starts.push(name_start);
                     }
-                    self.def_map.insert(key, id);
-                    self.qual_map
-                        .insert((self.ctx.module.clone(), qualname.clone()), id);
 
                     let param_names: Vec<String> = func
                         .parameters
                         .iter_non_variadic_params()
                         .map(|a| a.parameter.name.as_str().to_string())
                         .collect();
-                    self.facts.functions.push(FunctionFact {
-                        id,
-                        file: self.ctx.rel.clone(),
-                        line: self.ctx.line_of(func.name.range.start()),
-                        module: self.ctx.module.clone(),
+                    let line: OneIndexed = self.index.line_index(func.name.range.start());
+                    self.data.functions.push(Pass1Fn {
+                        name_start,
+                        line: line.get() as u32,
                         qualname,
                         is_async: func.is_async,
                         is_generator: body_has_yield(&func.body),
                         label,
                         is_sync_route,
-                        async_twins: Vec::new(),
                         param_names,
-                        is_third_party: false,
-                        package_name: None,
-                        package_version: None,
-                        invokes_params: Vec::new(),
-                        is_offload_wrapper: false,
                     });
 
-                    // Nested functions — push enclosing name onto fn_stack.
                     self.fn_stack.push(func.name.as_str().to_string());
                     self.visit_body(&func.body);
                     self.fn_stack.pop();
@@ -157,16 +132,89 @@ pub(crate) fn collect_functions(
     }
 
     let mut c = Collector {
-        ctx,
-        facts,
-        def_map,
-        qual_map,
-        class_methods,
-        property_defs,
+        index,
+        data: Pass1FileData {
+            functions: Vec::new(),
+            class_methods: Vec::new(),
+            property_name_starts: Vec::new(),
+        },
         class_stack: Vec::new(),
         fn_stack: Vec::new(),
     };
     c.visit_body(suite);
+    c.data
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn merge_pass1_file_data(
+    rel: &str,
+    module: &str,
+    data: Pass1FileData,
+    facts: &mut ProjectFacts,
+    def_map: &mut HashMap<DefKey, FunctionId>,
+    qual_map: &mut HashMap<(String, String), FunctionId>,
+    class_methods: &mut HashMap<(String, String), Vec<String>>,
+    property_defs: &mut HashSet<DefKey>,
+) {
+    for (class, method) in data.class_methods {
+        class_methods
+            .entry((module.to_string(), class))
+            .or_default()
+            .push(method);
+    }
+    for name_start in data.property_name_starts {
+        property_defs.insert(DefKey {
+            file: rel.to_string(),
+            name_start,
+        });
+    }
+    for f in data.functions {
+        let id = FunctionId(facts.functions.len() as u32);
+        let key = DefKey {
+            file: rel.to_string(),
+            name_start: f.name_start,
+        };
+        def_map.insert(key, id);
+        qual_map.insert((module.to_string(), f.qualname.clone()), id);
+        facts.functions.push(FunctionFact {
+            id,
+            file: rel.to_string(),
+            line: f.line,
+            module: module.to_string(),
+            qualname: f.qualname,
+            is_async: f.is_async,
+            is_generator: f.is_generator,
+            label: f.label,
+            is_sync_route: f.is_sync_route,
+            async_twins: Vec::new(),
+            param_names: f.param_names,
+            is_third_party: false,
+            package_name: None,
+            package_version: None,
+            invokes_params: Vec::new(),
+            is_offload_wrapper: false,
+        });
+    }
+}
+
+pub(crate) fn twin_name(method: &str, methods: &[String]) -> Option<String> {
+    let candidates = [
+        format!("a{method}"),
+        format!("async_{method}"),
+        format!("{method}_async"),
+    ];
+    candidates
+        .into_iter()
+        .find(|c| methods.iter().any(|m| m == c))
+}
+
+pub(crate) fn decorator_is_property(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call(call) => decorator_is_property(&call.func),
+        Expr::Name(n) => n.id.as_str() == "property",
+        Expr::Attribute(a) => a.attr.as_str() == "property",
+        _ => false,
+    }
 }
 
 pub(crate) fn infer_entry_label(func: &ast::StmtFunctionDef) -> EntryLabel {
