@@ -62,11 +62,11 @@ so latency spikes and timeouts pile up across the process. Prefer the async twin
     RuleDoc {
         id: "blocking-socket",
         title: "Blocking socket / DNS / SSL",
-        summary: "Sync socket, `getaddrinfo`, or SSL handshake stalls the loop.",
+        summary: "Sync socket, DNS/SSL, or `smtplib`/`ftplib` stalls the loop.",
         body: "\
-BSD sockets and blocking DNS resolve on the calling thread. Inside `async def`,\n\
-that thread is the event loop. Use asyncio stream/server helpers, or run the\n\
-sync call in a worker thread.",
+BSD sockets, blocking DNS, SSL handshakes, and sync `smtplib` / `ftplib` clients\n\
+resolve on the calling thread. Inside `async def`, that thread is the event loop.\n\
+Use asyncio helpers / `aiosmtplib`, or run the sync call in a worker thread.",
         fix: "\
 - Prefer `asyncio.open_connection` / asyncio servers / `loop.getaddrinfo`.\n\
 - Or `await asyncio.to_thread(socket.create_connection, ...)`.",
@@ -97,10 +97,11 @@ running for the entire child lifetime.",
     RuleDoc {
         id: "blocking-file",
         title: "Blocking file / path IO",
-        summary: "`open`, path reads/writes, and directory walks block on disk.",
+        summary: "`open`, path/glob walks, archives, and `input` block on IO.",
         body: "\
-Disk IO can stall under load or on network filesystems. Inside `async def`, use\n\
-async file helpers or offload sync filesystem calls.",
+Disk IO (including `pathlib` walks, `glob`, `zipfile` / `tarfile`, and blocking\n\
+`input()`) can stall under load or on network filesystems. Inside `async def`,\n\
+use async helpers or offload sync calls.",
         fix: "\
 - Use `aiofiles` / AnyIO file APIs where practical.\n\
 - Or `await asyncio.to_thread(path.read_text)` / `to_thread(open, ...)`.",
@@ -108,9 +109,10 @@ async file helpers or offload sync filesystem calls.",
     RuleDoc {
         id: "blocking-lock",
         title: "Blocking thread lock / queue / future",
-        summary: "Threading locks, `queue.Queue`, and `Future.result` can stall the loop.",
+        summary: "Threading locks, queues, `Future.result`, and `Executor.map`/`wait`.",
         body: "\
-A contended lock or blocking queue get on the event-loop thread freezes every\n\
+A contended lock, blocking queue get, `concurrent.futures.Future.result()`,\n\
+`Executor.map` consumption, or `wait()` on the event-loop thread freezes every\n\
 task. Prefer asyncio primitives, or confine blocking waits to worker threads.",
         fix: "\
 - Prefer `asyncio.Lock` / `Event` / `Queue`.\n\

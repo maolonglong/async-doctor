@@ -171,3 +171,37 @@ fn azure_openai_is_blocking_sink() {
         .unwrap();
     assert_eq!(twin.symbol, "openai.AsyncAzureOpenAI");
 }
+
+#[test]
+fn boto_dynamic_client_methods_match_aioboto_advice() {
+    let t = BuiltinSinkTable::new();
+    let hit = t
+        .lookup("botocore.client.BaseClient.get_object")
+        .expect("get_object");
+    assert_eq!(hit.rule, RULE_BLOCKING_HTTP);
+    assert!(hit.fix_hint.contains("aioboto3"));
+    assert!(t.lookup("botocore.client.BaseClient.meta").is_none());
+    assert!(t.lookup("boto3.client").is_some());
+}
+
+#[test]
+fn stdlib_p1_sinks_resolve() {
+    let t = BuiltinSinkTable::new();
+    for q in [
+        "smtplib.SMTP.sendmail",
+        "ftplib.FTP.login",
+        "zipfile.ZipFile.extractall",
+        "tarfile.open",
+        "glob.glob",
+        "pathlib.Path.iterdir",
+        "builtins.input",
+        "concurrent.futures._base.Future.result",
+        "concurrent.futures.ThreadPoolExecutor.map",
+        "concurrent.futures.wait",
+    ] {
+        assert!(t.lookup(q).is_some(), "missing sink for {q}");
+    }
+    // asyncio Future must not match concurrent.futures normalization.
+    assert!(t.lookup("asyncio.futures.Future.result").is_none());
+    assert!(t.lookup("asyncio.Future.result").is_none());
+}
