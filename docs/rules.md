@@ -36,6 +36,14 @@ Sync HTTP clients (`urllib`, `requests`, sync `httpx` / `urllib3`).
 
 **Fix:** async file helpers, or `await asyncio.to_thread(...)`.
 
+**Notes:**
+
+- In-memory buffers (`io.BytesIO` / `StringIO`, including locals bound to them)
+  are not file IO: `open`/`Image.open` and `zipfile`/`tarfile` opened on those
+  buffers (plus subsequent receiver ops like `writestr`) stay clean.
+- `open`/`ZipFile` plus later `read`/`write`/`writestr` on the same call-path
+  prefix merge into one finding; `SMTP(...).sendmail(...)` on one line likewise.
+
 ## blocking-lock
 
 Threading locks, `queue.Queue`, blocking `concurrent.futures.Future.result`,
@@ -43,6 +51,13 @@ Threading locks, `queue.Queue`, blocking `concurrent.futures.Future.result`,
 
 **Fix:** asyncio primitives, `asyncio.wrap_future` / `asyncio.wait`, or confine
 waits to workers.
+
+**Notes:**
+
+- Thread-identity off-loop guards drop blocking sites in that branch:
+  `x != threading.get_ident()`, `threading.current_thread() is not
+  threading.main_thread()`, and the complementary else of an on-loop test.
+- `if fut.done(): fut.result()` is treated as non-blocking for that future.
 
 ## blocking-db
 
@@ -56,9 +71,10 @@ Sync database drivers and sync cloud/AI SDKs (SQLAlchemy Session, redis, boto3, 
   — it is **not** a thread offload and is not treated as one.
 - Sync `boto3` / `botocore` client and resource API calls (including dynamic
   methods such as `get_object` / `get_item`) are reported with an `aioboto3` /
-  `aiobotocore` fix hint. There is still no dedicated `aioboto3` sink/follow
-  family; `aioboto3.*` / `aiobotocore.*` qualnames are classified as async
-  counterparts (never findings).
+  `aiobotocore` fix hint. Meta helpers (`get_paginator`, `get_waiter`,
+  `can_paginate`, `generate_presigned_url`, `meta`) are not IO and stay clean.
+  There is still no dedicated `aioboto3` sink/follow family; `aioboto3.*` /
+  `aiobotocore.*` qualnames are classified as async counterparts (never findings).
 
 ## unresolved-call
 
