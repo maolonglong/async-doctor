@@ -565,23 +565,39 @@ fn p1_miss_probe_covers_stdlib_and_boto_gaps() {
 
 #[test]
 fn p1_boto2_client_and_resource_ops() {
+    // Untyped stub: main cannot resolve dynamic get_object/get_item; this branch
+    // must find them via syntactic boto receiver tracking (not merely client()).
     let dir = clone_fixture("boto2");
     let cache = fresh_cache_dir("boto2");
     let report = scan_path_with_cache(&dir, Some(&cache)).unwrap();
+    let a_sinks: Vec<String> = report
+        .findings
+        .iter()
+        .filter(|f| f.entry.name == "a")
+        .flat_map(|f| {
+            f.chain
+                .iter()
+                .flat_map(|c| [c.text.clone(), c.resolution.clone(), f.fix.hint.clone()])
+        })
+        .collect();
     assert!(
-        report
-            .findings
-            .iter()
-            .any(|f| f.entry.name == "a" && f.fix.hint.contains("aioboto")),
-        "get_object must fire: {:?}",
+        a_sinks.iter().any(|s| s.contains("get_object")),
+        "receiver-tracked get_object must fire (not just boto3.client): {a_sinks:?} {:?}",
         report.findings
     );
+    let table_sinks: Vec<String> = report
+        .findings
+        .iter()
+        .filter(|f| f.entry.name == "resource_table")
+        .flat_map(|f| {
+            f.chain
+                .iter()
+                .flat_map(|c| [c.text.clone(), c.resolution.clone()])
+        })
+        .collect();
     assert!(
-        report
-            .findings
-            .iter()
-            .any(|f| f.entry.name == "resource_table"),
-        "resource Table.get_item must fire: {:?}",
+        table_sinks.iter().any(|s| s.contains("get_item")),
+        "receiver-tracked get_item must fire: {table_sinks:?} {:?}",
         report.findings
     );
     let _ = fs::remove_dir_all(&dir);

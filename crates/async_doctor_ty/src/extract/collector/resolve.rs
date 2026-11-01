@@ -504,6 +504,13 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                     }
                 }
             }
+            // boto3 clients are dynamically typed (stubs often return `object`).
+            // Prefer syntactic receivers before weak typed `{object}.get_object`.
+            if aws_op_method_name(attr.attr.as_str())
+                && self.expr_is_boto_factory_or_receiver(&attr.value)
+            {
+                return Some(format!("botocore.client.BaseClient.{}", attr.attr.as_str()));
+            }
             if let Some(recv) = self.type_instance_qualname(&attr.value) {
                 let recv = if is_asyncio_redis_type(&recv) {
                     normalize_asyncio_redis_type(&recv)
@@ -526,13 +533,6 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             // dist-packages / weak typing: still recognize asyncio redis receivers.
             if self.expr_looks_like_asyncio_redis(&attr.value) {
                 return Some(format!("redis.asyncio.client.Redis.{}", attr.attr.as_str()));
-            }
-            // boto3 clients are dynamically typed (no per-op stubs). Syntactic
-            // receivers from `boto3.client` / `resource` still need a sink key.
-            if aws_op_method_name(attr.attr.as_str())
-                && self.expr_is_boto_factory_or_receiver(&attr.value)
-            {
-                return Some(format!("botocore.client.BaseClient.{}", attr.attr.as_str()));
             }
             // Do not map bare CoreCommands without a typed non-redis receiver:
             // untyped Pipeline shares that mixin and must stay non-sink.
