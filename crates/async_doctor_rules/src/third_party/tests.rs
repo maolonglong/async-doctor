@@ -198,6 +198,47 @@ fn boto_dynamic_client_methods_match_aioboto_advice() {
 }
 
 #[test]
+fn boto3_stubs_package_root_normalizes_to_sync_boto() {
+    use super::{
+        is_aioboto_package_qual, is_async_counterpart, is_sync_boto_factory_qualname,
+        normalize_stubs_package_root,
+    };
+
+    assert_eq!(
+        normalize_stubs_package_root("boto3-stubs.session.Session.client"),
+        "boto3.session.Session.client"
+    );
+    assert_eq!(
+        normalize_stubs_package_root("aioboto3-stubs.session.Session.client"),
+        "aioboto3.session.Session.client"
+    );
+    assert!(is_sync_boto_factory_qualname(
+        "boto3-stubs.session.Session.client"
+    ));
+    assert!(is_sync_boto_factory_qualname(
+        "boto3-stubs.session.Session.resource"
+    ));
+    assert!(!is_sync_boto_factory_qualname(
+        "aioboto3-stubs.session.Session.client"
+    ));
+    assert!(is_aioboto_package_qual(
+        "aioboto3-stubs.session.Session.client"
+    ));
+    assert!(is_async_counterpart(
+        "aioboto3-stubs.session.Session.client"
+    ));
+    let t = BuiltinSinkTable::new();
+    assert!(
+        t.lookup("boto3-stubs.session.Session.client").is_some(),
+        "stubs Session.client must match sync boto factory family"
+    );
+    assert!(
+        t.lookup("aioboto3-stubs.session.Session.client").is_none(),
+        "aioboto3-stubs must stay async counterpart"
+    );
+}
+
+#[test]
 fn stdlib_p1_sinks_resolve() {
     let t = BuiltinSinkTable::new();
     for q in [

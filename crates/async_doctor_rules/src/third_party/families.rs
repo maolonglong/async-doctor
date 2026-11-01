@@ -227,21 +227,26 @@ pub(super) fn match_family(q: &str) -> Option<SinkHit> {
     }
     // boto3 / botocore — factories + dynamic client/resource ops only.
     // Avoid matching arbitrary `*.client.*` helpers (e.g. BaseClient.meta).
-    if q.starts_with("boto3.") || q.starts_with("botocore.") {
-        let is_factory = matches!(
-            q,
-            "boto3.client"
-                | "boto3.resource"
-                | "boto3.session.Session.client"
-                | "boto3.session.Session.resource"
-                | "boto3.Session.client"
-                | "boto3.Session.resource"
-        ) || q.ends_with(".Session.client")
-            || q.ends_with(".Session.resource");
+    // `boto3-stubs.*` arrives pre-normalized via [`super::normalize_third_party`].
+    // Factories use the `boto3.client` / `boto3.resource` sink keys so they are
+    // not deduped against later `BaseClient.*` AWS-op findings on the same entry.
+    if is_sync_boto_package_qual(q) {
+        if is_sync_boto_factory_qualname(q) {
+            let key = if q.contains("resource") {
+                "boto3.resource"
+            } else {
+                "boto3.client"
+            };
+            return Some(hit(&BuiltinSink::finding(
+                key,
+                RULE_BLOCKING_HTTP,
+                "Use `aioboto3` / `aiobotocore` instead of sync `boto3`.",
+            )));
+        }
         let is_api = q.ends_with("._make_api_call")
             || q.contains("make_api_call")
             || method_looks_like_aws_op(q);
-        if is_factory || is_api {
+        if is_api {
             return Some(hit(&BuiltinSink::finding(
                 "botocore.client.BaseClient._make_api_call",
                 RULE_BLOCKING_HTTP,
@@ -479,6 +484,57 @@ fn sqlalchemy_query_io(q: &str) -> Option<&'static str> {
         "update" => Some("update"),
         _ => None,
     }
+}
+
+/// Strip a trailing `-stubs` from the top-level package segment.
+///
+/// `boto3-stubs.session.Session.client` → `boto3.session.Session.client`,
+/// `aioboto3-stubs.session.Session` → `aioboto3.session.Session`.
+pub fn normalize_stubs_package_root(qualname: &str) -> String {
+    let Some((root, rest)) = qualname.split_once('.') else {
+        return qualname
+            .strip_suffix("-stubs")
+            .unwrap_or(qualname)
+            .to_string();
+    };
+    let root = root.strip_suffix("-stubs").unwrap_or(root);
+    format!("{root}.{rest}")
+}
+
+/// True for sync `boto3` / `botocore` package roots (after `-stubs` normalize).
+pub fn is_sync_boto_package_qual(qualname: &str) -> bool {
+    let q = normalize_stubs_package_root(qualname);
+    if is_aioboto_package_qual(&q) {
+        return false;
+    }
+    q == "boto3" || q == "botocore" || q.starts_with("boto3.") || q.starts_with("botocore.")
+}
+
+/// True for `aioboto3` / `aiobotocore` roots (including `*-stubs` packages).
+pub fn is_aioboto_package_qual(qualname: &str) -> bool {
+    let q = normalize_stubs_package_root(qualname);
+    q == "aioboto3"
+        || q == "aiobotocore"
+        || q.starts_with("aioboto3.")
+        || q.starts_with("aiobotocore.")
+}
+
+/// Sync `boto3.client` / `Session.client` factories — never aioboto3.
+pub fn is_sync_boto_factory_qualname(qualname: &str) -> bool {
+    let q = normalize_stubs_package_root(qualname);
+    if is_aioboto_package_qual(&q) {
+        return false;
+    }
+    matches!(
+        q.as_str(),
+        "boto3.client"
+            | "boto3.resource"
+            | "boto3.session.Session.client"
+            | "boto3.session.Session.resource"
+            | "boto3.Session.client"
+            | "boto3.Session.resource"
+    ) || ((q.starts_with("boto3.") || q.starts_with("botocore."))
+        && (q.ends_with(".Session.client") || q.ends_with(".Session.resource")))
 }
 
 /// Sync AWS client/resource API method names (boto3 has no per-op stubs).

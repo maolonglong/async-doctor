@@ -13,7 +13,9 @@ pub use async_twin::{
 pub use docs::{DOCS_RULES_BASE, RULE_DOCS, RuleDoc, docs_anchor_for, docs_url_for, rule_doc};
 pub use stdlib::{STDLIB_SINKS, StdlibSinkTable};
 pub use third_party::{
-    BuiltinSinkTable, THIRD_PARTY_SINKS, aws_op_method_name, is_async_counterpart,
+    BuiltinSinkTable, THIRD_PARTY_SINKS, aws_op_method_name, is_aioboto_package_qual,
+    is_async_counterpart, is_sync_boto_factory_qualname, is_sync_boto_package_qual,
+    normalize_stubs_package_root,
 };
 
 pub const RULE_OFFLOAD_HAS_ASYNC_TWIN: &str = "offload-has-async-twin";
