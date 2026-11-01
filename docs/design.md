@@ -45,8 +45,11 @@ These override the draft:
 3. **JSON fields:** adopt the draft as-is (`schemaVersion`, `complete`,
    `findings[]` / `candidates[]`, `id`, `rule`, `entry`, `chain[]`,
    `conditions[]`, `fix` (+ `fixGroupId`), `why`), plus additive
-   `advice[]` (schemaVersion stays 1) with `category`
-   (`performance` | `correctness`).
+   `advice[]` with `category` (`performance` | `correctness`).
+   **schemaVersion 2:** always emit top-level arrays (even when empty);
+   add `environment` (interpreter/venv/site-packages + advisory `note`) and
+   `locationLessCandidates` (e.g. aggregated missing third-party); `why`
+   `--path` is relative to the scan cwd, never an absolute machine path.
 4. **Exit codes:**
    - `0` — no findings
    - `1` — findings present (even if analysis is incomplete)
@@ -131,22 +134,25 @@ dead branches are ignored; async twins appear only as fix hints.
 
 FastAPI sync `def` routes already run in a thread pool — do not report them.
 
-## JSON report (schemaVersion 1)
+## JSON report (schemaVersion 2)
 
 | Field | Meaning |
 | --- | --- |
-| `schemaVersion` | integer; bump on breaking changes |
+| `schemaVersion` | integer; bump on breaking changes (currently **2**) |
 | `complete` | false on timeout / parse failure; attach `skipped` |
-| `findings[]` / `candidates[]` / `advice[]` | separate arrays; candidates always have `reason`; advice is non-blocking (SARIF `note`) |
+| `environment` | interpreter/venv/site-packages used; `note` when degraded |
+| `findings[]` / `candidates[]` / `advice[]` | always emitted (even empty); candidates have `reason`; advice is non-blocking (SARIF `note`) |
+| `locationLessCandidates[]` | always emitted; unresolved-import aggregates with empty `entry.file`/`chain` |
+| `skipped[]` / `sinkSites[]` / `unusedSuppressions[]` / `unresolvedSummary[]` | always emitted (even empty) |
 | `id` | stable hash of rule + entry + sink (baseline-friendly) |
 | `rule` | e.g. `blocking-sleep`, `blocking-http` |
 | `entry` | async def location + label (`route` / `lifecycle` / `task` / `other`) |
 | `chain[]` | shortest evidence chain (`file`, `line`, `text`) |
 | `conditions[]` | e.g. `unconditional`, `loop` |
 | `fix` | hint + `fixGroupId` (shared across same root cause) |
-| `why` | runnable `async-doctor why file:line` |
+| `why` | runnable `async-doctor why file:line --path <relative>` |
 
-Default output is human text; `--format json` for agents; `--format sarif` for SARIF 2.1.0.
+Default output is human text (leads with environment + sink-site count); `--format json` for agents; `--format sarif` for SARIF 2.1.0.
 
 ## Agent integration (M3)
 

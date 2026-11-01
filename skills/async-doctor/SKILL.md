@@ -20,12 +20,14 @@ correctness errors (`nested-event-loop`, `offload-coroutine`) and non-blocking
 
 ## After editing async Python
 
-Run from the project root:
+Activate the project venv first (or set `VIRTUAL_ENV`) so third-party imports
+resolve — without it, findings silently drop because site-packages follow cannot
+see project dependencies. Then run:
 
 ```bash
+uvx async-doctor --changed
+# or, if already installed:
 async-doctor --changed
-# or, during development:
-cargo run -p async_doctor -- --changed .
 ```
 
 Fix every **finding** before finishing. Candidates and advice do not fail the
@@ -40,13 +42,14 @@ exit code; findings do.
 ## For a full cleanup
 
 ```bash
-async-doctor .
-async-doctor --format json .
-async-doctor --expand .   # show all advice (default text caps the list)
+uvx async-doctor .
+uvx async-doctor --format json .
+uvx async-doctor --expand .   # show all advice (default text caps the list)
 ```
 
-JSON includes additive `advice[]` (`schemaVersion` stays 1). Advice never changes
-the exit code. SARIF maps advice to level `note`.
+JSON includes `environment` (interpreter/venv/site-packages) and additive
+`advice[]` (`schemaVersion` 2). Advice never changes the exit code. SARIF maps
+advice to level `note`.
 
 ## Understanding a finding or advice
 
