@@ -54,6 +54,7 @@ pub(crate) struct Pass2FileResult {
     pub base_patches: Vec<BaseFnPatch>,
     pub unresolved_imports: Vec<UnresolvedImport>,
     pub unresolved_third_party_modules: Vec<String>,
+    pub resolved_third_party_modules: Vec<String>,
 }
 
 /// Mutations CallCollector makes on pre-existing (pass-1) functions.
@@ -126,6 +127,7 @@ fn extract_one_file(
         base_patches: Vec::new(),
         unresolved_imports: Vec::new(),
         unresolved_third_party_modules: Vec::new(),
+        resolved_third_party_modules: Vec::new(),
     };
 
     let file = match system_path_to_file(db, &spec.system_path) {
@@ -264,6 +266,7 @@ fn extract_one_file(
         base_patches,
         unresolved_imports: facts.unresolved_imports,
         unresolved_third_party_modules: facts.unresolved_third_party_modules,
+        resolved_third_party_modules: facts.resolved_third_party_modules,
     }
 }
 
@@ -326,6 +329,9 @@ pub(crate) fn merge_pass2_results(
         facts
             .unresolved_third_party_modules
             .extend(result.unresolved_third_party_modules);
+        facts
+            .resolved_third_party_modules
+            .extend(result.resolved_third_party_modules);
     }
 }
 

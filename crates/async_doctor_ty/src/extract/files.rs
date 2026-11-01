@@ -393,6 +393,8 @@ fn stabilize_facts(facts: &mut ProjectFacts) {
         .sort_by(|a, b| (&a.file, &a.module, a.line).cmp(&(&b.file, &b.module, b.line)));
     facts.unresolved_third_party_modules.sort();
     facts.unresolved_third_party_modules.dedup();
+    facts.resolved_third_party_modules.sort();
+    facts.resolved_third_party_modules.dedup();
 
     let project_keys: Vec<String> = facts
         .functions

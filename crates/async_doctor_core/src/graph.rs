@@ -284,6 +284,9 @@ pub struct ProjectFacts {
     /// Unique top-level third-party module names that failed to import
     /// (sorted). Surfaced as a single aggregated note, never per-import.
     pub unresolved_third_party_modules: Vec<String>,
+    /// Unique top-level third-party module names that resolved successfully
+    /// (sorted). Used with unresolved counts for the environment advisory ratio.
+    pub resolved_third_party_modules: Vec<String>,
     /// Twin / dependency symbols that resolve in the scanned venv (populated
     /// during extract). Used by advice rules that require the async twin (and
     /// its `needs`) to be installed.

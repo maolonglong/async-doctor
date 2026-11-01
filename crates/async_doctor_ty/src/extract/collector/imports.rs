@@ -17,6 +17,8 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             let module = alias.name.as_str();
             if self.model.resolve_module(Some(module), 0).is_none() {
                 self.classify_failed_import(alias.range(), module, /*relative=*/ false);
+            } else {
+                self.note_resolved_third_party_if_applicable(head_module(module));
             }
         }
     }
@@ -28,6 +30,11 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         let module = stmt.module.as_ref().map(|m| m.as_str());
         let level = stmt.level;
         if self.model.resolve_module(module, level).is_some() {
+            if level == 0
+                && let Some(m) = module
+            {
+                self.note_resolved_third_party_if_applicable(head_module(m));
+            }
             return;
         }
         // When scanning a package dir itself, ty often fails relative imports
@@ -96,6 +103,23 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
         self.facts
             .unresolved_third_party_modules
+            .push(head.to_string());
+    }
+
+    fn note_resolved_third_party_if_applicable(&mut self, head: &str) {
+        if head.is_empty() || self.head_exists_as_first_party(head) {
+            return;
+        }
+        if self
+            .facts
+            .resolved_third_party_modules
+            .iter()
+            .any(|m| m == head)
+        {
+            return;
+        }
+        self.facts
+            .resolved_third_party_modules
             .push(head.to_string());
     }
 

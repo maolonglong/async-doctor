@@ -42,15 +42,17 @@ pub struct ScanEnvironment {
     pub site_packages: Vec<String>,
     /// Distinct top-level third-party modules that failed to import.
     pub unresolved_third_party: u32,
+    /// Distinct top-level third-party modules that resolved successfully.
+    pub resolved_third_party: u32,
     /// Short advisory when resolution may be degraded (empty when fine).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
 }
 
 impl ScanEnvironment {
-    /// Threshold for "many" unresolved third-party imports that warrants a note
-    /// even when a project venv was found.
-    pub const MANY_UNRESOLVED_THIRD_PARTY: u32 = 3;
+    /// Warn when unresolved third-party imports are at least this fraction of
+    /// (unresolved + resolved) third-party heads, while a venv is active.
+    pub const UNRESOLVED_RATIO_THRESHOLD: f64 = 0.25;
 
     pub fn none() -> Self {
         Self {
@@ -60,24 +62,50 @@ impl ScanEnvironment {
             interpreter: None,
             site_packages: Vec::new(),
             unresolved_third_party: 0,
+            resolved_third_party: 0,
             note: String::new(),
         }
     }
 
-    /// Refresh [`Self::note`] from kind + unresolved third-party count.
+    /// Refresh [`Self::note`] from kind + third-party resolve counts.
+    ///
+    /// - No project venv + zero unresolved → silent (stdlib-only / nothing missing).
+    /// - No project venv + some unresolved → activate / `VIRTUAL_ENV` note.
+    /// - Project venv + high unresolved ratio → install deps/extras note.
+    /// - Project venv + low ratio → silent (optional deps are expected).
     pub fn refresh_note(&mut self) {
-        let degraded = self.kind != EnvironmentKind::Venv
-            || self.unresolved_third_party >= Self::MANY_UNRESOLVED_THIRD_PARTY;
-        self.note = if degraded {
-            "activate the project venv or set VIRTUAL_ENV so third-party imports resolve"
-                .to_string()
-        } else {
-            String::new()
+        self.note = match self.kind {
+            EnvironmentKind::None | EnvironmentKind::System => {
+                if self.unresolved_third_party == 0 {
+                    String::new()
+                } else {
+                    "activate the project venv or set VIRTUAL_ENV so third-party imports resolve"
+                        .to_string()
+                }
+            }
+            EnvironmentKind::Venv => {
+                let unresolved = self.unresolved_third_party;
+                let total = unresolved.saturating_add(self.resolved_third_party);
+                if unresolved == 0 || total == 0 {
+                    String::new()
+                } else {
+                    let ratio = f64::from(unresolved) / f64::from(total);
+                    if ratio >= Self::UNRESOLVED_RATIO_THRESHOLD {
+                        format!(
+                            "{unresolved} third-party modules are not installed in this venv; \
+                             install the project's deps/extras for full coverage"
+                        )
+                    } else {
+                        String::new()
+                    }
+                }
+            }
         };
     }
 
-    pub fn with_unresolved_third_party(mut self, n: u32) -> Self {
-        self.unresolved_third_party = n;
+    pub fn with_third_party_counts(mut self, unresolved: u32, resolved: u32) -> Self {
+        self.unresolved_third_party = unresolved;
+        self.resolved_third_party = resolved;
         self.refresh_note();
         self
     }
@@ -94,39 +122,66 @@ mod tests {
     use super::*;
 
     #[test]
-    fn note_when_no_venv() {
+    fn silent_when_no_venv_and_zero_unresolved() {
         let mut env = ScanEnvironment::none();
         env.refresh_note();
-        assert!(!env.note.is_empty());
+        assert!(
+            env.note.is_empty(),
+            "stdlib-only must stay quiet: {:?}",
+            env.note
+        );
     }
 
     #[test]
-    fn note_when_many_unresolved_with_venv() {
-        let mut env = ScanEnvironment {
-            kind: EnvironmentKind::Venv,
-            origin: "local .venv".into(),
-            prefix: Some("/proj/.venv".into()),
-            interpreter: None,
-            site_packages: vec!["/proj/.venv/lib/python3.12/site-packages".into()],
-            unresolved_third_party: ScanEnvironment::MANY_UNRESOLVED_THIRD_PARTY,
-            note: String::new(),
-        };
+    fn note_when_no_venv_and_unresolved() {
+        let mut env = ScanEnvironment::none();
+        env.unresolved_third_party = 2;
         env.refresh_note();
-        assert!(!env.note.is_empty());
+        assert!(env.note.contains("VIRTUAL_ENV"), "{:?}", env.note);
     }
 
     #[test]
-    fn quiet_when_venv_and_few_unresolved() {
+    fn venv_high_ratio_asks_for_deps_not_activate() {
         let mut env = ScanEnvironment {
             kind: EnvironmentKind::Venv,
             origin: "VIRTUAL_ENV".into(),
             prefix: Some("/proj/.venv".into()),
             interpreter: Some("/proj/.venv/bin/python".into()),
             site_packages: vec!["/proj/.venv/lib/python3.12/site-packages".into()],
-            unresolved_third_party: 1,
+            unresolved_third_party: 98,
+            resolved_third_party: 50,
             note: String::new(),
         };
         env.refresh_note();
-        assert!(env.note.is_empty());
+        assert!(
+            env.note.contains("not installed in this venv"),
+            "expected deps note, got {:?}",
+            env.note
+        );
+        assert!(
+            !env.note.contains("VIRTUAL_ENV"),
+            "must not ask to set VIRTUAL_ENV when already in a venv: {:?}",
+            env.note
+        );
+    }
+
+    #[test]
+    fn venv_low_ratio_stays_quiet() {
+        let mut env = ScanEnvironment {
+            kind: EnvironmentKind::Venv,
+            origin: "VIRTUAL_ENV".into(),
+            prefix: Some("/proj/.venv".into()),
+            interpreter: Some("/proj/.venv/bin/python".into()),
+            site_packages: vec!["/proj/.venv/lib/python3.12/site-packages".into()],
+            unresolved_third_party: 2,
+            resolved_third_party: 40,
+            note: String::new(),
+        };
+        env.refresh_note();
+        assert!(
+            env.note.is_empty(),
+            "low ratio must stay quiet: {:?}",
+            env.note
+        );
     }
 }

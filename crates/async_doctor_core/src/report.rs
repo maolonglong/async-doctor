@@ -6,9 +6,10 @@ use crate::environment::ScanEnvironment;
 
 /// JSON schema version. Bump only on breaking field changes.
 ///
-/// v2: always emit top-level arrays (even when empty); add `environment` and
-/// `locationLessCandidates`; `why` paths are scan-root-relative (never
-/// absolute machine paths).
+/// v2: always emit top-level arrays and zero-valued count fields; add
+/// `environment` and `locationLessCandidates`; `why --path` is cwd-relative
+/// (never an absolute machine path). Location-less candidates may omit `why`
+/// (empty) because they have no `file:line` locator.
 pub const SCHEMA_VERSION: u32 = 2;
 
 /// Exit code: no findings.
@@ -264,10 +265,12 @@ pub struct Report {
     #[serde(default)]
     pub skipped: Vec<String>,
     /// Async entries omitted because they live under tests/docs/examples/… (zero-config).
-    #[serde(default, skip_serializing_if = "is_zero")]
+    /// Always emitted (including `0`) for a stable JSON contract.
+    #[serde(default)]
     pub omitted_non_production_entries: u32,
     /// `unresolved` candidates omitted unless `--show-unresolved`.
-    #[serde(default, skip_serializing_if = "is_zero")]
+    /// Always emitted (including `0`) for a stable JSON contract.
+    #[serde(default)]
     pub hidden_unresolved_candidates: u32,
     /// Aggregated unresolved patterns (populated when `--show-unresolved`).
     #[serde(default)]
