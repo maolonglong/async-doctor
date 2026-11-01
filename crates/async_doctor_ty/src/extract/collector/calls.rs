@@ -413,7 +413,10 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 self.event_loop_locals.remove(name);
             }
             Expr::Generator(gexpr) => {
-                self.local_genexprs.insert(name.to_string(), gexpr);
+                self.local_genexprs
+                    .entry(name.to_string())
+                    .or_default()
+                    .push(gexpr);
                 self.idle_loop_locals.remove(name);
                 self.unbounded_queues.remove(name);
                 self.running_loop_locals.remove(name);

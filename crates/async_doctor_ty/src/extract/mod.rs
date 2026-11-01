@@ -9,6 +9,7 @@ mod files;
 mod follow;
 mod functions;
 mod helpers;
+mod panic_util;
 mod pass2;
 mod path;
 
@@ -69,5 +70,12 @@ pub(crate) fn extract_path_with_cache_budget(
     // Only walk the scan root for first-party entries. Outside editable roots
     // stay on the search path and are followed like site-packages when called.
     let files = discover_python_files(path.as_std_path())?;
+    if files.is_empty() {
+        return Ok(ProjectFacts {
+            complete: true,
+            no_python_files: true,
+            ..ProjectFacts::default()
+        });
+    }
     extract_files(&path, files, cache_dir, follow_budget)
 }

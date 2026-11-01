@@ -662,6 +662,8 @@ pub(crate) fn extract_third_party_function(
         narrowed_locals: HashMap::new(),
         local_lambdas: HashMap::new(),
         local_genexprs: HashMap::new(),
+        expanding_genexprs: HashSet::new(),
+        genexpr_expand_depth: 0,
         idle_loop_locals: HashSet::new(),
         idle_loop_helpers: HashSet::new(),
         unbounded_queues: HashSet::new(),

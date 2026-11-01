@@ -6,6 +6,7 @@
 //! overlays so workers do not clone those maps per file.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -25,6 +26,7 @@ use crate::sitepkgs::{FollowTarget, PackageMetaMemo};
 use super::collector::CallCollector;
 use super::constants::collect_module_constants;
 use super::ctx::{DefKey, FileCtx, TaskTargets};
+use super::panic_util::panic_message;
 
 /// Inputs shared read-only across pass-2 workers.
 pub(crate) struct Pass2Shared {
@@ -55,6 +57,8 @@ pub(crate) struct Pass2FileResult {
     pub unresolved_imports: Vec<UnresolvedImport>,
     pub unresolved_third_party_modules: Vec<String>,
     pub resolved_third_party_modules: Vec<String>,
+    /// When set, this file was skipped (panic / hard limit); merge marks incomplete.
+    pub skip_reason: Option<String>,
 }
 
 /// Mutations CallCollector makes on pre-existing (pass-1) functions.
@@ -87,7 +91,7 @@ pub(crate) fn run_pass2_parallel(
         for _ in 0..nthreads {
             // Clone on this thread — Storage is !Sync so rayon map_init cannot
             // capture `&AsyncDoctorDb`.
-            let worker_db = db.clone();
+            let mut worker_db = db.clone();
             let queue = &queue;
             handles.push(scope.spawn(move || {
                 let mut out = Vec::new();
@@ -96,7 +100,17 @@ pub(crate) fn run_pass2_parallel(
                     let Some(i) = i else {
                         break;
                     };
-                    out.push((i, extract_one_file(&worker_db, &files[i], shared)));
+                    let result = match catch_unwind(AssertUnwindSafe(|| {
+                        extract_one_file(&worker_db, &files[i], shared)
+                    })) {
+                        Ok(r) => r,
+                        Err(payload) => {
+                            // Salsa state may be poisoned — drop memos for the next file.
+                            worker_db = worker_db.fresh_empty();
+                            Pass2FileResult::skipped(&files[i].rel, &panic_message(&payload))
+                        }
+                    };
+                    out.push((i, result));
                 }
                 out
             }));
@@ -110,37 +124,71 @@ pub(crate) fn run_pass2_parallel(
     indexed.into_iter().map(|(_, r)| r).collect()
 }
 
-fn extract_one_file(
+impl Pass2FileResult {
+    pub(crate) fn empty() -> Self {
+        Self {
+            new_functions: Vec::new(),
+            new_def_keys: Vec::new(),
+            edges: Vec::new(),
+            follow_targets: HashMap::new(),
+            task_target_ids: HashSet::new(),
+            route_ids: HashSet::new(),
+            sync_route_ids: HashSet::new(),
+            base_patches: Vec::new(),
+            unresolved_imports: Vec::new(),
+            unresolved_third_party_modules: Vec::new(),
+            resolved_third_party_modules: Vec::new(),
+            skip_reason: None,
+        }
+    }
+
+    pub(crate) fn skipped(rel: &str, reason: &str) -> Self {
+        let mut r = Self::empty();
+        r.skip_reason = Some(format!("{rel}: {reason}"));
+        r
+    }
+}
+
+/// Test/debug-only: panic when analysing a magic filename or when
+/// `ASYNC_DOCTOR_TEST_PANIC_FILE` matches the relative path. Used to verify
+/// per-file isolation without relying on real analyser bugs.
+fn maybe_test_panic(rel: &str) {
+    #[cfg(any(test, debug_assertions))]
+    {
+        const MAGIC: &str = "__async_doctor_panic__.py";
+        let env_hit = std::env::var("ASYNC_DOCTOR_TEST_PANIC_FILE")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .is_some_and(|v| rel == v || rel.ends_with(&v));
+        if env_hit || rel.ends_with(MAGIC) || rel == MAGIC {
+            panic!("async-doctor test panic hook");
+        }
+    }
+    let _ = rel;
+}
+
+pub(crate) fn extract_one_file(
     db: &AsyncDoctorDb,
     spec: &Pass2FileSpec,
     shared: &Pass2Shared,
 ) -> Pass2FileResult {
+    maybe_test_panic(&spec.rel);
     let base_len = shared.functions.len();
-    let empty = Pass2FileResult {
-        new_functions: Vec::new(),
-        new_def_keys: Vec::new(),
-        edges: Vec::new(),
-        follow_targets: HashMap::new(),
-        task_target_ids: HashSet::new(),
-        route_ids: HashSet::new(),
-        sync_route_ids: HashSet::new(),
-        base_patches: Vec::new(),
-        unresolved_imports: Vec::new(),
-        unresolved_third_party_modules: Vec::new(),
-        resolved_third_party_modules: Vec::new(),
-    };
 
     let file = match system_path_to_file(db, &spec.system_path) {
         Ok(f) => f,
-        Err(_) => return empty,
+        Err(_) => return Pass2FileResult::empty(),
     };
     let program = db.program();
     let program_file = program.program_file(db, file);
     let source = source_text(db, file);
+    if let Some(err) = source.read_error() {
+        return Pass2FileResult::skipped(&spec.rel, &err.to_string());
+    }
     let index = line_index(db, file);
     let parsed = parsed_module(db, program_file.python_file(db)).load(db);
     if parsed.has_invalid_syntax() {
-        return empty;
+        return Pass2FileResult::empty();
     }
 
     // Functions: copy-on-write scratch (CallCollector mutates base slots).
@@ -213,6 +261,8 @@ fn extract_one_file(
         narrowed_locals: HashMap::new(),
         local_lambdas: HashMap::new(),
         local_genexprs: HashMap::new(),
+        expanding_genexprs: HashSet::new(),
+        genexpr_expand_depth: 0,
         idle_loop_locals: HashSet::new(),
         idle_loop_helpers: HashSet::new(),
         unbounded_queues: HashSet::new(),
@@ -270,6 +320,7 @@ fn extract_one_file(
         unresolved_imports: facts.unresolved_imports,
         unresolved_third_party_modules: facts.unresolved_third_party_modules,
         resolved_third_party_modules: facts.resolved_third_party_modules,
+        skip_reason: None,
     }
 }
 
@@ -284,6 +335,11 @@ pub(crate) fn merge_pass2_results(
     results: Vec<Pass2FileResult>,
 ) {
     for result in results {
+        if let Some(reason) = result.skip_reason {
+            facts.complete = false;
+            facts.skipped.push(reason);
+            continue;
+        }
         let mut remap: HashMap<FunctionId, FunctionId> = HashMap::new();
         for (i, mut f) in result.new_functions.into_iter().enumerate() {
             let provisional = FunctionId((base_fn_len + i) as u32);
