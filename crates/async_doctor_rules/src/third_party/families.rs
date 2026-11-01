@@ -35,15 +35,12 @@ pub(super) fn match_family(q: &str) -> Option<SinkHit> {
             "Use `httpx.AsyncClient` instead of sync `httpx.Client`.",
         )));
     }
-    // urllib3
-    if (q.starts_with("urllib3.PoolManager.")
-        || q.starts_with("urllib3.HTTPConnectionPool.")
-        || q.starts_with("urllib3.HTTPSConnectionPool.")
-        || q == "urllib3.request"
-        || q.starts_with("urllib3.util.retry.")
-        || q.ends_with("PoolManager.request")
-        || q.ends_with(".urlopen"))
-        && (q.contains("request") || q.ends_with(".urlopen") || q == "urllib3.request")
+    // urllib3 only — never map stdlib `urllib.request.urlopen` here.
+    if q.starts_with("urllib3.")
+        && (q == "urllib3.request"
+            || q.ends_with("PoolManager.request")
+            || q.ends_with(".urlopen")
+            || q.starts_with("urllib3.util.retry."))
     {
         return Some(hit(&BuiltinSink::finding(
             "urllib3.request",
@@ -68,7 +65,10 @@ pub(super) fn match_family(q: &str) -> Option<SinkHit> {
         return None;
     }
     // Factories that return clients/pipelines/pubsub handles are not IO.
-    if q.ends_with(".pipeline") || q.ends_with(".pubsub") {
+    if q.ends_with(".pipeline")
+        || q.ends_with(".pubsub")
+        || is_redis_client_factory(q)
+    {
         return None;
     }
     // redis sync PubSub.listen() — blocks only when the generator is consumed.
@@ -94,31 +94,37 @@ pub(super) fn match_family(q: &str) -> Option<SinkHit> {
             "Use `redis.asyncio` pub/sub instead of sync `PubSub`.",
         )));
     }
-    // redis sync client (not asyncio, not a Pipeline receiver)
+    // redis sync client (not asyncio, not a Pipeline receiver, not a factory)
     if (q.starts_with("redis.Redis.") || q.starts_with("redis.StrictRedis."))
         && !q.starts_with("redis.asyncio.")
         && !is_redis_sync_pipeline_receiver(q)
+        && !is_redis_client_factory(q)
     {
-        return Some(hit(&BuiltinSink::finding(
-            "redis.Redis.execute_command",
-            RULE_BLOCKING_DB,
-            "Use `redis.asyncio.Redis` instead of sync `redis.Redis`.",
-        )));
+        let method = q.rsplit_once('.').map(|(_, m)| m).unwrap_or("execute_command");
+        let sink_qualname = redis_command_sink_qualname(method);
+        return Some(SinkHit {
+            rule: RULE_BLOCKING_DB,
+            sink_qualname,
+            fix_hint: "Use `redis.asyncio.Redis` instead of sync `redis.Redis`.",
+            candidate_only: false,
+            candidate_reason: None,
+            with_only: false,
+            consume_only: false,
+        });
     }
-    // sqlalchemy sync Session / Engine (Engine.begin handled specially via with)
-    if q.starts_with("sqlalchemy.orm.Session.")
-        || q == "sqlalchemy.orm.Session.execute"
-        || q == "sqlalchemy.orm.Session.query"
-        || q == "sqlalchemy.orm.Session.commit"
-        || q == "sqlalchemy.orm.Session.flush"
-        || q == "sqlalchemy.orm.Session.scalar"
-        || q == "sqlalchemy.orm.Session.scalars"
-    {
-        return Some(hit(&BuiltinSink::finding(
-            "sqlalchemy.orm.Session.execute",
-            RULE_BLOCKING_DB,
-            "Use `sqlalchemy.ext.asyncio.AsyncSession` instead of sync `Session`.",
-        )));
+    // sqlalchemy sync Session: only methods that emit SQL / talk to the DB.
+    // Identity-map helpers (`add`, `expunge`, `_is_clean`, …) are not sinks.
+    if let Some(method) = sqlalchemy_session_io_method(q) {
+        let sink_qualname = sqlalchemy_session_sink_qualname(method);
+        return Some(SinkHit {
+            rule: RULE_BLOCKING_DB,
+            sink_qualname,
+            fix_hint: "Use `sqlalchemy.ext.asyncio.AsyncSession` instead of sync `Session`.",
+            candidate_only: false,
+            candidate_reason: None,
+            with_only: false,
+            consume_only: false,
+        });
     }
     if q.starts_with("sqlalchemy.engine.Engine.")
         && !q.contains("begin")
@@ -316,6 +322,99 @@ pub(super) fn is_redis_pipeline_buffering(q: &str) -> bool {
         return false;
     }
     !is_redis_pipeline_execute_method(q)
+}
+
+/// Client constructors / pool helpers — no network until a command runs.
+fn is_redis_client_factory(q: &str) -> bool {
+    let method = q.rsplit_once('.').map(|(_, m)| m).unwrap_or(q);
+    matches!(
+        method,
+        "from_url"
+            | "from_pool"
+            | "__init__"
+            | "__new__"
+            | "Redis"
+            | "StrictRedis"
+    )
+}
+
+/// Label redis sync commands with the concrete method (not a blanket `execute_command`).
+fn redis_command_sink_qualname(method: &str) -> &'static str {
+    match method {
+        "get" => "redis.Redis.get",
+        "set" => "redis.Redis.set",
+        "delete" => "redis.Redis.delete",
+        "ping" => "redis.Redis.ping",
+        "execute_command" => "redis.Redis.execute_command",
+        other => intern_qualname(&format!("redis.Redis.{other}")),
+    }
+}
+
+fn intern_qualname(s: &str) -> &'static str {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, &'static str>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(&existing) = guard.get(s) {
+        return existing;
+    }
+    let leaked: &'static str = Box::leak(s.to_owned().into_boxed_str());
+    guard.insert(s.to_owned(), leaked);
+    leaked
+}
+
+/// Session methods that talk to the DB / emit SQL (SQLAlchemy 2.0 Session API).
+///
+/// Non-IO identity-map helpers (`add`, `expunge`, `expire`, `_is_clean`, …) return
+/// `None` so they are neither sinks nor follow shortcuts.
+fn sqlalchemy_session_io_method(q: &str) -> Option<&'static str> {
+    let method = q
+        .strip_prefix("sqlalchemy.orm.Session.")
+        .or_else(|| q.strip_prefix("sqlalchemy.orm.session.Session."))?;
+    // Ignore dunder / private helpers reached via follow into Session internals.
+    if method.starts_with('_') {
+        return None;
+    }
+    match method {
+        "execute" => Some("execute"),
+        "scalar" => Some("scalar"),
+        "scalars" => Some("scalars"),
+        "get" => Some("get"),
+        "get_one" => Some("get_one"),
+        "get_one_or_none" => Some("get_one_or_none"),
+        "commit" => Some("commit"),
+        "flush" => Some("flush"),
+        "rollback" => Some("rollback"),
+        "refresh" => Some("refresh"),
+        "connection" => Some("connection"),
+        "merge" => Some("merge"),
+        "close" => Some("close"),
+        "scalar_one" => Some("scalar_one"),
+        "scalar_one_or_none" => Some("scalar_one_or_none"),
+        _ => None,
+    }
+}
+
+fn sqlalchemy_session_sink_qualname(method: &str) -> &'static str {
+    match method {
+        "execute" => "sqlalchemy.orm.Session.execute",
+        "scalar" => "sqlalchemy.orm.Session.scalar",
+        "scalars" => "sqlalchemy.orm.Session.scalars",
+        "get" => "sqlalchemy.orm.Session.get",
+        "get_one" => "sqlalchemy.orm.Session.get_one",
+        "get_one_or_none" => "sqlalchemy.orm.Session.get_one_or_none",
+        "commit" => "sqlalchemy.orm.Session.commit",
+        "flush" => "sqlalchemy.orm.Session.flush",
+        "rollback" => "sqlalchemy.orm.Session.rollback",
+        "refresh" => "sqlalchemy.orm.Session.refresh",
+        "connection" => "sqlalchemy.orm.Session.connection",
+        "merge" => "sqlalchemy.orm.Session.merge",
+        "close" => "sqlalchemy.orm.Session.close",
+        "scalar_one" => "sqlalchemy.orm.Session.scalar_one",
+        "scalar_one_or_none" => "sqlalchemy.orm.Session.scalar_one_or_none",
+        _ => "sqlalchemy.orm.Session.execute",
+    }
 }
 
 pub(super) fn method_looks_like_aws_op(q: &str) -> bool {
