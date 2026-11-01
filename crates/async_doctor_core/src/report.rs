@@ -250,6 +250,9 @@ pub struct SinkSiteSummary {
 pub struct Report {
     pub schema_version: u32,
     pub complete: bool,
+    /// Deterministic 0–100 health score (`100` when clean; `< 85` when findings or unused suppressions remain).
+    #[serde(default = "default_score")]
+    pub score: u32,
     /// Interpreter / venv / site-packages used for this scan (schema v2).
     #[serde(default)]
     pub environment: ScanEnvironment,
@@ -301,11 +304,16 @@ fn is_lte_one(v: &u32) -> bool {
     *v <= 1
 }
 
+fn default_score() -> u32 {
+    100
+}
+
 impl Report {
     pub fn empty_complete() -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
             complete: true,
+            score: 100,
             environment: ScanEnvironment::none(),
             findings: Vec::new(),
             candidates: Vec::new(),
@@ -323,9 +331,51 @@ impl Report {
         }
     }
 
-    /// Refresh the additive `sinkSites` summary from current findings.
+    /// Refresh the additive `sinkSites` summary and `score` from current findings/advice.
     pub fn refresh_sink_sites(&mut self) {
         self.sink_sites = crate::sink_sites::summarize(&self.findings);
+        self.refresh_score();
+    }
+
+    /// Recompute `score` (`0..=100`) from current `findings`, `sink_sites`, `unused_suppressions`, and `advice`.
+    pub fn refresh_score(&mut self) {
+        self.score = self.compute_score();
+    }
+
+    /// Deterministic 0–100 health score.
+    ///
+    /// Invariant: `score >= 85` ("Great") holds iff `exit_code() == EXIT_OK`
+    /// (zero findings and zero unused suppressions). Advice deducts at most 15 points.
+    pub fn compute_score(&self) -> u32 {
+        let finding_count = self.findings.len() as u32;
+        let unused_count = self.unused_suppressions.len() as u32;
+        let advice_count = self.advice.len() as u32;
+        let advice_penalty = (advice_count * 2).min(15);
+
+        if finding_count == 0 && unused_count == 0 {
+            return 100u32.saturating_sub(advice_penalty);
+        }
+
+        let finding_sites = (self.sink_sites.len() as u32).max(u32::from(finding_count > 0));
+        let base_error_penalty = 10u32;
+        let site_penalty = (finding_sites * 8).min(60);
+        let finding_penalty = (finding_count * 2).min(25);
+        let unused_penalty = (unused_count * 5).min(15);
+
+        let total_penalty =
+            base_error_penalty + site_penalty + finding_penalty + unused_penalty + advice_penalty;
+        100u32.saturating_sub(total_penalty)
+    }
+
+    /// Human-readable rating band for `self.score`.
+    pub fn score_label(&self) -> &'static str {
+        if self.score >= 85 {
+            "Great"
+        } else if self.score >= 60 {
+            "Needs work"
+        } else {
+            "Critical"
+        }
     }
 
     /// Exit 1 when findings or unused suppressions remain; candidates and advice ignored.

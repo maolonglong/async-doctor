@@ -10,7 +10,7 @@ Close the highest-leverage product and analysis gaps relative to `react-doctor` 
 ## Progress
 
 - [x] 2026-11-01T17:17Z: P0 — Terminal UX (TTY color via `anstyle`/`anstream`, scan footer, framework detection in banner) and `--format markdown`.
-- [ ] 2026-11-01: P1 — Deterministic `0–100` health score (`--score`, `Report::score`) and `async-doctor install-skill`.
+- [x] 2026-11-01T17:24Z: P1 — Deterministic `0–100` health score (`--score`, `Report::score`) and `async-doctor install-skill`.
 - [ ] 2026-11-01: P2 — Async anti-pattern rules (`sync-with-async-cm` finding, `dangling-task` correctness advice).
 
 ## Surprises & Discoveries

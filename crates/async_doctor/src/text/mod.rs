@@ -175,15 +175,17 @@ fn write_scan_footer(
     let entries = report.async_entry_count;
     let file_s = if files == 1 { "" } else { "s" };
     let entry_s = if entries == 1 { "y" } else { "ies" };
+    let score = report.score;
+    let label = report.score_label();
     match elapsed {
         Some(d) => writeln!(
             out,
-            "{dim}Scanned {files} file{file_s} · {entries} async entr{entry_s} in {}ms{dim:#}",
+            "{dim}Scanned {files} file{file_s} · {entries} async entr{entry_s} in {}ms · Score: {score}/100 ({label}){dim:#}",
             d.as_millis()
         )?,
         None => writeln!(
             out,
-            "{dim}Scanned {files} file{file_s} · {entries} async entr{entry_s}{dim:#}"
+            "{dim}Scanned {files} file{file_s} · {entries} async entr{entry_s} · Score: {score}/100 ({label}){dim:#}"
         )?,
     }
     Ok(())

@@ -11,6 +11,7 @@ mod help_cmd;
 mod markdown;
 mod paths;
 mod sarif;
+mod skill_cmd;
 mod suppress;
 mod text;
 
@@ -47,6 +48,7 @@ fn run() -> anyhow::Result<ExitCode> {
             include_non_production,
             show_unresolved,
         }) => help_cmd::run_why(&location, &path, include_non_production, show_unresolved),
+        Some(Command::InstallSkill { path }) => skill_cmd::run_install_skill(&path),
         None => run_scan(cli),
     }
 }
@@ -147,45 +149,55 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
         suppressed_by_baseline = n;
     }
 
-    if suppressed_by_ignore > 0 || cli.changed.is_some() || suppressed_by_baseline > 0 {
+    if suppressed_by_ignore > 0
+        || !report.unused_suppressions.is_empty()
+        || cli.changed.is_some()
+        || suppressed_by_baseline > 0
+    {
         report.refresh_sink_sites();
+    } else {
+        report.refresh_score();
     }
 
-    match cli.format {
-        Format::Text => text::write_report(
-            &report,
-            text::TextOptions {
-                expand: cli.expand,
-                suppressed_by_baseline,
-                suppressed_by_ignore,
-                elapsed: Some(elapsed),
-            },
-        )?,
-        Format::Markdown => markdown::write_markdown(
-            &report,
-            markdown::MarkdownOptions {
-                suppressed_by_baseline,
-                suppressed_by_ignore,
-                elapsed: Some(elapsed),
-            },
-        )?,
-        Format::Json => {
-            let stdout = std::io::stdout();
-            let mut out = std::io::BufWriter::with_capacity(64 * 1024, stdout.lock());
-            serde_json::to_writer_pretty(&mut out, &report)?;
-            writeln!(out)?;
-            out.flush()?;
-        }
-        Format::Sarif => {
-            let src_root = repo_root_for_sarif
-                .as_deref()
-                .unwrap_or(scan_root.as_path());
-            let doc = sarif::report_to_sarif(&report, &scan_root, src_root);
-            let stdout = std::io::stdout();
-            let mut out = std::io::BufWriter::with_capacity(64 * 1024, stdout.lock());
-            serde_json::to_writer_pretty(&mut out, &doc)?;
-            writeln!(out)?;
-            out.flush()?;
+    if cli.score {
+        println!("{}", report.score);
+    } else {
+        match cli.format {
+            Format::Text => text::write_report(
+                &report,
+                text::TextOptions {
+                    expand: cli.expand,
+                    suppressed_by_baseline,
+                    suppressed_by_ignore,
+                    elapsed: Some(elapsed),
+                },
+            )?,
+            Format::Markdown => markdown::write_markdown(
+                &report,
+                markdown::MarkdownOptions {
+                    suppressed_by_baseline,
+                    suppressed_by_ignore,
+                    elapsed: Some(elapsed),
+                },
+            )?,
+            Format::Json => {
+                let stdout = std::io::stdout();
+                let mut out = std::io::BufWriter::with_capacity(64 * 1024, stdout.lock());
+                serde_json::to_writer_pretty(&mut out, &report)?;
+                writeln!(out)?;
+                out.flush()?;
+            }
+            Format::Sarif => {
+                let src_root = repo_root_for_sarif
+                    .as_deref()
+                    .unwrap_or(scan_root.as_path());
+                let doc = sarif::report_to_sarif(&report, &scan_root, src_root);
+                let stdout = std::io::stdout();
+                let mut out = std::io::BufWriter::with_capacity(64 * 1024, stdout.lock());
+                serde_json::to_writer_pretty(&mut out, &doc)?;
+                writeln!(out)?;
+                out.flush()?;
+            }
         }
     }
 

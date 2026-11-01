@@ -37,8 +37,8 @@ Exit codes and JSON field meanings live in [`docs/json-contract.md`](docs/json-c
 
 Binary crate: clap args (`args.rs`), path resolution, inline
 `# async-doctor: ignore[…]` suppressions, git `--changed` / baseline filters,
-text / Markdown / JSON / SARIF reporters (`text/`, `markdown.rs`, `sarif.rs`), and `explain` / `why`
-(`help_cmd.rs`). Depends on `async_doctor_ty` for scanning and
+text / Markdown / JSON / SARIF reporters (`text/`, `markdown.rs`, `sarif.rs`), `explain` / `why`
+(`help_cmd.rs`), and `install-skill` (`skill_cmd.rs`). Depends on `async_doctor_ty` for scanning and
 `async_doctor_core` for report types. Non-MSVC builds use jemalloc.
 
 **API boundary:** the published CLI surface. Exit codes: see

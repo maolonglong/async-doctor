@@ -39,6 +39,15 @@ fn write_markdown_to(
         return Ok(());
     }
 
+    writeln!(
+        out,
+        "| Metric | Value |\n| --- | --- |\n| **Score** | **{} / 100** ({}) |\n| **Findings** | {} |\n| **Advice** | {} |\n",
+        report.score,
+        report.score_label(),
+        report.findings.len(),
+        report.advice.len(),
+    )?;
+
     if report.findings.is_empty() {
         write!(out, "**No findings.**")?;
         let mut parts = Vec::new();

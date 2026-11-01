@@ -53,6 +53,10 @@ pub struct Cli {
     #[arg(long)]
     pub expand: bool,
 
+    /// Print only the 0-100 health score on stdout (exit code still reflects findings).
+    #[arg(long)]
+    pub score: bool,
+
     /// Report only findings whose chain touches files changed vs GIT_REF.
     ///
     /// Use `--changed` for the merge-base with the default branch plus
@@ -106,5 +110,11 @@ pub enum Command {
         /// Include unresolved candidates while locating the site.
         #[arg(long)]
         show_unresolved: bool,
+    },
+    /// Install the bundled async-doctor agent skill (.agents/skills + .claude/skills symlink).
+    InstallSkill {
+        /// Target project directory (default: current directory).
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
     },
 }

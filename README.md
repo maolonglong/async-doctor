@@ -31,11 +31,14 @@ imports resolve. Without a project environment, results silently degrade —
 
 ```bash
 async-doctor .
+async-doctor --score .
 async-doctor --format json .
+async-doctor --format markdown . >> "$GITHUB_STEP_SUMMARY"
 async-doctor --format sarif . > async-doctor.sarif
 
 async-doctor explain blocking-sleep
 async-doctor why app.py:12 --path .
+async-doctor install-skill --path .
 
 # CI / agent loops (full analysis; filtered reporting):
 async-doctor --changed .
@@ -131,6 +134,10 @@ Public cold/warm numbers on pinned asyncio corpora:
 ## Agent integrations
 
 ```bash
+# Built-in zero-Node installer (writes .agents/skills/async-doctor/SKILL.md + .claude/skills symlink):
+async-doctor install-skill --path .
+
+# Or via Node skills CLI once the repo is public:
 npx skills add maolonglong/async-doctor
 ```
 

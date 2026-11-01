@@ -11,6 +11,7 @@ fn bin() -> Command {
 const REQUIRED_KEYS: &[&str] = &[
     "schemaVersion",
     "complete",
+    "score",
     "environment",
     "findings",
     "candidates",

@@ -108,6 +108,7 @@ pub fn analyze_with_options(
     let mut report = Report {
         schema_version: SCHEMA_VERSION,
         complete: facts.complete,
+        score: 100,
         environment: facts.environment.clone(),
         findings: Vec::new(),
         candidates: Vec::new(),
