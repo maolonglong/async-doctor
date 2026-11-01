@@ -166,10 +166,15 @@ fn run_concurrent_trials(fixture: &str, trials: usize, label: &str) {
     let _ = fs::remove_dir_all(&solo_cache);
 }
 
-/// Fast CI check (N=20). With true parallel spawn + debug race hook, a sticky-miss
-/// regression fails this test on the order of ≥9/10 debug runs (measured); with
-/// the fix it passes 10/10. The hook is inert in release.
+/// Main-sized cold-cache check (N=20). `#[ignore]` so default
+/// `cargo test` / `cargo nextest run` stay fast; the CI `stress` job (main /
+/// schedule / workflow_dispatch) and the AGENTS.md command run it via
+/// `--run-ignored`. With true parallel spawn + debug race hook, a sticky-miss
+/// regression fails on the order of ≥9/10 debug runs (measured); with the fix
+/// it passes 10/10. The hook is inert in release.
+/// See docs/notes/2026-10-concurrent-cache-stress.md.
 #[test]
+#[ignore = "main-sized concurrent cold-cache; see AGENTS.md / CI stress job"]
 fn concurrent_cold_scans_match_solo_multipkg_large() {
     let t0 = Instant::now();
     run_concurrent_trials("m2_cache_multipkg_large", 20, "large");
@@ -179,26 +184,28 @@ fn concurrent_cold_scans_match_solo_multipkg_large() {
     );
 }
 
-/// Fast CI check for the smaller multipkg fixture.
+/// Main-sized cold-cache check for the smaller multipkg fixture (N=15).
 #[test]
+#[ignore = "main-sized concurrent cold-cache; see AGENTS.md / CI stress job"]
 fn concurrent_cold_scans_match_solo_multipkg() {
     run_concurrent_trials("m2_cache_multipkg", 15, "multi");
 }
 
-/// Stress (N=100). Not run in default CI — see AGENTS.md.
+/// Longer stress (N=100). Not run in CI — local hunting only; see AGENTS.md.
 ///
 /// ```text
 /// cargo test -p async_doctor --test concurrent_cache -- --ignored
+/// # or: cargo nextest run -p async_doctor --test concurrent_cache --run-ignored only
 /// ```
 #[test]
-#[ignore = "slow stress; run with: cargo test -p async_doctor --test concurrent_cache -- --ignored"]
+#[ignore = "slow N=100 stress; run with: cargo test -p async_doctor --test concurrent_cache -- --ignored"]
 fn concurrent_cold_scans_match_solo_multipkg_large_stress() {
     run_concurrent_trials("m2_cache_multipkg_large", 100, "large-stress");
 }
 
-/// Stress (N=100) for the smaller multipkg fixture.
+/// Longer stress (N=100) for the smaller multipkg fixture.
 #[test]
-#[ignore = "slow stress; run with: cargo test -p async_doctor --test concurrent_cache -- --ignored"]
+#[ignore = "slow N=100 stress; run with: cargo test -p async_doctor --test concurrent_cache -- --ignored"]
 fn concurrent_cold_scans_match_solo_multipkg_stress() {
     run_concurrent_trials("m2_cache_multipkg", 100, "multi-stress");
 }
