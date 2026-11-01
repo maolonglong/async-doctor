@@ -75,7 +75,9 @@ hidden dirs are skipped (`--include-non-production` to include).
 
 ## GitHub Actions (SARIF / code scanning)
 
-Upload SARIF so findings appear in GitHub code scanning:
+Upload SARIF so findings appear in GitHub code scanning. `async-doctor` exits
+`1` when it finds issues — append `|| true` (same pattern as GitHub’s ESLint
+SARIF example) so the upload step still runs:
 
 ```yaml
 name: async-doctor
@@ -88,29 +90,34 @@ jobs:
   scan:
     runs-on: ubuntu-latest
     permissions:
+      # required for all workflows
       security-events: write
+      # required for private repositories
+      actions: read
       contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v10
       - name: Install project deps
         run: uv sync --frozen
       - name: Run async-doctor
         run: |
           source .venv/bin/activate
-          uvx async-doctor --format sarif . > async-doctor.sarif
-      - uses: github/codeql-action/upload-sarif@v3
+          # Once published to PyPI: uvx async-doctor …
+          async-doctor --format sarif . > async-doctor.sarif || true
+      - uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: async-doctor.sarif
 ```
 
 ## Large repositories / memory
 
-Very large monorepos can use substantial peak RSS (for example, a full litellm
-tree peaked around **~6.9 GB** in our benchmarks). Prefer scanning the package
-subdirectory you care about (`async-doctor path/to/pkg`) rather than the whole
-repo when memory is tight. Warm runs reuse the whole-scan cache when inputs are
-unchanged.
+A pre-release audit on **1 Nov 2026** measured peak RSS for the full litellm
+repo (**8686** `.py` files, with venv) at about **~6.9 GB**. Scanning the
+`litellm/` package subdirectory alone was about **~2.3 GB**. Prefer a package
+subdirectory (`async-doctor path/to/pkg`) when memory is tight. Warm runs reuse
+the whole-scan cache when inputs are unchanged. See also
+[docs/benchmark.md](docs/benchmark.md) (subdir timings).
 
 ## Benchmark
 
