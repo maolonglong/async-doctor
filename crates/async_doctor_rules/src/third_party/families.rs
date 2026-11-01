@@ -546,6 +546,7 @@ pub fn aws_op_method_name(method: &str) -> bool {
             | "get_waiter"
             | "can_paginate"
             | "generate_presigned_url"
+            | "get_available_regions"
             | "meta"
             | "exceptions"
             | "waiter_names"

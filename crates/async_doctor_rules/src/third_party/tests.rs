@@ -194,6 +194,11 @@ fn boto_dynamic_client_methods_match_aioboto_advice() {
         t.lookup("botocore.client.BaseClient.generate_presigned_url")
             .is_none()
     );
+    assert!(
+        t.lookup("boto3.session.Session.get_available_regions")
+            .is_none(),
+        "get_available_regions is local metadata, not IO"
+    );
     assert!(t.lookup("boto3.client").is_some());
 }
 
