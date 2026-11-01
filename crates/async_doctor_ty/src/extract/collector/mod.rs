@@ -8,6 +8,7 @@ pub(crate) mod loop_guards;
 mod nonblocking;
 mod redis_mro;
 mod resolve;
+mod thread_guards;
 mod visit;
 
 use std::collections::{HashMap, HashSet};
@@ -132,8 +133,9 @@ pub(crate) struct CallCollector<'a, 'db> {
     pub(super) buffer_locals: HashSet<String>,
     /// Archive handles opened on an in-memory buffer (`ZipFile(BytesIO())`, …).
     pub(super) in_memory_archive_receivers: HashSet<String>,
-    /// Futures proven `.done()` in the current branch — `.result()` is non-blocking.
-    pub(super) future_done_locals: HashSet<String>,
+    /// Receivers proven `.done()` in the current branch (`fut`, `self.x`, …) —
+    /// matching `.result()` is non-blocking.
+    pub(super) future_done_receivers: HashSet<String>,
 }
 
 /// Hard cap on nested local-genexpr expansions (belt alongside the pointer set).
@@ -219,7 +221,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             event_loop_locals: HashSet::new(),
             buffer_locals: HashSet::new(),
             in_memory_archive_receivers: HashSet::new(),
-            future_done_locals: HashSet::new(),
+            future_done_receivers: HashSet::new(),
         }
     }
 

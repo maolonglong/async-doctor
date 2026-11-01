@@ -3,7 +3,11 @@
 use ruff_python_ast::{self as ast, Expr};
 
 use super::CallCollector;
-use crate::extract::helpers::is_in_memory_buffer_type;
+use super::thread_guards::expr_attr_path;
+use crate::extract::helpers::{
+    is_archive_ctor_qual, is_disk_touching_archive_method, is_in_memory_buffer_type,
+    is_pure_in_memory_archive_method,
+};
 
 impl<'a, 'db> CallCollector<'a, 'db> {
     pub(crate) fn first_arg_is_in_memory_buffer(&mut self, call: &ast::ExprCall) -> bool {
@@ -55,7 +59,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
 
     pub(crate) fn call_is_archive_ctor(&mut self, func: &Expr) -> bool {
         if let Some(q) = self.external_qualname(func)
-            && crate::extract::helpers::is_archive_ctor_qual(&q)
+            && is_archive_ctor_qual(&q)
         {
             return true;
         }
@@ -73,6 +77,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
     }
 
+    /// True when this call is a buffer-backed archive ctor or a *pure* in-memory
+    /// method on such a receiver. Disk-touching methods (`write`, `extract`,
+    /// `extractall`, `add`, …) still report even on BytesIO receivers.
     pub(crate) fn call_is_in_memory_archive(&mut self, call: &ast::ExprCall) -> bool {
         if self.call_is_archive_ctor(&call.func) && self.first_arg_is_in_memory_buffer(call) {
             return true;
@@ -80,12 +87,21 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         let Expr::Attribute(attr) = call.func.as_ref() else {
             return false;
         };
-        let method_ok = crate::extract::helpers::is_archive_method_name(attr.attr.as_str())
-            || self
+        let method = attr.attr.as_str();
+        // Never suppress disk-touching ops on buffer-backed archives.
+        if is_disk_touching_archive_method(method) {
+            return false;
+        }
+        if !is_pure_in_memory_archive_method(method)
+            && !self
                 .external_qualname(&call.func)
                 .as_deref()
-                .is_some_and(crate::extract::helpers::is_archive_method_qual);
-        if !method_ok {
+                .is_some_and(|q| {
+                    crate::extract::helpers::is_archive_method_qual(q)
+                        && q.rsplit_once('.')
+                            .is_some_and(|(_, m)| is_pure_in_memory_archive_method(m))
+                })
+        {
             return false;
         }
         match attr.value.as_ref() {
@@ -104,10 +120,10 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         if attr.attr.as_str() != "result" {
             return false;
         }
-        match attr.value.as_ref() {
-            Expr::Name(n) => self.future_done_locals.contains(n.id.as_str()),
-            _ => false,
-        }
+        let Some(path) = expr_attr_path(&attr.value) else {
+            return false;
+        };
+        self.future_done_receivers.contains(&path)
     }
 
     pub(super) fn note_buffer_binding(&mut self, name: &str, value: &Expr) {

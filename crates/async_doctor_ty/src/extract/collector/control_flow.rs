@@ -9,9 +9,9 @@ use ty_python_core::definition::DefinitionKind;
 use ty_python_semantic::{ImportAliasResolution, definitions_for_name};
 
 use super::CallCollector;
-use super::loop_guards::{
-    except_is_runtime_error, futures_proven_done_in_test, is_off_loop_thread_test,
-    is_on_loop_thread_test,
+use super::loop_guards::except_is_runtime_error;
+use super::thread_guards::{
+    futures_proven_done_in_test, is_off_loop_thread_test, is_on_loop_thread_test,
 };
 use crate::extract::constants::{
     EarlyExitKind, ModuleConst, body_always_exits, is_cache_hit_test, is_cache_miss_test,
@@ -253,9 +253,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             self.visit_expr(&if_stmt.test);
         }
         let prev_done = if !dead && !done_names.is_empty() {
-            let prev = self.future_done_locals.clone();
+            let prev = self.future_done_receivers.clone();
             for n in &done_names {
-                self.future_done_locals.insert(n.clone());
+                self.future_done_receivers.insert(n.clone());
             }
             Some(prev)
         } else {
@@ -288,7 +288,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
         self.active_param_guard = prev_guard;
         if let Some(prev) = prev_done {
-            self.future_done_locals = prev;
+            self.future_done_receivers = prev;
         }
         if !dead {
             if off_loop {
@@ -371,9 +371,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 self.visit_expr(test);
             }
             let prev_done = if !elif_dead && !elif_done.is_empty() {
-                let prev = self.future_done_locals.clone();
+                let prev = self.future_done_receivers.clone();
                 for n in &elif_done {
-                    self.future_done_locals.insert(n.clone());
+                    self.future_done_receivers.insert(n.clone());
                 }
                 Some(prev)
             } else {
@@ -407,7 +407,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             }
             self.active_param_guard = prev_guard;
             if let Some(prev) = prev_done {
-                self.future_done_locals = prev;
+                self.future_done_receivers = prev;
             }
             if !elif_dead {
                 if elif_off_loop {

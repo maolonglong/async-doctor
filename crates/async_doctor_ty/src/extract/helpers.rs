@@ -292,21 +292,27 @@ pub(crate) fn is_archive_ctor_qual(q: &str) -> bool {
         || q.ends_with("tarfile.open")
 }
 
-pub(crate) fn is_archive_method_name(method: &str) -> bool {
+/// Buffer-only archive ops — safe to skip on BytesIO/StringIO receivers.
+pub(crate) fn is_pure_in_memory_archive_method(method: &str) -> bool {
     matches!(
         method,
         "open"
             | "read"
-            | "write"
             | "writestr"
-            | "extract"
-            | "extractall"
-            | "add"
-            | "addfile"
             | "getinfo"
             | "infolist"
             | "namelist"
+            | "getmembers"
+            | "extractfile"
             | "close"
+    )
+}
+
+/// Archive ops that touch the filesystem even when the archive itself is in memory.
+pub(crate) fn is_disk_touching_archive_method(method: &str) -> bool {
+    matches!(
+        method,
+        "write" | "extract" | "extractall" | "add" | "addfile"
     )
 }
 
