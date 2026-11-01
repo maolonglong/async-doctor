@@ -1,5 +1,6 @@
 //! Call-graph edge collection over a single Python file.
 
+mod buffers;
 mod calls;
 mod control_flow;
 mod imports;
@@ -22,8 +23,8 @@ use super::constants::ModuleConst;
 use super::ctx::{DefKey, FileCtx, TaskTargets};
 
 pub(crate) struct CallCollector<'a, 'db> {
-    // Fields are `pub(super)` so `extract::{files,follow}` can fill the struct
-    // literal; collector child modules already see them as same-module private.
+    // Injected refs — set via [`CallCollector::new`]. Visit-state fields default
+    // there so pass2/follow do not re-list every counter and HashSet.
     pub(super) ctx: &'a FileCtx<'db>,
     pub(super) model: &'a SemanticModel<'db>,
     pub(super) facts: &'a mut ProjectFacts,
@@ -52,6 +53,9 @@ pub(crate) struct CallCollector<'a, 'db> {
     pub(super) cache_miss_depth: u32,
     /// Depth under a "no running event loop" guard (see [`ConditionTag::NoRunningLoopGuard`]).
     pub(super) no_running_loop_depth: u32,
+    /// Depth under a proven off-loop-thread guard (`x != threading.get_ident()`, …).
+    /// Blocking calls here do not starve the event loop — skip recording.
+    pub(super) off_loop_thread_depth: u32,
     /// Try-body saw `get_running_loop` / `get_event_loop` (for except-RuntimeError tagging).
     pub(super) try_saw_get_loop: bool,
     pub(super) active_param_guard: Option<ParamGuard>,
@@ -100,10 +104,11 @@ pub(crate) struct CallCollector<'a, 'db> {
     pub(super) expanding_genexprs: HashSet<*const ast::ExprGenerator>,
     /// Nesting depth of genexpr expansions (hard cap beyond the pointer set).
     pub(super) genexpr_expand_depth: u32,
-    /// Genexprs already expanded under the current consume (dedupes fan-out
-    /// like `g = (a for a in prev for b in prev)` so expansion stays linear).
+    /// Genexprs already expanded under the *current* top-level consume
+    /// (cleared when `genexpr_expand_depth` returns to 0). Dedupes fan-out
+    /// like `g = (a for a in prev for b in prev)` so expansion stays linear.
     pub(super) expanded_genexpr_memo: HashSet<*const ast::ExprGenerator>,
-    /// Total genexpr body visits this file (hard budget beyond depth/memo).
+    /// Genexpr body visits under the current top-level consume (hard budget).
     pub(super) genexpr_expand_visits: u32,
     /// Locals bound only when no event loop is running (ternary / idle-loop helper).
     /// `if name is not None:` (or truthy `if name:`) is a [`ConditionTag::NoRunningLoopGuard`].
@@ -123,6 +128,12 @@ pub(crate) struct CallCollector<'a, 'db> {
     /// Locals assigned from `asyncio.get_event_loop()`. Early-return only when
     /// combined with `.is_running()` (not bare `is not None`).
     pub(super) event_loop_locals: HashSet<String>,
+    /// Locals bound to `io.BytesIO` / `StringIO` (syntactic + typed).
+    pub(super) buffer_locals: HashSet<String>,
+    /// Archive handles opened on an in-memory buffer (`ZipFile(BytesIO())`, …).
+    pub(super) in_memory_archive_receivers: HashSet<String>,
+    /// Futures proven `.done()` in the current branch — `.result()` is non-blocking.
+    pub(super) future_done_locals: HashSet<String>,
 }
 
 /// Hard cap on nested local-genexpr expansions (belt alongside the pointer set).
@@ -131,6 +142,87 @@ pub(super) const MAX_GENEXPR_EXPAND_DEPTH: u32 = 64;
 pub(super) const MAX_GENEXPR_EXPAND_VISITS: u32 = 4096;
 
 impl<'a, 'db> CallCollector<'a, 'db> {
+    /// Build a collector with empty visit state. Callers override `current_fn` /
+    /// `current_param_names` when following into a known function body.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        ctx: &'a FileCtx<'db>,
+        model: &'a SemanticModel<'db>,
+        facts: &'a mut ProjectFacts,
+        def_map: &'a mut HashMap<DefKey, FunctionId>,
+        def_map_base: Option<&'a HashMap<DefKey, FunctionId>>,
+        qual_map: &'a mut HashMap<(String, String), FunctionId>,
+        qual_map_base: Option<&'a HashMap<(String, String), FunctionId>>,
+        property_defs: &'a HashSet<DefKey>,
+        task_targets: &'a mut TaskTargets,
+        follow_targets: &'a mut HashMap<String, FollowTarget>,
+        package_meta: &'a mut PackageMetaMemo,
+        followable_extra_roots: &'a [PathBuf],
+        record_unresolved_imports: bool,
+        module_constants: &'a HashMap<String, ModuleConst>,
+    ) -> Self {
+        Self {
+            ctx,
+            model,
+            facts,
+            def_map,
+            def_map_base,
+            qual_map,
+            qual_map_base,
+            property_defs,
+            task_targets,
+            follow_targets,
+            package_meta,
+            followable_extra_roots,
+            record_unresolved_imports,
+            module_constants,
+            current_fn: None,
+            current_param_names: Vec::new(),
+            class_stack: Vec::new(),
+            fn_stack: Vec::new(),
+            dead_depth: 0,
+            loop_depth: 0,
+            branch_depth: 0,
+            cache_miss_depth: 0,
+            no_running_loop_depth: 0,
+            off_loop_thread_depth: 0,
+            try_saw_get_loop: false,
+            active_param_guard: None,
+            consuming_generator: false,
+            in_lambda: false,
+            skip_lambda_body: false,
+            in_callee_position: false,
+            pending_is_awaited: false,
+            pending_with_enter: false,
+            in_eager_offload_arg: false,
+            async_with_receivers: HashMap::new(),
+            redis_family_memo: HashMap::new(),
+            occurrence_counter: HashMap::new(),
+            pending_literals: Vec::new(),
+            pending_callables: Vec::new(),
+            pending_externals: Vec::new(),
+            pending_constructed_receivers: Vec::new(),
+            pending_constructed_receiver: None,
+            pending_keyword_callables: Vec::new(),
+            narrowed_locals: HashMap::new(),
+            local_lambdas: HashMap::new(),
+            local_genexprs: HashMap::new(),
+            expanding_genexprs: HashSet::new(),
+            genexpr_expand_depth: 0,
+            expanded_genexpr_memo: HashSet::new(),
+            genexpr_expand_visits: 0,
+            idle_loop_locals: HashSet::new(),
+            idle_loop_helpers: HashSet::new(),
+            unbounded_queues: HashSet::new(),
+            boto_receivers: HashSet::new(),
+            running_loop_locals: HashSet::new(),
+            event_loop_locals: HashSet::new(),
+            buffer_locals: HashSet::new(),
+            in_memory_archive_receivers: HashSet::new(),
+            future_done_locals: HashSet::new(),
+        }
+    }
+
     pub(super) fn def_get(&self, key: &DefKey) -> Option<FunctionId> {
         self.def_map
             .get(key)

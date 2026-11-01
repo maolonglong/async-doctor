@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use async_doctor_core::{CallEdge, CallKind, CalleeRef, FunctionId, OffloadKind};
+use async_doctor_rules::aws_op_method_name;
 use ruff_db::files::FilePath;
 use ruff_db::parsed::parsed_module;
 use ruff_python_ast::Expr;
@@ -18,38 +19,6 @@ use crate::sitepkgs::{FollowTarget, is_followable_site_packages_py};
 fn is_under_followable_extra(path: &str, roots: &[std::path::PathBuf]) -> bool {
     let p = std::path::Path::new(path);
     roots.iter().any(|r| p.starts_with(r))
-}
-
-/// Method names that are sync AWS client/resource API calls (boto3 has no stubs).
-fn aws_op_method_name(method: &str) -> bool {
-    matches!(
-        method,
-        "get_object"
-            | "put_object"
-            | "list_objects"
-            | "list_objects_v2"
-            | "delete_object"
-            | "send_message"
-            | "receive_message"
-            | "publish"
-            | "get_item"
-            | "put_item"
-            | "query"
-            | "scan"
-            | "invoke"
-            | "start_execution"
-            | "describe_instances"
-            | "download_file"
-            | "upload_file"
-            | "download_fileobj"
-            | "upload_fileobj"
-    ) || method.starts_with("get_")
-        || method.starts_with("put_")
-        || method.starts_with("list_")
-        || method.starts_with("create_")
-        || method.starts_with("delete_")
-        || method.starts_with("describe_")
-        || method.starts_with("update_")
 }
 
 fn is_get_event_loop_qual(qualname: &str) -> bool {

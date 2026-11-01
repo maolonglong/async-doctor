@@ -481,3 +481,127 @@ pub(super) fn except_is_runtime_error(type_expr: Option<&Expr>) -> bool {
         _ => false,
     }
 }
+
+/// `x != threading.get_ident()` / `current_thread() is not main_thread()` — body is off-loop.
+pub(super) fn is_off_loop_thread_test(test: &Expr) -> bool {
+    match test {
+        Expr::UnaryOp(u) if matches!(u.op, ast::UnaryOp::Not) => {
+            is_on_loop_thread_test(u.operand.as_ref())
+        }
+        Expr::Compare(cmp) if cmp.ops.len() == 1 && cmp.operands.len() == 2 => {
+            let op = cmp.ops[0];
+            let left = &cmp.operands[0];
+            let right = &cmp.operands[1];
+            match op {
+                ast::CmpOp::NotEq | ast::CmpOp::IsNot => {
+                    (is_get_ident_call(left) && !is_get_ident_call(right))
+                        || (is_get_ident_call(right) && !is_get_ident_call(left))
+                        || (is_current_thread_call(left) && is_main_thread_call(right))
+                        || (is_main_thread_call(left) && is_current_thread_call(right))
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+/// `x == threading.get_ident()` / `current_thread() is main_thread()` — then is on-loop;
+/// the complementary else branch is off-loop.
+pub(super) fn is_on_loop_thread_test(test: &Expr) -> bool {
+    match test {
+        Expr::Compare(cmp) if cmp.ops.len() == 1 && cmp.operands.len() == 2 => {
+            let op = cmp.ops[0];
+            let left = &cmp.operands[0];
+            let right = &cmp.operands[1];
+            match op {
+                ast::CmpOp::Eq | ast::CmpOp::Is => {
+                    (is_get_ident_call(left) && !is_get_ident_call(right))
+                        || (is_get_ident_call(right) && !is_get_ident_call(left))
+                        || (is_current_thread_call(left) && is_main_thread_call(right))
+                        || (is_main_thread_call(left) && is_current_thread_call(right))
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+fn is_get_ident_call(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call(c) => match c.func.as_ref() {
+            Expr::Attribute(a) if a.attr.as_str() == "get_ident" => {
+                attr_root_is_threading(&a.value)
+            }
+            Expr::Name(n) if n.id.as_str() == "get_ident" => true,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn is_current_thread_call(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call(c) => match c.func.as_ref() {
+            Expr::Attribute(a) if a.attr.as_str() == "current_thread" => {
+                attr_root_is_threading(&a.value)
+            }
+            Expr::Name(n) if n.id.as_str() == "current_thread" => true,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn is_main_thread_call(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call(c) => match c.func.as_ref() {
+            Expr::Attribute(a) if a.attr.as_str() == "main_thread" => {
+                attr_root_is_threading(&a.value)
+            }
+            Expr::Name(n) if n.id.as_str() == "main_thread" => true,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn attr_root_is_threading(expr: &Expr) -> bool {
+    match expr {
+        Expr::Name(n) => {
+            let s = n.id.as_str();
+            s == "threading" || s == "_thread" || s == "thread"
+        }
+        Expr::Attribute(a) => attr_root_is_threading(&a.value),
+        _ => false,
+    }
+}
+
+/// Names proven `.done()` in an `if` test (`if fut.done():`, `if a and fut.done():`).
+pub(super) fn futures_proven_done_in_test(test: &Expr) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_done_names(test, &mut out);
+    out
+}
+
+fn collect_done_names(test: &Expr, out: &mut Vec<String>) {
+    match test {
+        Expr::BoolOp(b) if matches!(b.op, ast::BoolOp::And) => {
+            for v in &b.values {
+                collect_done_names(v, out);
+            }
+        }
+        Expr::Call(c) => {
+            if let Expr::Attribute(a) = c.func.as_ref()
+                && a.attr.as_str() == "done"
+                && c.arguments.args.is_empty()
+                && c.arguments.keywords.is_empty()
+                && let Expr::Name(n) = a.value.as_ref()
+            {
+                out.push(n.id.as_str().to_string());
+            }
+        }
+        _ => {}
+    }
+}

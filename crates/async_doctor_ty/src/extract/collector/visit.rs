@@ -28,6 +28,8 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 // clone so local rebinds do not leak to sibling defs.
                 let prev_queues = self.unbounded_queues.clone();
                 let prev_boto = self.boto_receivers.clone();
+                let prev_buffers = self.buffer_locals.clone();
+                let prev_archives = self.in_memory_archive_receivers.clone();
                 self.current_fn = fid;
                 self.current_param_names = fid
                     .map(|id| self.facts.function(id).param_names.clone())
@@ -36,6 +38,8 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 for p in &self.current_param_names {
                     self.unbounded_queues.remove(p);
                     self.boto_receivers.remove(p);
+                    self.buffer_locals.remove(p);
+                    self.in_memory_archive_receivers.remove(p);
                 }
                 self.fn_stack.push(func.name.as_str().to_string());
                 self.visit_body_seq(&func.body);
@@ -49,6 +53,8 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 self.event_loop_locals = prev_event_loop;
                 self.unbounded_queues = prev_queues;
                 self.boto_receivers = prev_boto;
+                self.buffer_locals = prev_buffers;
+                self.in_memory_archive_receivers = prev_archives;
             }
             Stmt::ClassDef(class) => {
                 // Pre-scan methods so later-defined idle helpers are visible to
@@ -177,6 +183,13 @@ impl<'a, 'db> CallCollector<'a, 'db> {
     fn expand_local_genexpr(&mut self, gexpr: &'a ruff_python_ast::ExprGenerator) {
         if self.genexpr_expand_depth >= super::MAX_GENEXPR_EXPAND_DEPTH {
             return;
+        }
+        let outermost = self.genexpr_expand_depth == 0;
+        if outermost {
+            // Fresh memo/budget per top-level consume so a later `list(g)` (e.g.
+            // in an else branch) still expands after an earlier offloaded consume.
+            self.expanded_genexpr_memo.clear();
+            self.genexpr_expand_visits = 0;
         }
         if self.genexpr_expand_visits >= super::MAX_GENEXPR_EXPAND_VISITS {
             return;

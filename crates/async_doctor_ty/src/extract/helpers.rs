@@ -283,6 +283,39 @@ pub(crate) fn is_path_or_file_open_qual(q: &str) -> bool {
         || q.ends_with("PIL.Image.save")
 }
 
+pub(crate) fn is_archive_ctor_qual(q: &str) -> bool {
+    matches!(
+        q,
+        "zipfile.ZipFile" | "tarfile.TarFile" | "tarfile.open" | "tarfile.TarFile.open"
+    ) || q.ends_with(".ZipFile")
+        || q.ends_with(".TarFile")
+        || q.ends_with("tarfile.open")
+}
+
+pub(crate) fn is_archive_method_name(method: &str) -> bool {
+    matches!(
+        method,
+        "open"
+            | "read"
+            | "write"
+            | "writestr"
+            | "extract"
+            | "extractall"
+            | "add"
+            | "addfile"
+            | "getinfo"
+            | "infolist"
+            | "namelist"
+            | "close"
+    )
+}
+
+pub(crate) fn is_archive_method_qual(q: &str) -> bool {
+    q.starts_with("zipfile.ZipFile.")
+        || q.starts_with("tarfile.TarFile.")
+        || q.starts_with("tarfile.TarInfo.")
+}
+
 /// Cheap narrowing facts from `isinstance(x, T)` / `x is not None`.
 #[derive(Debug, Clone)]
 pub(crate) enum NarrowFact {
