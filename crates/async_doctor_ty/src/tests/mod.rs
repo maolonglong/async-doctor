@@ -12,4 +12,5 @@ mod m3a;
 mod m3a_precision;
 mod m3c;
 mod offload;
+mod prerelease;
 mod scan_cache;
