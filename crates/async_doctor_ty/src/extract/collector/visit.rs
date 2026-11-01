@@ -1,10 +1,11 @@
 //! AST visitor entry points for [`super::CallCollector`].
 
 use ruff_python_ast::visitor::{Visitor, walk_expr, walk_stmt};
-use ruff_python_ast::{Expr, Stmt};
+use ruff_python_ast::{self as ast, Expr, Stmt};
 
 use super::CallCollector;
 use super::loop_guards::collect_idle_loop_helpers;
+use super::thread_guards::futures_proven_done_in_test;
 use crate::extract::ctx::scope_qualname;
 
 impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
@@ -121,6 +122,37 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
             Expr::Call(call) => {
                 self.handle_call(call, false);
                 self.walk_call_children(call);
+            }
+            // `fut.done() and fut.result()` / `self.x.done() and self.x.result()`:
+            // accumulate done-proven receivers across And conjuncts left→right.
+            Expr::BoolOp(b) if matches!(b.op, ast::BoolOp::And) => {
+                let prev = self.future_done_receivers.clone();
+                for v in &b.values {
+                    self.visit_expr(v);
+                    for path in futures_proven_done_in_test(v) {
+                        self.future_done_receivers.insert(path);
+                    }
+                }
+                self.future_done_receivers = prev;
+            }
+            // `X.result() if X.done() else None`
+            Expr::If(ifexp) => {
+                self.visit_expr(&ifexp.test);
+                let proven = futures_proven_done_in_test(&ifexp.test);
+                let prev = if !proven.is_empty() {
+                    let prev = self.future_done_receivers.clone();
+                    for path in &proven {
+                        self.future_done_receivers.insert(path.clone());
+                    }
+                    Some(prev)
+                } else {
+                    None
+                };
+                self.visit_expr(&ifexp.body);
+                if let Some(prev) = prev {
+                    self.future_done_receivers = prev;
+                }
+                self.visit_expr(&ifexp.orelse);
             }
             Expr::Attribute(attr) => {
                 if !self.in_callee_position {
