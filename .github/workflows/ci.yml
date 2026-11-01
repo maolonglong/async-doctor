@@ -35,7 +35,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # TEMP: also save from this PR branch once so warm-cache timing is real;
+          # reverted before merge (final save-if is main-only).
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/cursor/ci-speed-14fe' }}
 
       - name: cargo fmt
         run: cargo fmt --all -- --check
@@ -63,7 +65,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # TEMP: also save from this PR branch once so warm-cache timing is real;
+          # reverted before merge (final save-if is main-only).
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/cursor/ci-speed-14fe' }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
@@ -98,7 +102,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # TEMP: also save from this PR branch once so warm-cache timing is real;
+          # reverted before merge (final save-if is main-only).
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/cursor/ci-speed-14fe' }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
