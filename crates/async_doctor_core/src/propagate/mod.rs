@@ -21,8 +21,8 @@ use crate::report::{
 use advice::collect_offload_twin_advice;
 use grade::{
     ParamVerdict, async_twin_hint, chain_step_for, evaluate_param_guards, label_rank,
-    merge_file_io_findings, reconcile_conditions, resolution_for_edge,
-    shortest_paths_to_async_entries, unresolved_pattern,
+    merge_file_io_findings, merge_same_line_ctor_call_findings, reconcile_conditions,
+    resolution_for_edge, shortest_paths_to_async_entries, unresolved_pattern,
 };
 use higher_order::materialize_higher_order;
 use special::{collect_offload_coroutine_findings, nested_event_loop_hit};
@@ -558,7 +558,7 @@ pub fn analyze_with_options(
     }
 
     report.omitted_non_production_entries = omitted_entries.len() as u32;
-    report.findings = merge_file_io_findings(raw_findings);
+    report.findings = merge_same_line_ctor_call_findings(merge_file_io_findings(raw_findings));
     // offload-coroutine findings (error) — additive; never suppresses existing rules.
     report.findings.extend(collect_offload_coroutine_findings(
         facts,
