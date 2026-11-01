@@ -665,6 +665,8 @@ pub(crate) fn extract_third_party_function(
         idle_loop_locals: HashSet::new(),
         idle_loop_helpers: HashSet::new(),
         unbounded_queues: HashSet::new(),
+        running_loop_locals: HashSet::new(),
+        event_loop_locals: HashSet::new(),
     };
     visitor.visit_body_seq(&func.body);
     Some(id)

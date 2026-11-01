@@ -22,6 +22,8 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 let prev_lambdas = std::mem::take(&mut self.local_lambdas);
                 let prev_genexprs = std::mem::take(&mut self.local_genexprs);
                 let prev_idle_locals = std::mem::take(&mut self.idle_loop_locals);
+                let prev_running_loop = std::mem::take(&mut self.running_loop_locals);
+                let prev_event_loop = std::mem::take(&mut self.event_loop_locals);
                 // Module-level unbounded queues remain visible inside functions;
                 // clone so local rebinds do not leak to sibling defs.
                 let prev_queues = self.unbounded_queues.clone();
@@ -29,6 +31,10 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 self.current_param_names = fid
                     .map(|id| self.facts.function(id).param_names.clone())
                     .unwrap_or_default();
+                // Parameters shadow module-level unbounded queue bindings.
+                for p in &self.current_param_names {
+                    self.unbounded_queues.remove(p);
+                }
                 self.fn_stack.push(func.name.as_str().to_string());
                 self.visit_body_seq(&func.body);
                 self.fn_stack.pop();
@@ -37,6 +43,8 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 self.local_lambdas = prev_lambdas;
                 self.local_genexprs = prev_genexprs;
                 self.idle_loop_locals = prev_idle_locals;
+                self.running_loop_locals = prev_running_loop;
+                self.event_loop_locals = prev_event_loop;
                 self.unbounded_queues = prev_queues;
             }
             Stmt::ClassDef(class) => {

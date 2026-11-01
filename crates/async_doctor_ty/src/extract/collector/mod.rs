@@ -101,6 +101,13 @@ pub(crate) struct CallCollector<'a, 'db> {
     /// Names bound to an unbounded `queue.Queue()` / `Queue(maxsize<=0)`.
     /// `put` on these never blocks.
     pub(super) unbounded_queues: HashSet<String>,
+    /// Locals assigned from `asyncio.get_running_loop()` (incl. `= None` after
+    /// `except RuntimeError`). Early-return `if name is not None` only guards
+    /// when the name is in this set.
+    pub(super) running_loop_locals: HashSet<String>,
+    /// Locals assigned from `asyncio.get_event_loop()`. Early-return only when
+    /// combined with `.is_running()` (not bare `is not None`).
+    pub(super) event_loop_locals: HashSet<String>,
 }
 
 impl<'a, 'db> CallCollector<'a, 'db> {
