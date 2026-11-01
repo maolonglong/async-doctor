@@ -96,8 +96,8 @@ jobs:
       actions: read
       contents: read
     steps:
-      - uses: actions/checkout@v6
-      - uses: astral-sh/setup-uv@v10
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
       - name: Install project deps
         run: uv sync --frozen
       - name: Run async-doctor
