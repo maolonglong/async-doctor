@@ -194,29 +194,51 @@ pub(super) fn merge_file_io_findings(findings: Vec<Finding>) -> Vec<Finding> {
         others.push(f);
     }
 
-    // For each open finding, absorb same-entry file rw findings in the same file.
+    // Absorb rw only when the call-path prefix matches (same hops before the
+    // sink). Prevents mashing `_check` and `_patch` open sites into one chain
+    // while still collapsing `open`+`read`/`write` for a single with-block.
+    // When several opens share a prefix, bind each rw to the nearest preceding
+    // open by sink line (so write after a second open is not glued to the first).
     let mut absorbed: HashSet<usize> = HashSet::new();
-    for open in &mut opens {
-        for (i, rw) in others.iter().enumerate() {
-            if absorbed.contains(&i) {
-                continue;
-            }
-            if rw.rule != "blocking-file"
-                || !is_file_rw_text(rw.chain.last().map(|c| c.text.as_str()).unwrap_or(""))
-            {
-                continue;
-            }
+    for (i, rw) in others.iter().enumerate() {
+        if rw.rule != "blocking-file"
+            || !is_file_rw_text(rw.chain.last().map(|c| c.text.as_str()).unwrap_or(""))
+        {
+            continue;
+        }
+        let rw_line = rw.chain.last().map(|c| c.line).unwrap_or(0);
+        let rw_prefix = chain_prefix_before_sink(&rw.chain);
+        let mut best: Option<usize> = None;
+        for (oi, open) in opens.iter().enumerate() {
             if rw.entry.file != open.entry.file || rw.entry.name != open.entry.name {
                 continue;
             }
-            // Same entry: append rw hop if not already present.
+            if chain_prefix_before_sink(&open.chain) != rw_prefix {
+                continue;
+            }
+            let open_line = open.chain.last().map(|c| c.line).unwrap_or(0);
+            if open_line > rw_line {
+                continue;
+            }
+            let better = match best {
+                None => true,
+                Some(bi) => {
+                    let bl = opens[bi].chain.last().map(|c| c.line).unwrap_or(0);
+                    open_line >= bl
+                }
+            };
+            if better {
+                best = Some(oi);
+            }
+        }
+        if let Some(oi) = best {
             for step in &rw.chain {
-                if !open
+                if !opens[oi]
                     .chain
                     .iter()
                     .any(|s| s.file == step.file && s.line == step.line && s.text == step.text)
                 {
-                    open.chain.push(step.clone());
+                    opens[oi].chain.push(step.clone());
                 }
             }
             absorbed.insert(i);
@@ -235,6 +257,17 @@ pub(super) fn merge_file_io_findings(findings: Vec<Finding>) -> Vec<Finding> {
 pub(super) fn is_open_call_text(text: &str) -> bool {
     let t = text.trim();
     t.starts_with("open(") || t.contains(".open(")
+}
+
+/// Chain hops before the terminal sink (empty when the sink is inside the entry).
+fn chain_prefix_before_sink(chain: &[ChainStep]) -> Vec<(String, u32, String)> {
+    if chain.len() <= 1 {
+        return Vec::new();
+    }
+    chain[..chain.len() - 1]
+        .iter()
+        .map(|s| (s.file.clone(), s.line, s.text.clone()))
+        .collect()
 }
 
 pub(super) fn is_file_rw_text(text: &str) -> bool {
