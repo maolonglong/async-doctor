@@ -23,7 +23,7 @@ use clap::Parser;
 
 use args::{Cli, Command, Format};
 use changed::ChangedSet;
-use paths::cli_path_arg;
+use paths::{cli_path_arg, resolve_cli_path};
 
 fn main() -> ExitCode {
     match run() {
@@ -62,10 +62,12 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
         include_non_production: cli.include_non_production,
         show_unresolved: cli.show_unresolved,
     };
-    let mut report = async_doctor_ty::scan_path_with_options(&cli.path, options)
-        .with_context(|| format!("failed to scan `{}`", cli.path.display()))?;
+    // Absolute so bare `file.py` is not treated as having an empty parent.
+    let path = resolve_cli_path(&cli.path);
+    let mut report = async_doctor_ty::scan_path_with_options(&path, options)
+        .with_context(|| format!("failed to scan `{}`", path.display()))?;
 
-    rewrite_why_commands(&mut report, &cli.path);
+    rewrite_why_commands(&mut report, &path);
 
     if !report.complete {
         for skipped in &report.skipped {
@@ -74,13 +76,10 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
         eprintln!("warning: analysis incomplete (complete=false)");
     }
 
-    let scan_root = if cli.path.is_file() {
-        cli.path
-            .parent()
-            .unwrap_or(cli.path.as_path())
-            .to_path_buf()
+    let scan_root = if path.is_file() {
+        path.parent().unwrap_or(path.as_path()).to_path_buf()
     } else {
-        cli.path.clone()
+        path.clone()
     };
     let scan_root = scan_root.canonicalize().unwrap_or(scan_root);
 
@@ -96,7 +95,7 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
     let mut report = suppress_out.report;
 
     // Prefer git toplevel for SARIF %SRCROOT%; fall back to scan root.
-    let mut repo_root_for_sarif = changed::repo_root_for(&cli.path).ok();
+    let mut repo_root_for_sarif = changed::repo_root_for(&path).ok();
 
     if let Some(ref_spec) = &cli.changed {
         let git_ref = if ref_spec.is_empty() || ref_spec == "AUTO" {
@@ -104,7 +103,7 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
         } else {
             Some(ref_spec.as_str())
         };
-        match changed::resolve_changed(&cli.path, git_ref) {
+        match changed::resolve_changed(&path, git_ref) {
             ChangedSet::Filter {
                 files,
                 repo_root,

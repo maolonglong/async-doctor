@@ -8,7 +8,7 @@ use anyhow::{Context, bail};
 use async_doctor_core::{AnalyzeOptions, EXIT_FINDINGS, EXIT_OK, Report};
 use async_doctor_rules::rule_doc;
 
-use crate::paths::{normalize_path, paths_equal};
+use crate::paths::{normalize_path, paths_equal, resolve_cli_path};
 use crate::text::{write_advice, write_candidate, write_finding};
 
 pub fn run_explain(rule: &str) -> anyhow::Result<ExitCode> {
@@ -34,10 +34,11 @@ pub fn run_why(
         include_non_production,
         show_unresolved,
     };
-    let mut report = async_doctor_ty::scan_path_with_options(path, options)
+    let path = resolve_cli_path(path);
+    let mut report = async_doctor_ty::scan_path_with_options(&path, options)
         .with_context(|| format!("failed to scan `{}`", path.display()))?;
     // Same rewrite the default scan applies — nested `why:` lines must be runnable.
-    crate::rewrite_why_commands(&mut report, path);
+    crate::rewrite_why_commands(&mut report, &path);
 
     let matches = findings_at(&report, &file, line);
     let mut out = std::io::stdout().lock();
