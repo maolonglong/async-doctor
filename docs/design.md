@@ -140,7 +140,7 @@ FastAPI sync `def` routes already run in a thread pool — do not report them.
 | --- | --- |
 | `schemaVersion` | integer; bump on breaking changes (currently **2**) |
 | `complete` | false on timeout / parse failure; attach `skipped` |
-| `environment` | interpreter/venv/site-packages used; `note` when degraded (ratio-aware when a venv is active) |
+| `environment` | interpreter/venv/site-packages used; `note` when degraded (ratio-aware when a venv is active). `environment.note` is omitted from JSON when empty (`skip_serializing_if`) |
 | `findings[]` / `candidates[]` / `advice[]` | always emitted (even empty); candidates have `reason`; advice is non-blocking (SARIF `note`) |
 | `locationLessCandidates[]` | always emitted; the missing-third-party aggregate (formerly a hidden `--show-unresolved` candidate) lives here with empty `entry.file`/`chain` and empty `why` (no `file:line` locator) |
 | `skipped[]` / `sinkSites[]` / `unusedSuppressions[]` / `unresolvedSummary[]` | always emitted (even empty) |
