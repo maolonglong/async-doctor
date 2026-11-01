@@ -28,10 +28,11 @@ cargo test -p async_doctor --test concurrent_cache -- --ignored   # N=15/20 + N=
 Build profile: workspace crates use `opt-level = 1` in `dev`/`test`; all
 non-workspace packages use `opt-level = 3` so ty/ruff analysis in tests is not
 pathologically slow. Cache: `Swatinem/rust-cache` with per-job `shared-key`
-values (`ci-lint`, `ci-test`) and `save-if` only on `main` (PRs restore, never
-save). Keys are split because GitHub Actions cache entries are write-once: a
-single shared key lets the faster `lint` job seal the entry before `test` can
-save test-profile artifacts. Concurrent cold-cache detail:
+values (`ci-lint-v2`, `ci-test-v2`), `cache-workspace-crates: true`, and
+`save-if` only on `main` (PRs restore, never save). Keys are split because
+GitHub Actions cache entries are write-once: a single shared key lets the
+faster `lint` job seal the entry before `test` can save test-profile
+artifacts. Concurrent cold-cache detail:
 [notes/2026-10-concurrent-cache-stress.md](notes/2026-10-concurrent-cache-stress.md).
 
 ## Grades
