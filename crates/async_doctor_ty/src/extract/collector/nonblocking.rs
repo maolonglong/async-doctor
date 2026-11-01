@@ -39,12 +39,16 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             Some(false) => {
                 self.unbounded_queues.remove(name);
             }
-            None => {
-                // Non-Queue binding clears prior unbounded status for this name.
-                if !matches!(value, Expr::Name(_)) {
+            None => match value {
+                // Transfer only when the RHS name is itself proven unbounded.
+                Expr::Name(n) if self.unbounded_queues.contains(n.id.as_str()) => {
+                    self.unbounded_queues.insert(name.to_string());
+                }
+                // Rebind to a bare/other name (or any non-Queue expr) clears status.
+                _ => {
                     self.unbounded_queues.remove(name);
                 }
-            }
+            },
         }
     }
 
@@ -60,9 +64,15 @@ impl<'a, 'db> CallCollector<'a, 'db> {
 }
 
 fn is_lock_or_semaphore_acquire(q: &str) -> bool {
+    // Only stdlib / multiprocessing primitives — not redis.lock / filelock / etc.
     // ty may surface `_thread.lock.acquire` / `LockType.acquire` / `threading.Lock.acquire`.
     let lower = q.to_ascii_lowercase();
-    lower.ends_with(".acquire") && (lower.contains("lock") || lower.contains("semaphore"))
+    if !lower.ends_with(".acquire") {
+        return false;
+    }
+    lower.starts_with("threading.")
+        || lower.starts_with("_thread.")
+        || lower.starts_with("multiprocessing.")
 }
 
 fn is_thread_join(q: &str) -> bool {
@@ -91,7 +101,9 @@ fn acquire_is_nonblocking(call: &ast::ExprCall) -> bool {
         let Some(name) = kw.arg.as_ref() else {
             continue;
         };
-        if name.as_str() == "blocking" && expr_is_falsey_blocking_flag(&kw.value) {
+        // threading uses `blocking=`; multiprocessing.Lock uses `block=`.
+        if matches!(name.as_str(), "blocking" | "block") && expr_is_falsey_blocking_flag(&kw.value)
+        {
             return true;
         }
         // acquire(timeout=0) returns immediately (False) without blocking.
