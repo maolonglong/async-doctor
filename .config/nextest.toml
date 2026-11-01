@@ -1,0 +1,34 @@
+# nextest config for async-doctor CI and local parallel test runs.
+# See docs/quality.md (CI / test strategy) and docs/notes/2026-10-concurrent-cache-stress.md.
+
+[profile.default]
+# Concurrent cold-scan trials can exceed 60s even after profile opts.
+slow-timeout = { period = "120s", terminate-after = 5 }
+
+[profile.ci]
+# PR and main test jobs: fail-fast off so one flake does not hide siblings.
+fail-fast = false
+slow-timeout = { period = "120s", terminate-after = 5 }
+
+[profile.stress]
+inherits = "ci"
+# Concurrent cold-scan N=15/20 runs can take several minutes on cold/debug.
+slow-timeout = { period = "300s", terminate-after = 4 }
+
+# Concurrent cold-scan tests spawn overlapping async-doctor children and must
+# not share the machine with other heavy scans.
+[test-groups]
+concurrent-cache = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'test(concurrent_cold_scans)'
+test-group = 'concurrent-cache'
+
+[[profile.ci.overrides]]
+filter = 'test(concurrent_cold_scans)'
+test-group = 'concurrent-cache'
+
+[[profile.stress.overrides]]
+filter = 'test(concurrent_cold_scans)'
+test-group = 'concurrent-cache'
+slow-timeout = { period = "600s", terminate-after = 2 }
