@@ -13,7 +13,9 @@ use async_doctor_core::ScanEnvironment;
 use ruff_db::Db as SourceDb;
 use ruff_db::diagnostic::Diagnostic;
 use ruff_db::files::{File, Files};
-use ruff_db::system::{OsSystem, System, SystemPath, SystemPathBuf};
+use ruff_db::system::{System, SystemPath, SystemPathBuf};
+
+use crate::doctor_system::DoctorSystem;
 use ruff_db::vendored::VendoredFileSystem;
 use ty_module_resolver::SearchPathSettings;
 use ty_python_core::ProgramFile;
@@ -30,7 +32,7 @@ use ty_site_packages::SysPrefixPathOrigin;
 pub struct AsyncDoctorDb {
     storage: salsa::Storage<Self>,
     files: Files,
-    system: OsSystem,
+    system: DoctorSystem,
     vendored: VendoredFileSystem,
     rule_selection: Arc<RuleSelection>,
     analysis_settings: Arc<AnalysisSettings>,
@@ -51,7 +53,7 @@ impl AsyncDoctorDb {
     /// (`PythonEnvironment::discover`). When set, it is treated as a
     /// `--python`-style sys.prefix or interpreter path.
     pub fn open(project_root: &SystemPath, python: Option<&SystemPath>) -> anyhow::Result<Self> {
-        let system = OsSystem::new(project_root);
+        let system = DoctorSystem::new(project_root);
         if !system.is_directory(project_root) {
             bail!("`{project_root}` is not a directory");
         }
@@ -195,14 +197,14 @@ impl AsyncDoctorDb {
 
 /// Resolve the Python environment for `project_root` (no `--python` override).
 pub(crate) fn resolve_environment_for_project(
-    system: &OsSystem,
+    system: &dyn System,
     project_root: &SystemPath,
 ) -> anyhow::Result<Option<PythonEnvironment>> {
     resolve_environment(system, project_root, None)
 }
 
 fn resolve_environment(
-    system: &OsSystem,
+    system: &dyn System,
     project_root: &SystemPath,
     python: Option<&SystemPath>,
 ) -> anyhow::Result<Option<PythonEnvironment>> {
@@ -259,7 +261,7 @@ fn resolve_environment(
 /// Map a `--python`-style path to a sys.prefix directory.
 ///
 /// Interpreters live at `<prefix>/bin/python`; a directory argument is used as-is.
-fn sys_prefix_from_python_arg(system: &OsSystem, path: &SystemPath) -> SystemPathBuf {
+fn sys_prefix_from_python_arg(system: &dyn System, path: &SystemPath) -> SystemPathBuf {
     if system.is_file(path) {
         path.parent()
             .and_then(SystemPath::parent)

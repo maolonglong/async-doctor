@@ -2,6 +2,8 @@
 
 mod cache;
 mod db;
+mod doctor_system;
+mod encoding;
 mod env_info;
 mod extract;
 mod scan;
