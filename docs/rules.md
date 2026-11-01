@@ -54,9 +54,11 @@ Sync database drivers and sync cloud/AI SDKs (SQLAlchemy Session, redis, boto3, 
 
 - `AsyncSession.run_sync` runs sync work on a greenlet in the event-loop thread
   — it is **not** a thread offload and is not treated as one.
-- There is still no dedicated `aioboto3` sink/follow family: sync `boto3` is
-  reported with an `aioboto3` / `aiobotocore` fix hint, and `aioboto3.*`
-  qualnames are classified as async counterparts (never findings).
+- Sync `boto3` / `botocore` client and resource API calls (including dynamic
+  methods such as `get_object` / `get_item`) are reported with an `aioboto3` /
+  `aiobotocore` fix hint. There is still no dedicated `aioboto3` sink/follow
+  family; `aioboto3.*` / `aiobotocore.*` qualnames are classified as async
+  counterparts (never findings).
 
 ## unresolved-call
 

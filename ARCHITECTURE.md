@@ -113,9 +113,10 @@ graph types. Propagation is reachability, not taint.
 
 ### `crates/async_doctor_rules`
 
-Static builtin sink table (stdlib + type-based third-party families in
-`third_party/`), structured async-twin table (`async_twin.rs`), and rule doc
-anchors into `docs/rules.md` (`docs.rs`). No analysis logic.
+Static builtin sink table (`stdlib/` for stdlib/builtins rows + normalization,
+type-based third-party families in `third_party/`), structured async-twin table
+(`async_twin.rs`), and rule doc anchors into `docs/rules.md` (`docs.rs`). No
+analysis logic.
 
 **API boundary:** `BuiltinSinkTable` implementing `SinkTable`, plus
 `docs_anchor_for` / rule id constants.

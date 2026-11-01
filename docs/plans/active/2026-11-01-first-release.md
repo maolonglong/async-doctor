@@ -8,7 +8,7 @@ building from source, after pre-release audit fixes and owner confirmation.
 ## Progress
 
 - [x] 2026-11-01: Pre-release audit fixes merged — https://github.com/maolonglong/async-doctor/pull/32, https://github.com/maolonglong/async-doctor/pull/33, https://github.com/maolonglong/async-doctor/pull/34.
-- [ ] P1 recall fixes (see debt rows in [../../quality.md](../../quality.md): boto3 client calls, `concurrent.futures.Future.result()`, smtplib/ftplib, zipfile/tarfile, glob/`Path.iterdir`, `input()`, chain-through-sinks).
+- [x] 2026-11-01: P1 recall fixes (boto3 client/resource calls, `Future.result` / `Executor.map` / `wait`, smtplib/ftplib, zipfile/tarfile, glob/`Path.iterdir`, `input()`, chain-through-sinks, genexpr fan-out) — https://github.com/maolonglong/async-doctor/pull/36.
 - [ ] PyPI trusted publisher + `pypi` environment configured for the release workflow.
 - [ ] Resolve vendored `fast-rust` skill license (no upstream license) before open-sourcing / public release.
 - [ ] Owner confirmation before publish.
@@ -35,10 +35,9 @@ metadata is in `pyproject.toml`. Remaining quality debt is listed in
 
 ## Plan of work
 
-1. Land P1 recall fixtures/fixes without loosening the FP bar.
-2. Confirm GitHub `pypi` environment + trusted publisher against the release workflow.
-3. License or remove `.agents/skills/fast-rust` before making the repo public.
-4. Owner sign-off; then tag `v0.1.0` via the existing release path (humans only — agents do not publish).
+1. Confirm GitHub `pypi` environment + trusted publisher against the release workflow.
+2. License or remove `.agents/skills/fast-rust` before making the repo public.
+3. Owner sign-off; then tag `v0.1.0` via the existing release path (humans only — agents do not publish).
 
 ## Validation
 
