@@ -35,9 +35,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci
-          # TEMP: also save from this PR branch once so warm-cache timing is real;
-          # reverted before merge (final save-if is main-only).
-          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/cursor/ci-speed-14fe' }}
+          # TEMP: save from this PR once for a real warm-cache measurement.
+          # pull_request refs are refs/pull/N/merge — use head_ref. Revert to
+          # main-only before merge.
+          save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'cursor/ci-speed-14fe' }}
 
       - name: cargo fmt
         run: cargo fmt --all -- --check
@@ -65,9 +66,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci
-          # TEMP: also save from this PR branch once so warm-cache timing is real;
-          # reverted before merge (final save-if is main-only).
-          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/cursor/ci-speed-14fe' }}
+          # TEMP: save from this PR once for a real warm-cache measurement.
+          # pull_request refs are refs/pull/N/merge — use head_ref. Revert to
+          # main-only before merge.
+          save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'cursor/ci-speed-14fe' }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
@@ -102,9 +104,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci
-          # TEMP: also save from this PR branch once so warm-cache timing is real;
-          # reverted before merge (final save-if is main-only).
-          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/cursor/ci-speed-14fe' }}
+          # TEMP: save from this PR once for a real warm-cache measurement.
+          # pull_request refs are refs/pull/N/merge — use head_ref. Revert to
+          # main-only before merge.
+          save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'cursor/ci-speed-14fe' }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
