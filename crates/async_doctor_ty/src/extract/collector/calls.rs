@@ -241,6 +241,16 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             return;
         }
 
+        // Non-blocking lock/queue variants (`acquire(False)`, `join(timeout=0)`,
+        // `put` on unbounded Queue, …) — skip the edge entirely.
+        if let Some(q) = self.external_qualname(&call.func)
+            && self.is_proven_nonblocking_lock_call(&q, call)
+        {
+            self.clear_pending_call_args();
+            self.pending_is_awaited = false;
+            return;
+        }
+
         if let Some(kind) = self.is_offload_callee(&call.func) {
             // Passing a callable param into a real offload → this function is a wrapper.
             let callable_idx = kind.callable_arg_index();
@@ -398,10 +408,12 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             Expr::Lambda(lam) => {
                 self.local_lambdas.insert(name.to_string(), lam);
                 self.idle_loop_locals.remove(name);
+                self.unbounded_queues.remove(name);
             }
             Expr::Generator(gexpr) => {
                 self.local_genexprs.insert(name.to_string(), gexpr);
                 self.idle_loop_locals.remove(name);
+                self.unbounded_queues.remove(name);
             }
             other => {
                 self.local_lambdas.remove(name);
@@ -411,6 +423,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 } else {
                     self.idle_loop_locals.remove(name);
                 }
+                self.note_queue_binding(name, other);
             }
         }
     }

@@ -22,6 +22,9 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 let prev_lambdas = std::mem::take(&mut self.local_lambdas);
                 let prev_genexprs = std::mem::take(&mut self.local_genexprs);
                 let prev_idle_locals = std::mem::take(&mut self.idle_loop_locals);
+                // Module-level unbounded queues remain visible inside functions;
+                // clone so local rebinds do not leak to sibling defs.
+                let prev_queues = self.unbounded_queues.clone();
                 self.current_fn = fid;
                 self.current_param_names = fid
                     .map(|id| self.facts.function(id).param_names.clone())
@@ -34,6 +37,7 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 self.local_lambdas = prev_lambdas;
                 self.local_genexprs = prev_genexprs;
                 self.idle_loop_locals = prev_idle_locals;
+                self.unbounded_queues = prev_queues;
             }
             Stmt::ClassDef(class) => {
                 // Pre-scan methods so later-defined idle helpers are visible to

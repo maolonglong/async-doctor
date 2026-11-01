@@ -215,6 +215,7 @@ fn extract_one_file(
         local_genexprs: HashMap::new(),
         idle_loop_locals: HashSet::new(),
         idle_loop_helpers: HashSet::new(),
+        unbounded_queues: HashSet::new(),
     };
     super::collector::loop_guards::collect_idle_loop_helpers(
         parsed.suite(),

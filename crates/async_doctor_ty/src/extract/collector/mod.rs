@@ -4,6 +4,7 @@ mod calls;
 mod control_flow;
 mod imports;
 pub(crate) mod loop_guards;
+mod nonblocking;
 mod redis_mro;
 mod resolve;
 mod visit;
@@ -97,6 +98,9 @@ pub(crate) struct CallCollector<'a, 'db> {
     pub(super) idle_loop_locals: HashSet<String>,
     /// Function/method names whose body returns a loop only when it is not running.
     pub(super) idle_loop_helpers: HashSet<String>,
+    /// Names bound to an unbounded `queue.Queue()` / `Queue(maxsize<=0)`.
+    /// `put` on these never blocks.
+    pub(super) unbounded_queues: HashSet<String>,
 }
 
 impl<'a, 'db> CallCollector<'a, 'db> {
