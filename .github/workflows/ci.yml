@@ -38,6 +38,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci-lint
+          cache-workspace-crates: true
           # TEMP: also save from this PR for warm-cache measurement; revert to
           # main-only before merge. head_ref is set on pull_request.
           save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'cursor/ci-speed-14fe' }}
@@ -68,6 +69,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci-test
+          cache-workspace-crates: true
           # TEMP: also save from this PR for warm-cache measurement; revert to
           # main-only before merge.
           save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'cursor/ci-speed-14fe' }}
