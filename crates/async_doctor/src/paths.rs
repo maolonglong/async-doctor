@@ -2,6 +2,14 @@
 
 use std::path::{Component, Path, PathBuf};
 
+/// Resolve a CLI path to an absolute path.
+///
+/// Bare relative names like `good.py` have parent `""`, which breaks directory
+/// walks for suppressions. Absolute form makes `parent()` a real directory.
+pub fn resolve_cli_path(path: &Path) -> PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Normalize separators and drop a leading `./`.
 pub fn normalize_path(p: &str) -> String {
     let p = p.replace('\\', "/");
