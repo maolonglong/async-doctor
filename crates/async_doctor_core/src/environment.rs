@@ -109,6 +109,22 @@ impl ScanEnvironment {
         self.refresh_note();
         self
     }
+
+    /// Reason string for the location-less missing-third-party aggregate.
+    ///
+    /// Wording follows whether a project venv is already active — do not tell
+    /// the user to "run in the project venv" when they already are.
+    pub fn missing_third_party_reason(n: u32, kind: EnvironmentKind) -> String {
+        match kind {
+            EnvironmentKind::Venv => format!(
+                "{n} third-party modules not installed in the active venv; \
+                 install the project's deps/extras"
+            ),
+            EnvironmentKind::System | EnvironmentKind::None => {
+                format!("{n} third-party modules not installed; run in the project venv")
+            }
+        }
+    }
 }
 
 impl Default for ScanEnvironment {
@@ -183,5 +199,22 @@ mod tests {
             "low ratio must stay quiet: {:?}",
             env.note
         );
+    }
+
+    #[test]
+    fn location_less_reason_follows_venv_kind() {
+        let venv = ScanEnvironment::missing_third_party_reason(17, EnvironmentKind::Venv);
+        assert!(
+            venv.contains("active venv") && venv.contains("deps/extras"),
+            "{venv}"
+        );
+        assert!(!venv.contains("run in the project venv"), "{venv}");
+
+        let system = ScanEnvironment::missing_third_party_reason(3, EnvironmentKind::System);
+        assert!(system.contains("run in the project venv"), "{system}");
+        assert!(!system.contains("active venv"), "{system}");
+
+        let none = ScanEnvironment::missing_third_party_reason(1, EnvironmentKind::None);
+        assert!(none.contains("run in the project venv"), "{none}");
     }
 }

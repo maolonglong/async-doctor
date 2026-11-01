@@ -513,7 +513,10 @@ pub fn analyze_with_options(
     report.environment.resolved_third_party = n_resolved;
     report.environment.refresh_note();
     if n_tp > 0 {
-        let pattern = format!("{n_tp} third-party modules not installed; run in the project venv");
+        let pattern = crate::environment::ScanEnvironment::missing_third_party_reason(
+            n_tp,
+            report.environment.kind,
+        );
         let agg = unresolved_agg.entry(pattern.clone()).or_default();
         agg.0 = n_tp;
         let sink_key = "unresolved-import:third-party-not-installed";
