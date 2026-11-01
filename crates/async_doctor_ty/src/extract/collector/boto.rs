@@ -1,5 +1,6 @@
 //! Sync boto3 vs aioboto3/aiobotocore receiver tracking.
 
+use async_doctor_rules::{is_aioboto_package_qual, is_sync_boto_factory_qualname};
 use ruff_python_ast::Expr;
 
 use super::CallCollector;
@@ -9,14 +10,24 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         if self.expr_binds_aio_boto(value) {
             self.aio_boto_receivers.insert(name.to_string());
             self.boto_receivers.remove(name);
+            self.boto_session_receivers.remove(name);
+            return;
+        }
+        if self.expr_is_sync_boto_session(value) {
+            self.boto_session_receivers.insert(name.to_string());
+            // Session itself is not a client receiver for AWS-op synthesis.
+            self.boto_receivers.remove(name);
+            self.aio_boto_receivers.remove(name);
             return;
         }
         if self.expr_is_boto_factory_or_receiver(value) {
             self.boto_receivers.insert(name.to_string());
             self.aio_boto_receivers.remove(name);
+            self.boto_session_receivers.remove(name);
         } else {
             self.boto_receivers.remove(name);
             self.aio_boto_receivers.remove(name);
+            self.boto_session_receivers.remove(name);
         }
     }
 
@@ -25,22 +36,17 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         if self.expr_is_aioboto_context(func) {
             return false;
         }
+        // `sess.client(...)` / `boto3.Session().client(...)` without stubs.
+        if let Expr::Attribute(a) = func
+            && matches!(a.attr.as_str(), "client" | "resource")
+            && self.expr_is_sync_boto_session(&a.value)
+        {
+            return true;
+        }
         let Some(q) = self.external_qualname(func) else {
             return false;
         };
-        if is_aioboto_qualname(&q) {
-            return false;
-        }
-        matches!(
-            q.as_str(),
-            "boto3.client"
-                | "boto3.resource"
-                | "boto3.session.Session.client"
-                | "boto3.session.Session.resource"
-                | "boto3.Session.client"
-                | "boto3.Session.resource"
-        ) || ((q.starts_with("boto3.") || q.starts_with("botocore."))
-            && (q.ends_with(".Session.client") || q.ends_with(".Session.resource")))
+        is_sync_boto_factory_qualname(&q)
     }
 
     pub(crate) fn expr_is_boto_factory_or_receiver(&mut self, expr: &Expr) -> bool {
@@ -94,11 +100,84 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
     }
 
+    /// Sync `boto3.Session()` / `boto3.session.Session()` / tracked session locals.
+    pub(crate) fn expr_is_sync_boto_session(&mut self, expr: &Expr) -> bool {
+        if self.expr_is_aioboto_context(expr) {
+            return false;
+        }
+        match expr {
+            Expr::Name(n) => self.boto_session_receivers.contains(n.id.as_str()),
+            Expr::Call(c) => self.call_is_boto_session_ctor(&c.func),
+            Expr::Attribute(a) => {
+                if a.attr.as_str() == "Session" && self.expr_is_boto3_module_root(&a.value) {
+                    return true;
+                }
+                if let Some(q) = self.external_qualname(expr)
+                    && is_sync_boto_session_ctor_qual(&q)
+                {
+                    return true;
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    fn call_is_boto_session_ctor(&mut self, func: &Expr) -> bool {
+        if self.expr_is_aioboto_context(func) {
+            return false;
+        }
+        if let Expr::Attribute(a) = func
+            && a.attr.as_str() == "Session"
+            && self.expr_is_boto3_module_root(&a.value)
+        {
+            return true;
+        }
+        if let Expr::Name(n) = func
+            && n.id.as_str() == "Session"
+            && let Some(q) = self.external_qualname(func)
+        {
+            return is_sync_boto_session_ctor_qual(&q);
+        }
+        self.external_qualname(func)
+            .as_deref()
+            .is_some_and(is_sync_boto_session_ctor_qual)
+    }
+
+    /// `boto3` / `boto3.session` module roots (not aioboto3).
+    fn expr_is_boto3_module_root(&mut self, expr: &Expr) -> bool {
+        if self.expr_is_aioboto_context(expr) {
+            return false;
+        }
+        match expr {
+            Expr::Name(n) => {
+                let s = n.id.as_str();
+                if s == "boto3" {
+                    return true;
+                }
+                self.external_qualname(expr).as_deref().is_some_and(|q| {
+                    let q = async_doctor_rules::normalize_stubs_package_root(q);
+                    q == "boto3" || q == "boto3.session" || q.starts_with("boto3.session.")
+                })
+            }
+            Expr::Attribute(a) => {
+                if a.attr.as_str() == "session" && self.expr_is_boto3_module_root(&a.value) {
+                    return true;
+                }
+                self.external_qualname(expr).as_deref().is_some_and(|q| {
+                    let q = async_doctor_rules::normalize_stubs_package_root(q);
+                    q == "boto3" || q == "boto3.session"
+                })
+            }
+            _ => false,
+        }
+    }
+
     fn call_is_aioboto_session_or_factory(&mut self, func: &Expr) -> bool {
         if !self.expr_is_aioboto_context(func) {
             // `from aioboto3 import Session` — resolve the callee qualname.
             if let Some(q) = self.external_qualname(func)
-                && is_aioboto_qualname(&q)
+                && is_aioboto_package_qual(&q)
                 && (q.ends_with(".Session")
                     || q.ends_with(".client")
                     || q.ends_with(".resource")
@@ -129,11 +208,11 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 }
                 self.external_qualname(expr)
                     .as_deref()
-                    .is_some_and(is_aioboto_qualname)
+                    .is_some_and(is_aioboto_package_qual)
             }
             Expr::Attribute(a) => {
                 if let Some(q) = self.external_qualname(expr)
-                    && is_aioboto_qualname(&q)
+                    && is_aioboto_package_qual(&q)
                 {
                     return true;
                 }
@@ -145,9 +224,13 @@ impl<'a, 'db> CallCollector<'a, 'db> {
     }
 }
 
-fn is_aioboto_qualname(q: &str) -> bool {
-    q == "aioboto3"
-        || q == "aiobotocore"
-        || q.starts_with("aioboto3.")
-        || q.starts_with("aiobotocore.")
+fn is_sync_boto_session_ctor_qual(q: &str) -> bool {
+    if is_aioboto_package_qual(q) {
+        return false;
+    }
+    let q = async_doctor_rules::normalize_stubs_package_root(q);
+    matches!(
+        q.as_str(),
+        "boto3.Session" | "boto3.session.Session" | "botocore.session.Session"
+    ) || ((q.starts_with("boto3.") || q.starts_with("botocore.")) && q.ends_with(".Session"))
 }

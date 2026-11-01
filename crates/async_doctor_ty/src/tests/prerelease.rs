@@ -626,6 +626,57 @@ fn p1_aioboto3_session_client_not_sync_boto() {
 }
 
 #[test]
+fn p1_boto3_stubs_session_client_ops_and_aioboto_clean() {
+    // boto3-stubs-shaped layout: Session().client receivers must flag AWS ops;
+    // aioboto3 (+ aioboto3-stubs) must stay at 0.
+    let dir = clone_fixture("boto3_stubs_session");
+    let cache = fresh_cache_dir("boto3_stubs_session");
+    let report = scan_path_with_cache(&dir, Some(&cache)).unwrap();
+    let get_sinks: Vec<String> = report
+        .findings
+        .iter()
+        .filter(|f| f.entry.name == "stubs_session_client_get_object")
+        .flat_map(|f| {
+            f.chain
+                .iter()
+                .flat_map(|c| [c.text.clone(), c.resolution.clone()])
+        })
+        .collect();
+    assert!(
+        get_sinks.iter().any(|s| s.contains("get_object")),
+        "Session().client receiver get_object must fire: {get_sinks:?} {:?}",
+        report.findings
+    );
+    let put_sinks: Vec<String> = report
+        .findings
+        .iter()
+        .filter(|f| f.entry.name == "stubs_bound_session_put_object")
+        .flat_map(|f| {
+            f.chain
+                .iter()
+                .flat_map(|c| [c.text.clone(), c.resolution.clone()])
+        })
+        .collect();
+    assert!(
+        put_sinks.iter().any(|s| s.contains("put_object")),
+        "sess.client receiver put_object must fire: {put_sinks:?} {:?}",
+        report.findings
+    );
+    let aio_hits: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.entry.name == "aio_session_client_ok" || f.entry.name == "aio_inline_ok")
+        .collect();
+    assert!(
+        aio_hits.is_empty(),
+        "aioboto3 must stay clean with stubs present: {aio_hits:?} {:?}",
+        report.findings
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&cache);
+}
+
+#[test]
 fn p1_chain_through_sink_helpers() {
     let dir = clone_fixture("chain-through-sinks");
     let report = scan_path(&dir).unwrap();

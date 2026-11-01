@@ -386,6 +386,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 self.idle_loop_locals.remove(name);
                 self.unbounded_queues.remove(name);
                 self.boto_receivers.remove(name);
+                self.boto_session_receivers.remove(name);
                 self.aio_boto_receivers.remove(name);
                 self.running_loop_locals.remove(name);
                 self.event_loop_locals.remove(name);
@@ -400,6 +401,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 self.idle_loop_locals.remove(name);
                 self.unbounded_queues.remove(name);
                 self.boto_receivers.remove(name);
+                self.boto_session_receivers.remove(name);
                 self.aio_boto_receivers.remove(name);
                 self.running_loop_locals.remove(name);
                 self.event_loop_locals.remove(name);

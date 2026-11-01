@@ -81,7 +81,10 @@ Sync database drivers and sync cloud/AI SDKs (SQLAlchemy Session, redis, boto3, 
   There is still no dedicated `aioboto3` sink/follow family; `aioboto3.*` /
   `aiobotocore.*` qualnames (including `Session.client` / `Session.resource`
   and `async with` receivers) are classified as async counterparts (never
-  findings), even when boto3 is also installed and types-aioboto3 is missing.
+  findings), even when boto3 is also installed and types-aioboto3 /
+  `aioboto3-stubs` is present. Sync `boto3-stubs.*` / `botocore-stubs.*`
+  package roots normalize to `boto3` / `botocore` so typed Session factories
+  still report.
 
 ## unresolved-call
 
