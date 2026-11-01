@@ -23,11 +23,11 @@ so `uvx async-doctor` works without a Rust toolchain on the user machine.
 
 - **Derive from react-doctor / strato source.** Rejected: license and missing
   license block clean reuse; clean-room keeps the MIT surface clear.
-- **Reimplement Python semantics without ty.** Rejected: typed receivers and
-  site-packages resolution are the product; maintaining a parallel semantic
-  engine is out of scope.
 - **Loose semver ranges on ty/ruff.** Rejected: those crates are internal
   components with no semver promise; exact pins contain churn.
+- *(Inferred, not in the original decision record.)* Reimplement Python
+  semantics without ty — out of scope given typed receivers and site-packages
+  resolution are the product.
 
 ## Consequences
 

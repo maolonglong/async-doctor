@@ -22,7 +22,7 @@ earlier “async twin is only a fix-hint string” rule in
 
 Shipped with related error findings `nested-event-loop` and
 `offload-coroutine` (those remain findings). See
-https://redirect.github.com/maolonglong/async-doctor/pull/30.
+https://github.com/maolonglong/async-doctor/pull/30.
 
 ## Alternatives considered
 
