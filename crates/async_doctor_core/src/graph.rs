@@ -277,6 +277,8 @@ pub struct ProjectFacts {
     pub edges: Vec<CallEdge>,
     pub complete: bool,
     pub skipped: Vec<String>,
+    /// Directory scan found no `.py` files (empty dir or non-Python tree).
+    pub no_python_files: bool,
     /// Failed first-party `import` / `from … import` sites (deduped by
     /// file+module). Only when the head module exists under the scan root /
     /// extra roots yet still fails to resolve.

@@ -91,6 +91,11 @@ pub fn analyze_with_options(
         advice: Vec::new(),
         location_less_candidates: Vec::new(),
         skipped: facts.skipped.clone(),
+        message: if facts.no_python_files {
+            Some("No Python files were found.".to_string())
+        } else {
+            None
+        },
         omitted_non_production_entries: 0,
         hidden_unresolved_candidates: 0,
         unresolved_summary: Vec::new(),

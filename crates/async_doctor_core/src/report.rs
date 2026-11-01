@@ -264,6 +264,10 @@ pub struct Report {
     pub location_less_candidates: Vec<Candidate>,
     #[serde(default)]
     pub skipped: Vec<String>,
+    /// Human/agent-facing status when findings are empty for a special reason
+    /// (e.g. no Python files under the scan root). Additive in schema v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
     /// Async entries omitted because they live under tests/docs/examples/… (zero-config).
     /// Always emitted (including `0`) for a stable JSON contract.
     #[serde(default)]
@@ -302,6 +306,7 @@ impl Report {
             advice: Vec::new(),
             location_less_candidates: Vec::new(),
             skipped: Vec::new(),
+            message: None,
             omitted_non_production_entries: 0,
             hidden_unresolved_candidates: 0,
             unresolved_summary: Vec::new(),

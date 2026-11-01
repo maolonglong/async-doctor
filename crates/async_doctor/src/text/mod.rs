@@ -29,7 +29,9 @@ pub struct TextOptions {
 pub fn write_report(report: &Report, opts: TextOptions) -> anyhow::Result<()> {
     let mut out = std::io::stdout().lock();
     write_environment_banner(&mut out, &report.environment)?;
-    if report.findings.is_empty() {
+    if let Some(msg) = &report.message {
+        writeln!(out, "{msg}")?;
+    } else if report.findings.is_empty() {
         write!(out, "No findings.")?;
         let mut parts = Vec::new();
         if opts.suppressed_by_baseline > 0 {
