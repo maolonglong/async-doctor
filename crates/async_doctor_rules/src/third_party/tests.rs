@@ -56,6 +56,54 @@ fn sqlalchemy_async_session_never_fires() {
 }
 
 #[test]
+fn sqlalchemy_non_io_session_methods_never_fire() {
+    let t = BuiltinSinkTable::new();
+    for q in [
+        "sqlalchemy.orm.Session.add",
+        "sqlalchemy.orm.Session.add_all",
+        "sqlalchemy.orm.Session.expunge",
+        "sqlalchemy.orm.Session.expunge_all",
+        "sqlalchemy.orm.Session.expire",
+        "sqlalchemy.orm.Session._is_clean",
+        "sqlalchemy.orm.Session._expunge_states",
+    ] {
+        assert!(t.lookup(q).is_none(), "{q} must not be a sink");
+    }
+    let commit = t.lookup("sqlalchemy.orm.Session.commit").unwrap();
+    assert_eq!(commit.sink_qualname, "sqlalchemy.orm.Session.commit");
+    let get = t.lookup("sqlalchemy.orm.Session.get").unwrap();
+    assert_eq!(get.sink_qualname, "sqlalchemy.orm.Session.get");
+}
+
+#[test]
+fn redis_factory_and_command_labels() {
+    let t = BuiltinSinkTable::new();
+    assert!(t.lookup("redis.Redis.from_url").is_none());
+    assert!(t.lookup("redis.Redis.from_pool").is_none());
+    let get = t.lookup("redis.Redis.get").unwrap();
+    assert_eq!(get.sink_qualname, "redis.Redis.get");
+    let hget = t.lookup("redis.Redis.hget").unwrap();
+    assert_eq!(hget.sink_qualname, "redis.Redis.hget");
+}
+
+#[test]
+fn urllib_request_urlopen_not_urllib3() {
+    let t = BuiltinSinkTable::new();
+    let hit = t.lookup("urllib.request.urlopen").unwrap();
+    assert_eq!(hit.sink_qualname, "urllib.request.urlopen");
+    assert_eq!(hit.rule, RULE_BLOCKING_HTTP);
+    let u3 = t.lookup("urllib3.HTTPConnectionPool.urlopen").unwrap();
+    assert_eq!(u3.rule, RULE_BLOCKING_HTTP);
+    // Family catch-all still labels as urllib3.request for non-exact rows.
+    let family = t.lookup("urllib3.connectionpool.HTTPConnectionPool.urlopen").unwrap();
+    assert!(
+        family.sink_qualname.contains("urllib3"),
+        "{}",
+        family.sink_qualname
+    );
+}
+
+#[test]
 fn openai_async_never_fires() {
     let t = BuiltinSinkTable::new();
     assert!(

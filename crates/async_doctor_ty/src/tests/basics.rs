@@ -344,6 +344,12 @@ fn urllib_urlopen_sink() {
     let report = scan_path(&dir).unwrap();
     assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
     assert_eq!(report.findings[0].rule, "blocking-http");
+    let last = report.findings[0].chain.last().unwrap();
+    assert!(
+        last.resolution.contains("urllib.request.urlopen"),
+        "must label stdlib urlopen, not urllib3: {:?}",
+        last.resolution
+    );
     let _ = fs::remove_dir_all(dir);
 }
 
