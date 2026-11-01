@@ -409,11 +409,15 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 self.local_lambdas.insert(name.to_string(), lam);
                 self.idle_loop_locals.remove(name);
                 self.unbounded_queues.remove(name);
+                self.running_loop_locals.remove(name);
+                self.event_loop_locals.remove(name);
             }
             Expr::Generator(gexpr) => {
                 self.local_genexprs.insert(name.to_string(), gexpr);
                 self.idle_loop_locals.remove(name);
                 self.unbounded_queues.remove(name);
+                self.running_loop_locals.remove(name);
+                self.event_loop_locals.remove(name);
             }
             other => {
                 self.local_lambdas.remove(name);
@@ -424,8 +428,29 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                     self.idle_loop_locals.remove(name);
                 }
                 self.note_queue_binding(name, other);
+                self.note_loop_handle_binding(name, other);
             }
         }
+    }
+
+    fn note_loop_handle_binding(&mut self, name: &str, value: &Expr) {
+        use super::loop_guards::{expr_is_get_event_loop, expr_is_get_running_loop};
+        if expr_is_get_running_loop(value) {
+            self.running_loop_locals.insert(name.to_string());
+            self.event_loop_locals.remove(name);
+            return;
+        }
+        if expr_is_get_event_loop(value) {
+            self.event_loop_locals.insert(name.to_string());
+            self.running_loop_locals.remove(name);
+            return;
+        }
+        // `except RuntimeError: loop = None` keeps get_running_loop provenance.
+        if matches!(value, Expr::NoneLiteral(_)) {
+            return;
+        }
+        self.running_loop_locals.remove(name);
+        self.event_loop_locals.remove(name);
     }
 
     pub(crate) fn analyze_lambda_body(&mut self, lambda: &'a ast::ExprLambda) {

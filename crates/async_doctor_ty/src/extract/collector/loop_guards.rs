@@ -63,23 +63,39 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
     }
 
-    /// `if loop is not None` / truthy `if loop` / `if loop.is_running()` —
-    /// used for early-return classification (`if loop is not None: return`).
+    /// Proven "a running loop is present" test for early-return classification.
+    ///
+    /// Requires provenance: the name must be bound from `get_running_loop()`
+    /// (for `is not None` / truthy tests), or from `get_running_loop()` /
+    /// `get_event_loop()` when testing `.is_running()`. Bare helpers like
+    /// `is_event_loop_running()` still count. Attribute/`self._loop` and
+    /// parameter names without that binding must not suppress nested-event-loop.
     pub(super) fn is_running_loop_present_test_ctx(&self, test: &Expr) -> bool {
-        if self.is_running_loop_test_ctx(test) {
+        // `is_event_loop_running()` / similar helpers (no receiver).
+        if is_running_loop_helper_call(test) {
             return true;
         }
+        // `name.is_running()` — only with get_running_loop / get_event_loop bind.
+        if let Some(name) = is_running_attr_on_name(test)
+            && (self.running_loop_locals.contains(name) || self.event_loop_locals.contains(name))
+        {
+            return true;
+        }
+        // Truthy `if name:` / `if name is not None:` — get_running_loop only.
         match test {
-            Expr::Name(n) => looks_like_loop_name_str(n.id.as_str()),
+            Expr::Name(n) => self.running_loop_locals.contains(n.id.as_str()),
             Expr::Compare(cmp) if cmp.ops.len() == 1 && cmp.operands.len() == 2 => {
                 let op = cmp.ops[0];
                 let left = &cmp.operands[0];
                 let right = &cmp.operands[1];
                 match op {
-                    ast::CmpOp::IsNot | ast::CmpOp::NotEq => {
-                        (looks_like_loop_name(left) && matches!(right, Expr::NoneLiteral(_)))
-                            || (matches!(left, Expr::NoneLiteral(_)) && looks_like_loop_name(right))
-                    }
+                    ast::CmpOp::IsNot | ast::CmpOp::NotEq => match (left, right) {
+                        (Expr::Name(n), Expr::NoneLiteral(_))
+                        | (Expr::NoneLiteral(_), Expr::Name(n)) => {
+                            self.running_loop_locals.contains(n.id.as_str())
+                        }
+                        _ => false,
+                    },
                     _ => false,
                 }
             }
@@ -196,6 +212,62 @@ fn is_running_loop_call(expr: &Expr) -> bool {
             _ => false,
         },
         Expr::Attribute(attr) if attr.attr.as_str() == "is_running" => true,
+        _ => false,
+    }
+}
+
+/// `is_event_loop_running()`-style helpers (not `loop.is_running()`).
+fn is_running_loop_helper_call(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call(call) => match call.func.as_ref() {
+            Expr::Name(n) => is_event_loop_running_helper(n.id.as_str()),
+            Expr::Attribute(attr) if is_event_loop_running_helper(attr.attr.as_str()) => true,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// `name.is_running()` / `name.is_running` → `Some(name)`.
+fn is_running_attr_on_name(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Call(call) => match call.func.as_ref() {
+            Expr::Attribute(attr) if attr.attr.as_str() == "is_running" => {
+                match attr.value.as_ref() {
+                    Expr::Name(n) => Some(n.id.as_str()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        },
+        Expr::Attribute(attr) if attr.attr.as_str() == "is_running" => match attr.value.as_ref() {
+            Expr::Name(n) => Some(n.id.as_str()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `asyncio.get_running_loop()` / bare `get_running_loop()`.
+pub(super) fn expr_is_get_running_loop(expr: &Expr) -> bool {
+    let Expr::Call(call) = expr else {
+        return false;
+    };
+    match call.func.as_ref() {
+        Expr::Name(n) => n.id.as_str() == "get_running_loop",
+        Expr::Attribute(attr) => attr.attr.as_str() == "get_running_loop",
+        _ => false,
+    }
+}
+
+/// `asyncio.get_event_loop()` / bare `get_event_loop()`.
+pub(super) fn expr_is_get_event_loop(expr: &Expr) -> bool {
+    let Expr::Call(call) = expr else {
+        return false;
+    };
+    match call.func.as_ref() {
+        Expr::Name(n) => n.id.as_str() == "get_event_loop",
+        Expr::Attribute(attr) => attr.attr.as_str() == "get_event_loop",
         _ => false,
     }
 }
