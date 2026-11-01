@@ -11,16 +11,19 @@ pass-1 facts across edits while recomputing follow/propagation.
 ## Decision
 
 Do **not** merge incremental per-file caching. Keep the whole-scan report cache
-keyed on first-party content hashes plus executable/schema identity (and the
-existing per-package third-party edge cache). The incremental effort lived on
-https://redirect.github.com/maolonglong/async-doctor/pull/28 (closed unmerged;
-branch kept for history).
+(full key in [`../../ARCHITECTURE.md`](../../ARCHITECTURE.md)) and the existing
+per-package third-party edge cache. The incremental effort lived on
+https://github.com/maolonglong/async-doctor/pull/28 (closed unmerged; branch
+kept for history).
 
-Measured facts from that work: correctness matched full scans on 73 scenarios
-and a 220-edit random differential test, but was slower than `main` on every
-litellm edit (about 23s versus 13–14s; cold about +38%), saved only about 9s on
-a dify leaf edit (17s versus 26s), showed dify cold about +22% and hub edits
-about +42%, and added roughly 5.7k lines plus 22–33MB of cache per project.
+Measured facts from that work: it matched full scans on 73 scenarios and a
+220-edit random differential test on the seeds tried in that PR write-up, but
+at close, random-edit seeds **23** and **1234** still found a correctness bug
+(incremental output did not fully match cold). It was also slower than `main`
+on every litellm edit (about 23s versus 13–14s; cold about +38%), saved only
+about 9s on a dify leaf edit (17s versus 26s), showed dify cold about +22% and
+hub edits about +42%, and added roughly 5.7k lines plus 22–33MB of cache per
+project.
 
 ## Alternatives considered
 

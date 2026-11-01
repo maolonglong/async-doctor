@@ -15,7 +15,7 @@ Do not ship a Claude or Cursor stop hook. Agent integration is the CLI plus a
 thin skill at `skills/async-doctor/SKILL.md` discoverable via
 `npx skills add maolonglong/async-doctor` once the repo is public. README
 documents the skill install and SARIF upload only. See
-https://redirect.github.com/maolonglong/async-doctor/pull/29.
+https://github.com/maolonglong/async-doctor/pull/29.
 
 ## Alternatives considered
 
