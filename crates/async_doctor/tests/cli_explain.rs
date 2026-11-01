@@ -74,7 +74,17 @@ fn json_includes_docs_url_chain_resolution_and_runnable_why() {
         String::from_utf8_lossy(&out.stderr)
     );
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
-    assert_eq!(v["schemaVersion"], 1);
+    assert_eq!(v["schemaVersion"], 2);
+    assert!(v.get("environment").is_some(), "missing environment: {v}");
+    assert!(
+        v["advice"].is_array()
+            && v["skipped"].is_array()
+            && v["sinkSites"].is_array()
+            && v["locationLessCandidates"].is_array()
+            && v["unusedSuppressions"].is_array()
+            && v["unresolvedSummary"].is_array(),
+        "stable top-level arrays required: {v}"
+    );
     let finding = &v["findings"][0];
     assert_eq!(finding["rule"], "blocking-sleep");
     assert_eq!(finding["docsAnchor"], "#blocking-sleep");
@@ -98,9 +108,10 @@ fn json_includes_docs_url_chain_resolution_and_runnable_why() {
     let why = finding["why"].as_str().expect("why");
     assert!(why.starts_with("async-doctor why "), "{why}");
     assert!(why.contains(" --path "), "why must include --path: {why}");
+    let path_arg = why.split(" --path ").nth(1).unwrap_or("");
     assert!(
-        why.contains(dir.to_str().unwrap()) || why.contains(&dir.display().to_string()),
-        "{why}"
+        !path_arg.is_empty() && !path_arg.starts_with('/'),
+        "why must use a relative --path, got {why}"
     );
     // Plain async def entries serialize as async_def, never opaque "other".
     assert_ne!(finding["entry"]["label"], "other");
@@ -117,6 +128,22 @@ fn text_default_is_grouped_expand_lists_all() {
     let grouped = bin().arg(&dir).output().expect("run");
     assert_eq!(grouped.status.code(), Some(1));
     let stdout = String::from_utf8_lossy(&grouped.stdout);
+    assert!(
+        stdout.contains("Environment:"),
+        "must report interpreter/venv: {stdout}"
+    );
+    assert!(
+        stdout.contains("sink site(s)") && stdout.contains("finding(s)"),
+        "summary must lead with sink sites then findings: {stdout}"
+    );
+    // Sink sites come before findings in the lead line.
+    let lead = stdout.lines().find(|l| l.starts_with("Found ")).unwrap();
+    let sink_pos = lead.find("sink site").unwrap();
+    let finding_pos = lead.find("finding").unwrap();
+    assert!(
+        sink_pos < finding_pos,
+        "sink sites must precede findings: {lead}"
+    );
     assert!(
         stdout.contains("fix group") || stdout.contains("sink site"),
         "{stdout}"
