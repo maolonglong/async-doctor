@@ -1,4 +1,4 @@
-"""zipfile/tarfile on BytesIO must stay clean; path archives still report."""
+"""zipfile/tarfile on BytesIO: pure in-memory ops clean; disk-touching still report."""
 
 from __future__ import annotations
 
@@ -21,9 +21,20 @@ async def zip_bytesio_inline_ok():
 
 async def tar_bytesio_ok():
     buf = io.BytesIO()
-    # tarfile.open on a stream (mode w:gz needs a real file often; use w:).
     with tarfile.open(fileobj=buf, mode="w") as tf:
         pass
+
+
+async def zip_bytesio_write_path_blocks():
+    zipfile.ZipFile(io.BytesIO(), "w").write("disk.txt")
+
+
+async def zip_bytesio_extractall_blocks():
+    zipfile.ZipFile(io.BytesIO(b"PK\x05\x06" + b"\x00" * 18)).extractall("/tmp/out")
+
+
+async def tar_bytesio_add_blocks():
+    tarfile.open(fileobj=io.BytesIO(), mode="w").add("disk.txt")
 
 
 async def zip_path_blocks():

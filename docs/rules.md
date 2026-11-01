@@ -40,7 +40,9 @@ Sync HTTP clients (`urllib`, `requests`, sync `httpx` / `urllib3`).
 
 - In-memory buffers (`io.BytesIO` / `StringIO`, including locals bound to them)
   are not file IO: `open`/`Image.open` and `zipfile`/`tarfile` opened on those
-  buffers (plus subsequent receiver ops like `writestr`) stay clean.
+  buffers stay clean for pure in-memory ops (`writestr`/`read`/`namelist`/…).
+  Disk-touching methods on a buffer-backed archive (`write(path)`, `extractall`,
+  `add`, …) still report.
 - `open`/`ZipFile` plus later `read`/`write`/`writestr` on the same call-path
   prefix merge into one finding; `SMTP(...).sendmail(...)` on one line likewise.
 
@@ -54,10 +56,13 @@ waits to workers.
 
 **Notes:**
 
-- Thread-identity off-loop guards drop blocking sites in that branch:
-  `x != threading.get_ident()`, `threading.current_thread() is not
-  threading.main_thread()`, and the complementary else of an on-loop test.
-- `if fut.done(): fut.result()` is treated as non-blocking for that future.
+- Thread-identity off-loop guards drop blocking sites in that branch when the
+  other side looks like a loop-thread id (`loop_thread_id`,
+  `hass.loop_thread_id`, …) compared with `threading.get_ident()`, or
+  `current_thread() is not main_thread()` (and the complementary else of an
+  on-loop test). Arbitrary `owner != get_ident()` compares are not off-loop.
+- `.done()` on the same receiver (name or attribute chain) guards `.result()`
+  in `if`, `and`, and ternary forms.
 
 ## blocking-db
 

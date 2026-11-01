@@ -361,16 +361,24 @@ pub(super) fn merge_same_line_ctor_call_findings(findings: Vec<Finding>) -> Vec<
             continue;
         }
         if let Some(ctors) = absorb_into.get(&i) {
+            // Keep the method sink terminal (comment contract / actionable site).
+            let method_sink = f.chain.pop();
             for &ci in ctors {
                 for step in &ctor_chains[&ci] {
                     if !f
                         .chain
                         .iter()
                         .any(|s| s.file == step.file && s.line == step.line && s.text == step.text)
+                        && method_sink.as_ref().is_none_or(|m| {
+                            !(m.file == step.file && m.line == step.line && m.text == step.text)
+                        })
                     {
                         f.chain.push(step.clone());
                     }
                 }
+            }
+            if let Some(sink) = method_sink {
+                f.chain.push(sink);
             }
         }
         out.push(f);
