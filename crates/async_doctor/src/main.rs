@@ -183,8 +183,8 @@ pub(crate) fn rewrite_why_commands(report: &mut Report, scan_path: &Path) {
             return;
         };
         let loc = rest.split_whitespace().next().unwrap_or(rest);
-        // Location-less advisories are not `file:line` locators.
-        if !loc.contains(':') || loc.starts_with('—') {
+        // Skip empty / non-locator why strings (location-less candidates omit why).
+        if why.is_empty() || !loc.contains(':') {
             return;
         }
         *why = format!("async-doctor why {loc} --path {path_arg}");
@@ -195,9 +195,7 @@ pub(crate) fn rewrite_why_commands(report: &mut Report, scan_path: &Path) {
     for c in &mut report.candidates {
         rewrite(&mut c.why);
     }
-    for c in &mut report.location_less_candidates {
-        rewrite(&mut c.why);
-    }
+    // locationLessCandidates intentionally leave `why` empty (no file:line).
     for a in &mut report.advice {
         rewrite(&mut a.why);
     }

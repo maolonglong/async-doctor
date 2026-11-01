@@ -56,6 +56,9 @@ pub fn cli_path_arg(path: &Path) -> String {
 }
 
 /// Relativize `path` against the current working directory when possible.
+///
+/// Absolute paths canonicalize the *parent* only so a venv's `bin/python`
+/// symlink is not resolved to the base interpreter.
 pub fn relative_to_cwd(path: &Path) -> PathBuf {
     // Prefer the user-supplied relative path as-is (already portable).
     if !path.is_absolute() {
@@ -64,12 +67,38 @@ pub fn relative_to_cwd(path: &Path) -> PathBuf {
         }
         return path.to_path_buf();
     }
-    let abs = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let abs = absolute_keep_leaf(path);
     let Ok(cwd) = std::env::current_dir() else {
         return abs;
     };
     let cwd = cwd.canonicalize().unwrap_or(cwd);
     relative_from(&abs, &cwd)
+}
+
+/// Make `path` absolute without resolving the leaf symlink.
+fn absolute_keep_leaf(path: &Path) -> PathBuf {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => {
+            let parent_abs = parent
+                .canonicalize()
+                .unwrap_or_else(|_| absolute_nofollow(parent));
+            match path.file_name() {
+                Some(name) => parent_abs.join(name),
+                None => parent_abs,
+            }
+        }
+        _ => absolute_nofollow(path),
+    }
+}
+
+fn absolute_nofollow(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    }
 }
 
 /// Compute a relative path from `base` to `path` (both absolute).
@@ -98,14 +127,14 @@ fn relative_from(path: &Path, base: &Path) -> PathBuf {
 /// Relativize an absolute filesystem path for human display when under cwd.
 ///
 /// Paths that would climb out of cwd (e.g. system `/usr/...`) stay absolute so
-/// the environment banner does not print awkward `../usr` forms.
+/// the environment banner does not print awkward `../usr` forms. The leaf
+/// component is never symlink-resolved (venv `bin/python` stays as such).
 pub fn display_fs_path(path: &str) -> String {
-    let rel = relative_to_cwd(Path::new(path));
+    let p = Path::new(path);
+    let rel = relative_to_cwd(p);
     let s = rel.display().to_string().replace('\\', "/");
     if s.starts_with("..") {
-        Path::new(path)
-            .canonicalize()
-            .unwrap_or_else(|_| PathBuf::from(path))
+        absolute_keep_leaf(p)
             .display()
             .to_string()
             .replace('\\', "/")
@@ -142,8 +171,33 @@ mod tests {
             "why --path must not be absolute: {arg}"
         );
         assert!(
-            arg.contains("m1_multihop") || arg == "." || arg.ends_with("m1_multihop"),
-            "{arg}"
+            arg.contains("m1_multihop"),
+            "expected fixtures/m1_multihop-style relative path, got {arg}"
+        );
+    }
+
+    #[test]
+    fn display_fs_path_keeps_venv_python_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let venv_bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&venv_bin).unwrap();
+        let link = venv_bin.join("python");
+        // Point at a real file so is_file/symlink_metadata work.
+        let target = tmp.path().join("real-python");
+        std::fs::write(&target, b"").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        #[cfg(not(unix))]
+        std::fs::copy(&target, &link).unwrap();
+
+        let shown = display_fs_path(link.to_str().unwrap());
+        assert!(
+            shown.contains("bin/python") || shown.ends_with("python"),
+            "must keep venv leaf, not resolve to real-python: {shown}"
+        );
+        assert!(
+            !shown.contains("real-python"),
+            "must not follow symlink: {shown}"
         );
     }
 }

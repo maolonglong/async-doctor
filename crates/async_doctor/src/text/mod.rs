@@ -108,11 +108,25 @@ pub fn write_report(report: &Report, opts: TextOptions) -> anyhow::Result<()> {
             )?;
         }
     }
-    if !report.location_less_candidates.is_empty() {
-        writeln!(out)?;
-        for c in &report.location_less_candidates {
-            writeln!(out, "[{}] {}", c.rule, c.reason)?;
-            writeln!(out, "  fix: {}", c.fix.hint)?;
+    // Location-less unresolved-import aggregates are covered by `environment.note`
+    // when present; avoid printing the same message twice in text.
+    let note = &report.environment.note;
+    let print_location_less = report
+        .location_less_candidates
+        .iter()
+        .any(|c| !(c.rule == "unresolved-import" && !note.is_empty()));
+    if print_location_less {
+        let extras: Vec<_> = report
+            .location_less_candidates
+            .iter()
+            .filter(|c| !(c.rule == "unresolved-import" && !note.is_empty()))
+            .collect();
+        if !extras.is_empty() {
+            writeln!(out)?;
+            for c in extras {
+                writeln!(out, "[{}] {}", c.rule, c.reason)?;
+                writeln!(out, "  fix: {}", c.fix.hint)?;
+            }
         }
     }
     if !report.unused_suppressions.is_empty() {
@@ -129,8 +143,8 @@ pub fn write_report(report: &Report, opts: TextOptions) -> anyhow::Result<()> {
             )?;
         }
     }
-    if !report.environment.note.is_empty() {
-        writeln!(out, "\nnote: {}", report.environment.note)?;
+    if !note.is_empty() {
+        writeln!(out, "\nnote: {note}")?;
     }
     Ok(())
 }
