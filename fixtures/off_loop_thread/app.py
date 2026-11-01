@@ -104,3 +104,12 @@ async def done_guard_attr_if_ok():
     h = Holder()
     if h.x.done():
         return h.x.result()
+
+
+async def done_guard_rebind_still_blocks():
+    """Rebinding `fut` inside `if fut.done():` invalidates the guard."""
+    fut: Future = Future()
+    fut.set_result(1)
+    if fut.done():
+        fut = Future()
+        fut.result()
