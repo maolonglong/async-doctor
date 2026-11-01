@@ -10,8 +10,8 @@ possible.
 
 - [x] Public benchmark harness `bench/run.sh` + `bench/repos.toml`.
 - [x] Results table and method notes in [../../benchmark.md](../../benchmark.md).
-- [x] Parallel pass-2 + jemalloc + content-hash whole-scan warm (https://redirect.github.com/maolonglong/async-doctor/pull/27).
-- [x] PyPI release workflow groundwork / README install (https://redirect.github.com/maolonglong/async-doctor/pull/25).
+- [x] Parallel pass-2 + jemalloc + content-hash whole-scan warm (https://github.com/maolonglong/async-doctor/pull/27).
+- [x] PyPI release workflow groundwork / README install (https://github.com/maolonglong/async-doctor/pull/25).
 - [x] Pre-release robustness and precision PRs #32–#34 merged.
 
 ## Surprises & Discoveries

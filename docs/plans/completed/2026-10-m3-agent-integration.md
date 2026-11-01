@@ -12,9 +12,9 @@ inline ignore, SARIF, and a thin installable skill — without editor stop hooks
 - [x] Inline `# async-doctor: ignore[rule]: <reason>`; unused ignores fail the run.
 - [x] SARIF 2.1.0 reporter.
 - [x] M3a precision corpus fixes ([2026-10-m3a-precision.md](2026-10-m3a-precision.md), [2026-10-m3a-higher-order.md](2026-10-m3a-higher-order.md)).
-- [x] Advice tier + nested-event-loop / offload-coroutine (https://redirect.github.com/maolonglong/async-doctor/pull/30).
-- [x] Skill at `skills/async-doctor/SKILL.md`; stop-hook removed (https://redirect.github.com/maolonglong/async-doctor/pull/29).
-- [x] schemaVersion 2 / environment reporting / sink-first summary (https://redirect.github.com/maolonglong/async-doctor/pull/32).
+- [x] Advice tier + nested-event-loop / offload-coroutine (https://github.com/maolonglong/async-doctor/pull/30).
+- [x] Skill at `skills/async-doctor/SKILL.md`; stop-hook removed (https://github.com/maolonglong/async-doctor/pull/29).
+- [x] schemaVersion 2 / environment reporting / sink-first summary (https://github.com/maolonglong/async-doctor/pull/32).
 
 ## Surprises & Discoveries
 
