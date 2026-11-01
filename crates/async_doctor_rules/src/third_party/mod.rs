@@ -15,6 +15,7 @@ use crate::{BuiltinSink, StdlibSinkTable};
 
 use families::{is_redis_pipeline_buffering, match_family};
 use sinks::THIRD_PARTY_ALIASES;
+pub use families::aws_op_method_name;
 pub use sinks::THIRD_PARTY_SINKS;
 
 /// Combined stdlib + third-party sink table.

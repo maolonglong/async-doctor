@@ -481,11 +481,22 @@ fn sqlalchemy_query_io(q: &str) -> Option<&'static str> {
     }
 }
 
-pub(super) fn method_looks_like_aws_op(q: &str) -> bool {
-    // boto3 dynamic client methods: client.get_object, etc.
-    let Some((_, method)) = q.rsplit_once('.') else {
+/// Sync AWS client/resource API method names (boto3 has no per-op stubs).
+/// Excludes meta helpers (`get_paginator`, `get_waiter`, …) that are not IO.
+pub fn aws_op_method_name(method: &str) -> bool {
+    if matches!(
+        method,
+        "get_paginator"
+            | "get_waiter"
+            | "can_paginate"
+            | "generate_presigned_url"
+            | "meta"
+            | "exceptions"
+            | "waiter_names"
+            | "get_available_subresources"
+    ) {
         return false;
-    };
+    }
     matches!(
         method,
         "get_object"
@@ -514,4 +525,10 @@ pub(super) fn method_looks_like_aws_op(q: &str) -> bool {
         || method.starts_with("delete_")
         || method.starts_with("describe_")
         || method.starts_with("update_")
+}
+
+pub(super) fn method_looks_like_aws_op(q: &str) -> bool {
+    // boto3 dynamic client methods: client.get_object, etc.
+    q.rsplit_once('.')
+        .is_some_and(|(_, method)| aws_op_method_name(method))
 }
