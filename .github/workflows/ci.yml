@@ -33,16 +33,12 @@ jobs:
           components: rustfmt, clippy
 
       # Separate key from `test`: GitHub Actions cache entries are write-once, so
-      # a shared key lets the faster lint job seal an empty/dev-only cache and
-      # the test job can never update it.
+      # a shared key lets the faster lint job seal a dev-only cache and the test
+      # job can never update it with test-profile artifacts.
       - uses: Swatinem/rust-cache@v2
         with:
-          # v2: include workspace crates; new key because GHA cache is write-once.
-          shared-key: ci-lint-v2
-          cache-workspace-crates: true
-          # TEMP: also save from this PR for warm-cache measurement; revert to
-          # main-only before merge. head_ref is set on pull_request.
-          save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'cursor/ci-speed-14fe' }}
+          shared-key: ci-lint
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: cargo fmt
         run: cargo fmt --all -- --check
@@ -69,12 +65,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          # v2: include workspace crates; new key because GHA cache is write-once.
-          shared-key: ci-test-v2
-          cache-workspace-crates: true
-          # TEMP: also save from this PR for warm-cache measurement; revert to
-          # main-only before merge.
-          save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'cursor/ci-speed-14fe' }}
+          shared-key: ci-test
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
@@ -108,8 +100,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-test-v2
-          cache-workspace-crates: true
+          shared-key: ci-test
           save-if: false
 
       - name: Install cargo-nextest
