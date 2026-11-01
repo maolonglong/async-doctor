@@ -32,12 +32,14 @@ jobs:
           toolchain: 1.97.0
           components: rustfmt, clippy
 
+      # Separate key from `test`: GitHub Actions cache entries are write-once, so
+      # a shared key lets the faster lint job seal an empty/dev-only cache and
+      # the test job can never update it.
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci
-          # TEMP: save from this PR once for a real warm-cache measurement.
-          # pull_request refs are refs/pull/N/merge — use head_ref. Revert to
-          # main-only before merge.
+          shared-key: ci-lint
+          # TEMP: also save from this PR for warm-cache measurement; revert to
+          # main-only before merge. head_ref is set on pull_request.
           save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'cursor/ci-speed-14fe' }}
 
       - name: cargo fmt
@@ -65,9 +67,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci
-          # TEMP: save from this PR once for a real warm-cache measurement.
-          # pull_request refs are refs/pull/N/merge — use head_ref. Revert to
+          shared-key: ci-test
+          # TEMP: also save from this PR for warm-cache measurement; revert to
           # main-only before merge.
           save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'cursor/ci-speed-14fe' }}
 
@@ -103,11 +104,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci
-          # TEMP: save from this PR once for a real warm-cache measurement.
-          # pull_request refs are refs/pull/N/merge — use head_ref. Revert to
-          # main-only before merge.
-          save-if: ${{ github.ref == 'refs/heads/main' || github.head_ref == 'cursor/ci-speed-14fe' }}
+          shared-key: ci-test
+          save-if: false
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
