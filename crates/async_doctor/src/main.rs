@@ -68,12 +68,14 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
     };
     let t_start = Instant::now();
     // Absolute so bare `file.py` is not treated as having an empty parent.
+    // Keep the original CLI path for `why --path` so relative inputs (and
+    // symlink leaves) stay short and runnable instead of long `../` climbs.
     let path = resolve_cli_path(&cli.path);
     let mut report = async_doctor_ty::scan_path_with_options(&path, options)
         .with_context(|| format!("failed to scan `{}`", path.display()))?;
     let elapsed = t_start.elapsed();
 
-    rewrite_why_commands(&mut report, &path);
+    rewrite_why_commands(&mut report, &cli.path);
 
     if !report.complete {
         for skipped in &report.skipped {
@@ -87,7 +89,7 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
     } else {
         path.clone()
     };
-    let scan_root = scan_root.canonicalize().unwrap_or(scan_root);
+    let scan_root = dunce::canonicalize(&scan_root).unwrap_or(scan_root);
 
     let suppress_out = suppress::apply(report, &scan_root)?;
     for m in &suppress_out.missing_reason {

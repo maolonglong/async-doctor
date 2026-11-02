@@ -6,6 +6,8 @@ use std::path::{Component, Path, PathBuf};
 ///
 /// Bare relative names like `good.py` have parent `""`, which breaks directory
 /// walks for suppressions. Absolute form makes `parent()` a real directory.
+/// Does not resolve symlinks (so a scan root that is a symlink stays that path
+/// for `why --path` rewriting).
 pub fn resolve_cli_path(path: &Path) -> PathBuf {
     std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
 }
@@ -49,12 +51,24 @@ pub fn paths_equal(a: &str, b: &str) -> bool {
 ///
 /// Prefer a path relative to the process cwd (or the path as given) — never an
 /// absolute machine path, so JSON/`why` stays portable across agents/CI.
+///
+/// When the only relative form would climb out of cwd with a long `../` chain
+/// (common when scanning an absolute symlink from a nested cwd), prefer the
+/// original relative CLI path when available, otherwise a short leaf-preserving
+/// relative form that still names the scan target.
 pub fn cli_path_arg(path: &Path) -> String {
     let display = relative_to_cwd(path);
     let s = if display.as_os_str().is_empty() {
         ".".to_string()
     } else {
         display.display().to_string().replace('\\', "/")
+    };
+    let s = if s.starts_with("..") {
+        // Prefer a compact, runnable relative form: basename of the scan
+        // target when that collapses the climb (symlink leaf / project dir).
+        shorten_climbing_relative(path, &s)
+    } else {
+        s
     };
     if s.chars().any(|c| c.is_whitespace()) {
         format!("\"{s}\"")
@@ -63,10 +77,34 @@ pub fn cli_path_arg(path: &Path) -> String {
     }
 }
 
+/// When `relative` climbs out of cwd, try a shorter relative spelling.
+fn shorten_climbing_relative(path: &Path, relative: &str) -> String {
+    // If the user (or resolve_cli_path) left a symlink leaf, prefer that leaf
+    // name when cwd is the symlink's parent — `link` instead of `../tmp/x/link`.
+    if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
+        let parent_abs = dunce_canonicalize_or_absolute(parent);
+        if let Ok(cwd) = std::env::current_dir() {
+            let cwd = dunce_canonicalize_or_absolute(&cwd);
+            if parent_abs == cwd {
+                return name.to_string_lossy().replace('\\', "/");
+            }
+            // cwd is a child of the symlink's parent: produce a short relative
+            // from cwd up to parent then down to the leaf.
+            let via_parent = relative_from(&parent_abs.join(name), &cwd);
+            let via = via_parent.display().to_string().replace('\\', "/");
+            if via.matches("..").count() < relative.matches("..").count() {
+                return via;
+            }
+        }
+    }
+    relative.to_string()
+}
+
 /// Relativize `path` against the current working directory when possible.
 ///
 /// Absolute paths canonicalize the *parent* only so a venv's `bin/python`
-/// symlink is not resolved to the base interpreter.
+/// symlink is not resolved to the base interpreter. Symlinked scan roots keep
+/// their leaf name so `why --path` does not rewrite to the real target.
 pub fn relative_to_cwd(path: &Path) -> PathBuf {
     // Prefer the user-supplied relative path as-is (already portable).
     if !path.is_absolute() {
@@ -79,7 +117,7 @@ pub fn relative_to_cwd(path: &Path) -> PathBuf {
     let Ok(cwd) = std::env::current_dir() else {
         return abs;
     };
-    let cwd = cwd.canonicalize().unwrap_or(cwd);
+    let cwd = dunce_canonicalize_or_absolute(&cwd);
     relative_from(&abs, &cwd)
 }
 
@@ -87,9 +125,7 @@ pub fn relative_to_cwd(path: &Path) -> PathBuf {
 fn absolute_keep_leaf(path: &Path) -> PathBuf {
     match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => {
-            let parent_abs = parent
-                .canonicalize()
-                .unwrap_or_else(|_| absolute_nofollow(parent));
+            let parent_abs = dunce_canonicalize_or_absolute(parent);
             match path.file_name() {
                 Some(name) => parent_abs.join(name),
                 None => parent_abs,
@@ -99,9 +135,14 @@ fn absolute_keep_leaf(path: &Path) -> PathBuf {
     }
 }
 
+fn dunce_canonicalize_or_absolute(path: &Path) -> PathBuf {
+    dunce::canonicalize(path).unwrap_or_else(|_| absolute_nofollow(path))
+}
+
 fn absolute_nofollow(path: &Path) -> PathBuf {
     if path.is_absolute() {
-        path.to_path_buf()
+        // Strip Windows verbatim prefixes when present without resolving.
+        dunce::simplified(path).to_path_buf()
     } else {
         std::env::current_dir()
             .map(|cwd| cwd.join(path))
@@ -175,12 +216,38 @@ mod tests {
         let abs = cwd.join("fixtures").join("m1_multihop");
         let arg = cli_path_arg(&abs);
         assert!(
-            !arg.starts_with('/'),
-            "why --path must not be absolute: {arg}"
+            !arg.starts_with('/') && !arg.starts_with("\\\\?\\"),
+            "why --path must not be absolute/verbatim: {arg}"
         );
         assert!(
             arg.contains("m1_multihop"),
             "expected fixtures/m1_multihop-style relative path, got {arg}"
+        );
+    }
+
+    #[test]
+    fn cli_path_arg_symlink_leaf_from_parent_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("real_project");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("app.py"), "async def h():\n    return 1\n").unwrap();
+        let link = tmp.path().join("link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        #[cfg(not(unix))]
+        {
+            // No symlink privilege required: just check absolute under parent.
+            std::fs::create_dir_all(&link).unwrap();
+            std::fs::write(link.join("app.py"), "async def h():\n    return 1\n").unwrap();
+        }
+
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        let arg = cli_path_arg(&std::path::absolute(&link).unwrap());
+        std::env::set_current_dir(&prev).unwrap();
+        assert_eq!(
+            arg, "link",
+            "from the symlink parent, why --path should be the leaf name, got {arg}"
         );
     }
 

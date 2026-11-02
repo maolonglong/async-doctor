@@ -27,5 +27,6 @@ not make locality the default.
 ## Guardrail
 
 `crates/async_doctor_ty/src/tests/db_resets.rs` asserts `fresh_empty` stays
-O(1) on a 400-file default-path scan. Benchmark RSS:
-[../benchmark.md](../benchmark.md).
+O(1) on a 400-file default-path scan via `scan_path_counting_fresh_empty`
+(counter reset/read under the hermetic env lock so plain multi-threaded
+`cargo test` cannot race). Benchmark RSS: [../benchmark.md](../benchmark.md).

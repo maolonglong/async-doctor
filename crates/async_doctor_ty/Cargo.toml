@@ -12,6 +12,7 @@ authors.workspace = true
 anyhow = { workspace = true }
 async_doctor_core = { workspace = true }
 async_doctor_rules = { workspace = true }
+dunce = { workspace = true }
 ignore = { workspace = true }
 rayon = { workspace = true }
 ruff_db = { workspace = true }

@@ -59,6 +59,23 @@ pub(crate) fn scan_path_with_cache_budget(
     scan_path_with_options_cache_budget(path, AnalyzeOptions::default(), cache_dir, follow_budget)
 }
 
+/// Test seam: count `fresh_empty` calls for one scan under the hermetic env
+/// lock so parallel `cargo test` threads cannot race the process-global
+/// counter.
+#[cfg(test)]
+pub(crate) fn scan_path_counting_fresh_empty(path: &Path) -> anyhow::Result<(Report, usize)> {
+    crate::hermetic_env::with_clean_venv_env(|| {
+        crate::db::AsyncDoctorDb::reset_fresh_empty_count();
+        let report = scan_path_with_options_cache_budget_inner(
+            path,
+            AnalyzeOptions::default(),
+            None,
+            DEFAULT_FOLLOW_BUDGET,
+        )?;
+        Ok((report, crate::db::AsyncDoctorDb::fresh_empty_count()))
+    })
+}
+
 fn scan_path_with_options_cache_budget(
     path: &Path,
     options: AnalyzeOptions,

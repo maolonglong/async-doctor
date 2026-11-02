@@ -2,7 +2,8 @@
 //!
 //! Installs the bundled `skills/async-doctor/SKILL.md` into a target project's
 //! `.agents/skills/async-doctor/SKILL.md` and creates a relative symlink at
-//! `.claude/skills/async-doctor -> ../../.agents/skills/async-doctor`.
+//! `.claude/skills/async-doctor -> ../../.agents/skills/async-doctor`
+//! (Unix). On Windows (no symlink), installs a directory copy of `SKILL.md`.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -51,8 +52,19 @@ pub fn run_install_skill(target_root: &Path, force: bool) -> anyhow::Result<Exit
         .with_context(|| format!("failed to create `{}`", claude_skills_dir.display()))?;
 
     if is_real_directory(&claude_link) {
+        if is_managed_claude_copy(&claude_link) {
+            // Windows directory-copy install (or a prior copy we own): update
+            // SKILL.md in place. Never delete the directory or other files.
+            update_managed_claude_copy(&claude_link, &agents_skill_dir)?;
+            println!(
+                "installed skill: {} (updated Claude skill copy at {})",
+                skill_file.display(),
+                claude_link.display()
+            );
+            return Ok(ExitCode::from(EXIT_OK as u8));
+        }
         println!(
-            "installed skill: {}; skipped Claude link because `{}` is a real directory (move it aside and re-run to create the symlink — install-skill never deletes unrelated user files)",
+            "installed skill: {}; skipped Claude link because `{}` is a real directory with user content (move it aside and re-run to create the symlink — install-skill never deletes unrelated user files)",
             skill_file.display(),
             claude_link.display()
         );
@@ -77,8 +89,42 @@ fn is_real_directory(path: &Path) -> bool {
     meta.is_dir() && !meta.file_type().is_symlink()
 }
 
+/// A Claude skill path we previously installed as a directory copy: contains
+/// only `SKILL.md` (no extra user files). Safe to update in place.
+fn is_managed_claude_copy(path: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return false;
+    };
+    let mut saw_skill = false;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name == *"SKILL.md" {
+            saw_skill = true;
+            continue;
+        }
+        // Any other entry means user content — do not treat as managed.
+        return false;
+    }
+    saw_skill
+}
+
+fn update_managed_claude_copy(claude_link: &Path, agents_skill_dir: &Path) -> anyhow::Result<()> {
+    std::fs::copy(
+        agents_skill_dir.join("SKILL.md"),
+        claude_link.join("SKILL.md"),
+    )
+    .with_context(|| {
+        format!(
+            "failed to update SKILL.md in managed Claude skill copy `{}`",
+            claude_link.display()
+        )
+    })?;
+    Ok(())
+}
+
 /// True when `.claude/skills/async-doctor` exists and is not already the
-/// expected relative symlink (Unix) or an up-to-date directory copy (Windows).
+/// expected relative symlink (Unix) or an up-to-date managed directory copy
+/// (Windows).
 fn claude_path_conflicts(path: &Path) -> bool {
     let Ok(meta) = std::fs::symlink_metadata(path) else {
         return false;
@@ -94,19 +140,16 @@ fn claude_path_conflicts(path: &Path) -> bool {
     if !meta.is_dir() {
         return true;
     }
-    #[cfg(unix)]
-    {
-        // Real directory (user content or leftover) — never auto-delete.
-        true
-    }
-    #[cfg(not(unix))]
-    {
-        // Windows installs a directory copy; treat identical SKILL.md as OK.
+    if is_managed_claude_copy(path) {
+        // Our Windows directory copy (or equivalent): conflict only when the
+        // copied SKILL.md differs from the bundled text.
         let existing = path.join("SKILL.md");
-        std::fs::read_to_string(existing)
+        return std::fs::read_to_string(existing)
             .map(|c| c != BUNDLED_SKILL_MD)
-            .unwrap_or(true)
+            .unwrap_or(true);
     }
+    // User-created directory with other content — always a conflict.
+    true
 }
 
 /// Remove a symlink or plain file at the Claude skill path. Never deletes a
