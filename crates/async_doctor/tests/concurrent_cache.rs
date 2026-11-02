@@ -78,6 +78,8 @@ fn run_json(bin: &Path, project: &Path, cache: &Path) -> String {
         .args(["--format", "json"])
         .arg(project)
         .env("XDG_CACHE_HOME", cache)
+        .env_remove("VIRTUAL_ENV")
+        .env_remove("CONDA_PREFIX")
         .output()
         .expect("spawn async-doctor");
     assert!(
@@ -117,6 +119,8 @@ fn run_pair(bin: &Path, project: &Path, cache: &Path, widen_race: bool) -> [Stri
         cmd.args(["--format", "json"])
             .arg(project)
             .env("XDG_CACHE_HOME", cache)
+            .env_remove("VIRTUAL_ENV")
+            .env_remove("CONDA_PREFIX")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         #[cfg(debug_assertions)]

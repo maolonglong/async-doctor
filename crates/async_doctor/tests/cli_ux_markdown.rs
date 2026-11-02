@@ -5,7 +5,20 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_async-doctor"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_async-doctor"));
+    cmd.env_remove("VIRTUAL_ENV").env_remove("CONDA_PREFIX");
+    // Isolated cache: caller XDG_CACHE_HOME / prior runs must not affect results.
+    let cache = std::env::temp_dir().join(format!(
+        "async-doctor-test-cache-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::create_dir_all(&cache);
+    cmd.env("XDG_CACHE_HOME", cache);
+    cmd
 }
 
 fn fixture(name: &str) -> PathBuf {
@@ -81,7 +94,10 @@ fn environment_banner_and_json_report_detected_frameworks() {
 
     let sp = root.join(".venv/lib/python3.12/site-packages");
     fs::create_dir_all(sp.join("fastapi-0.115.0.dist-info")).unwrap();
+    fs::create_dir_all(sp.join("starlette-0.38.0.dist-info")).unwrap();
+    // Client libs must not appear under frameworks.
     fs::create_dir_all(sp.join("httpx-0.27.2.dist-info")).unwrap();
+    fs::create_dir_all(sp.join("redis-5.0.0.dist-info")).unwrap();
     fs::write(
         root.join(".venv/pyvenv.cfg"),
         "home = /usr/bin\nversion = 3.12.0\n",
@@ -89,8 +105,6 @@ fn environment_banner_and_json_report_detected_frameworks() {
     .unwrap();
 
     let json_out = bin()
-        .env_remove("VIRTUAL_ENV")
-        .env_remove("CONDA_PREFIX")
         .args(["--format", "json"])
         .arg(root)
         .output()
@@ -102,21 +116,24 @@ fn environment_banner_and_json_report_detected_frameworks() {
         .expect("environment.frameworks array");
     let fw_strs: Vec<&str> = fws.iter().filter_map(|x| x.as_str()).collect();
     assert!(
-        fw_strs.contains(&"fastapi 0.115.0") && fw_strs.contains(&"httpx 0.27.2"),
-        "expected fastapi and httpx in frameworks, got {fw_strs:?}"
+        fw_strs.contains(&"fastapi 0.115.0") && fw_strs.contains(&"starlette 0.38.0"),
+        "expected fastapi and starlette in frameworks, got {fw_strs:?}"
+    );
+    assert!(
+        fw_strs.iter().all(|s| !s.starts_with("httpx") && !s.starts_with("redis")),
+        "client libs must not appear under frameworks, got {fw_strs:?}"
     );
 
-    let text_out = bin()
-        .env_remove("VIRTUAL_ENV")
-        .env_remove("CONDA_PREFIX")
-        .arg(root)
-        .output()
-        .expect("run text");
+    let text_out = bin().arg(root).output().expect("run text");
     assert_eq!(text_out.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&text_out.stdout);
     assert!(
-        stdout.contains("fastapi 0.115.0") && stdout.contains("httpx 0.27.2"),
+        stdout.contains("fastapi 0.115.0") && stdout.contains("starlette 0.38.0"),
         "environment banner must show detected frameworks: {stdout}"
+    );
+    assert!(
+        !stdout.contains("httpx 0.27.2") && !stdout.contains("redis 5.0.0"),
+        "banner must omit client libs: {stdout}"
     );
 }
 

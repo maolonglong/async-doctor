@@ -27,9 +27,9 @@ project.
 
 ## Alternatives considered
 
-- **Merge the v17 pass-1-only incremental file cache (PR #28).** Rejected on
-  wall-clock and complexity: soundness work closed earlier gaps, but hub/edit
-  paths still paid full-extract costs while growing cache size and code.
+- **Merge the pass-1-only incremental file cache.** Rejected on wall-clock and
+  complexity: soundness work closed earlier gaps, but hub/edit paths still paid
+  full-extract costs while growing cache size and code.
 - **Whole-scan cache only (status quo on main).** Accepted: warm unchanged
   inputs skip ty extract/analyze; cold path stays one clear pipeline.
 

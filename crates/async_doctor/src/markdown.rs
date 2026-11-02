@@ -157,13 +157,21 @@ fn write_findings_section(out: &mut impl Write, findings: &[Finding]) -> anyhow:
         entries.insert((f.entry.file.as_str(), f.entry.name.as_str()));
     }
 
+    let entry_s = if entries.len() == 1 { "y" } else { "ies" };
+    let site_s = if sites.len() == 1 { "" } else { "s" };
+    let finding_s = if findings.len() == 1 { "" } else { "s" };
+    let group_s = if groups.len() == 1 { "" } else { "s" };
     writeln!(
         out,
-        "Found **{}** sink site(s) · **{}** finding(s) · **{}** entries · **{}** fix groups\n",
+        "Found **{}** sink site{} · **{}** finding{} · **{}** entr{} · **{}** fix group{}\n",
         sites.len(),
+        site_s,
         findings.len(),
+        finding_s,
         entries.len(),
-        groups.len()
+        entry_s,
+        groups.len(),
+        group_s
     )?;
 
     writeln!(

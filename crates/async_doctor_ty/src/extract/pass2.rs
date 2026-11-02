@@ -65,12 +65,15 @@ pub(crate) fn extract_pass1_one_file(db: &AsyncDoctorDb, spec: &Pass2FileSpec) -
 
 /// Run Pass 1 in parallel across worker threads, returning ordered per-file
 /// outcomes and the warm per-worker Salsa databases for reuse in Pass 2.
+///
+/// Workers keep a single shared `Storage` clone for the whole pass. Periodic
+/// `fresh_empty()` rebuilds were removed from the default path: each rebuild
+/// allocates an independent `Arc<Zalsa>`, and holding retired DBs until the
+/// end of the scan caused unbounded RSS growth on large monorepos.
 pub(crate) fn run_pass1_parallel(
     db: &AsyncDoctorDb,
     files: &[Pass2FileSpec],
 ) -> (Vec<Pass1FileOutcome>, Vec<Pass1Worker>) {
-    const PASS1_WORKER_RESET_INTERVAL: usize = 256;
-
     if files.is_empty() {
         return (Vec::new(), Vec::new());
     }
@@ -86,7 +89,7 @@ pub(crate) fn run_pass1_parallel(
     std::thread::scope(|scope| {
         let mut handles = Vec::with_capacity(nthreads);
         for _ in 0..nthreads {
-            let mut worker_db = db.clone();
+            let worker_db = db.clone();
             let queue = &queue;
             handles.push(scope.spawn(move || {
                 let mut out = Vec::new();
@@ -96,10 +99,6 @@ pub(crate) fn run_pass1_parallel(
                     let Some(i) = i else {
                         break;
                     };
-                    if warm_catalog_indices.len() >= PASS1_WORKER_RESET_INTERVAL {
-                        worker_db = worker_db.fresh_empty();
-                        warm_catalog_indices.clear();
-                    }
                     let outcome = extract_pass1_one_file(&worker_db, &files[i]);
                     if matches!(outcome, Pass1FileOutcome::Ok(_)) {
                         warm_catalog_indices.push(i);
@@ -171,17 +170,17 @@ pub(crate) struct BaseFnPatch {
 /// Run pass 2 in parallel with per-thread DBs reused from pass 1 and affinity
 /// work-stealing so files already parsed in a worker's DB hit cached ASTs.
 ///
-/// Each worker periodically resets its salsa DB (`fresh_empty`) after a bounded
-/// number of files so accumulated `SemanticModel` memos do not grow without
-/// bound on large monorepos.
+/// Default path keeps one Salsa `Storage` per worker for the whole pass (shared
+/// `Arc<Zalsa>` across clones). Periodic `fresh_empty()` rebuilds are reserved
+/// for `ASYNC_DOCTOR_PASS2_BATCH` locality/fixed modes; on the default path they
+/// multiplied independent Zalsa arenas and drove OOM on large monorepos. Panic
+/// recovery still replaces a poisoned DB.
 pub(crate) fn run_pass2_parallel(
     workers: Vec<Pass1Worker>,
     files: &[Pass2FileSpec],
     catalog_to_kept: &[Option<usize>],
     shared: &Pass2Shared,
 ) -> Vec<Pass2FileResult> {
-    const WORKER_DB_RESET_INTERVAL: usize = 160;
-
     if files.is_empty() || workers.is_empty() {
         return Vec::new();
     }
@@ -216,8 +215,6 @@ pub(crate) fn run_pass2_parallel(
             let mut worker_db = worker.db;
             handles.push(scope.spawn(move || {
                 let mut out = Vec::new();
-                let mut local_retired = Vec::new();
-                let mut since_reset = 0usize;
                 loop {
                     let mut next_idx = queues_ref[t].lock().unwrap().pop_front();
                     if next_idx.is_none() {
@@ -233,39 +230,29 @@ pub(crate) fn run_pass2_parallel(
                     let Some(i) = next_idx else {
                         break;
                     };
-                    if since_reset >= WORKER_DB_RESET_INTERVAL {
-                        let fresh = worker_db.fresh_empty();
-                        local_retired.push(std::mem::replace(&mut worker_db, fresh));
-                        since_reset = 0;
-                    }
                     let result = match catch_unwind(AssertUnwindSafe(|| {
                         extract_one_file(&worker_db, &files[i], shared)
                     })) {
-                        Ok(r) => {
-                            since_reset += 1;
-                            r
-                        }
+                        Ok(r) => r,
                         Err(payload) => {
                             // Salsa state may be poisoned — drop memos for the next file.
-                            let fresh = worker_db.fresh_empty();
-                            local_retired.push(std::mem::replace(&mut worker_db, fresh));
-                            since_reset = 0;
+                            worker_db = worker_db.fresh_empty();
                             Pass2FileResult::skipped(&files[i].rel, &panic_message(&payload))
                         }
                     };
                     out.push((i, result));
                 }
-                local_retired.push(worker_db);
-                (out, local_retired)
+                (out, worker_db)
             }));
         }
         for h in handles {
-            let (out, local_retired) = h.join().expect("pass2 worker");
+            let (out, worker_db) = h.join().expect("pass2 worker");
             indexed.extend(out);
-            retired_dbs.extend(local_retired);
+            retired_dbs.push(worker_db);
         }
     });
     if !retired_dbs.is_empty() {
+        // Offload Arc<Zalsa> teardown so the main thread can start follow promptly.
         std::thread::spawn(move || drop(retired_dbs));
     }
 

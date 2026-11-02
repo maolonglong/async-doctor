@@ -35,13 +35,21 @@ pub(super) fn write_grouped(
     let dim = pal.dim;
     // Lead with distinct sink sites (the actionable unit), then findings
     // (entry × sink paths), so totals are not mistaken for site counts.
+    let entry_s = if entries.len() == 1 { "y" } else { "ies" };
+    let site_s = if unique_sites == 1 { "" } else { "s" };
+    let finding_s = if findings.len() == 1 { "" } else { "s" };
+    let group_s = if groups.len() == 1 { "" } else { "s" };
     writeln!(
         out,
-        "{b}Found {} sink site(s) · {} finding(s) · {} entries · {} fix groups{b:#}\n",
+        "{b}Found {} sink site{} · {} finding{} · {} entr{} · {} fix group{}{b:#}\n",
         unique_sites,
+        site_s,
         findings.len(),
+        finding_s,
         entries.len(),
-        groups.len()
+        entry_s,
+        groups.len(),
+        group_s
     )?;
     writeln!(
         out,

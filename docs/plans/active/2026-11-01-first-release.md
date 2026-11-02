@@ -11,9 +11,10 @@ building from source, after pre-release audit fixes and owner confirmation.
 - [x] 2026-11-01: P1 recall fixes (boto3 client/resource calls, `Future.result` / `Executor.map` / `wait`, smtplib/ftplib, zipfile/tarfile, glob/`Path.iterdir`, `input()`, chain-through-sinks, genexpr fan-out) — https://github.com/maolonglong/async-doctor/pull/36.
 - [x] 2026-11-01: PyPI trusted publisher + `pypi` environment configured for the release workflow.
 - [x] 2026-11-01: Removed unlicensed vendored `fast-rust` skill and updated agent docs workflow to v2.
-- [x] 2026-11-01: Investigated and optimized peak memory on large monorepos (`home-assistant/core` peak RSS cut from 6.5 GB to 1.95 GB, wall time from 143s to 33.6s).
+- [x] 2026-11-01: Investigated and optimized peak memory on large monorepos (pass-2 overlay sharing; later release audit found periodic `fresh_empty` rebuilds regress RSS — fixed by removing default-path rebuilds).
 - [x] 2026-11-01: Re-ran corpus audit (`litellm` 4,915/4,915 findings match `c503648` baseline; `home-assistant/core` full scan matches `ha-subset` and adds 2 full-repo findings) and refreshed `docs/benchmark.md`.
 - [x] 2026-11-01: Ran `release.yml` `workflow_dispatch` dry-run (`41321070358`, all 8 wheel/sdist/dry-run jobs green) and verified the built wheel with `uvx` (`byte-identical` JSON on `fixtures/miss-probe`).
+- [x] 2026-11-02: Release-blocker fixes — default-path Salsa rebuild OOM, `anyio.fail_after`/`move_on_after` false positives, `install-skill --force`, hermetic `VIRTUAL_ENV` tests, frameworks/pluralization/`audit_compare` hardening.
 - [ ] Owner confirmation before publish.
 - [ ] Tag/publish 0.1 and verify `uvx async-doctor --version`.
 
@@ -21,12 +22,14 @@ building from source, after pre-release audit fixes and owner confirmation.
 
 - Incremental per-file cache rejected on speed grounds despite correctness
   ([../../decisions/2026-11-01-reject-incremental-file-cache.md](../../decisions/2026-11-01-reject-incremental-file-cache.md)).
-- Home Assistant core (20,329 `.py` files, ~75k functions) previously peaked at
-  6.5 GB RSS and 143s because each pass-2 file cloned the full pass-1
-  `Vec<FunctionFact>` and Salsa memos accumulated across thousands of files per
-  worker. Sharing the pass-1 function slice read-only with sparse mutation indices
-  and periodically resetting `AsyncDoctorDb` cut peak RSS to 1.95 GB and cold wall
-  time to 33.6s with byte-identical output.
+- Sharing the pass-1 function slice read-only across pass-2 workers cut
+  per-file `Vec<FunctionFact>` clone cost. Periodic `fresh_empty()` rebuilds
+  added on top of that later **regressed** peak RSS (independent `Arc<Zalsa>`
+  arenas retained until teardown) and OOMed large monorepos; the default path
+  must keep one Storage per worker
+  ([../../notes/2026-11-salsa-fresh-empty-rss.md](../../notes/2026-11-salsa-fresh-empty-rss.md)).
+- `anyio.fail_after` / `move_on_after` are sync context managers in anyio 4.x;
+  listing them under `sync-with-async-cm` was a false positive.
 
 ## Decision log
 
@@ -42,9 +45,8 @@ metadata is in `pyproject.toml`. Remaining quality debt is listed in
 
 ## Plan of work
 
-1. Confirm GitHub `pypi` environment + trusted publisher against the release workflow.
-2. License or remove `.agents/skills/fast-rust` before making the repo public.
-3. Owner sign-off; then tag `v0.1.0` via the existing release path (humans only — agents do not publish).
+1. Owner sign-off on the release-blocker fixes and refreshed benchmarks.
+2. Tag `v0.1.0` via the existing release path (humans only — agents do not publish).
 
 ## Validation
 

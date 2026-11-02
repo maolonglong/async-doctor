@@ -48,7 +48,7 @@ fn run() -> anyhow::Result<ExitCode> {
             include_non_production,
             show_unresolved,
         }) => help_cmd::run_why(&location, &path, include_non_production, show_unresolved),
-        Some(Command::InstallSkill { path }) => skill_cmd::run_install_skill(&path),
+        Some(Command::InstallSkill { path, force }) => skill_cmd::run_install_skill(&path, force),
         None => run_scan(cli),
     }
 }

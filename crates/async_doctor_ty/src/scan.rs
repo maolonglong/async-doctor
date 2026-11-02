@@ -65,6 +65,24 @@ fn scan_path_with_options_cache_budget(
     cache_dir: Option<&Path>,
     follow_budget: usize,
 ) -> anyhow::Result<Report> {
+    #[cfg(test)]
+    {
+        return crate::hermetic_env::with_clean_venv_env(|| {
+            scan_path_with_options_cache_budget_inner(path, options, cache_dir, follow_budget)
+        });
+    }
+    #[cfg(not(test))]
+    {
+        scan_path_with_options_cache_budget_inner(path, options, cache_dir, follow_budget)
+    }
+}
+
+fn scan_path_with_options_cache_budget_inner(
+    path: &Path,
+    options: AnalyzeOptions,
+    cache_dir: Option<&Path>,
+    follow_budget: usize,
+) -> anyhow::Result<Report> {
     let mut timing = PhaseTiming::from_env();
     let cache_root = effective_cache_root(cache_dir);
 

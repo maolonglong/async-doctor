@@ -5,7 +5,20 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_async-doctor"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_async-doctor"));
+    cmd.env_remove("VIRTUAL_ENV").env_remove("CONDA_PREFIX");
+    // Isolated cache: caller XDG_CACHE_HOME / prior runs must not affect results.
+    let cache = std::env::temp_dir().join(format!(
+        "async-doctor-test-cache-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::create_dir_all(&cache);
+    cmd.env("XDG_CACHE_HOME", cache);
+    cmd
 }
 
 fn fixture(name: &str) -> PathBuf {
@@ -137,11 +150,121 @@ fn install_skill_writes_agents_skill_and_claude_symlink() {
         assert_eq!(target, PathBuf::from("../../.agents/skills/async-doctor"));
     }
 
-    // Re-running install-skill is idempotent.
+    // Re-running install-skill is idempotent when content matches.
     let out_again = bin()
         .args(["install-skill", "--path"])
         .arg(dir.path())
         .output()
         .expect("re-run install-skill");
     assert_eq!(out_again.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&out_again.stdout).contains("installed skill:"),
+        "idempotent re-run should still report install: {}",
+        String::from_utf8_lossy(&out_again.stdout)
+    );
+}
+
+#[test]
+fn install_skill_skips_divergent_skill_without_force() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let skill_dir = dir.path().join(".agents/skills/async-doctor");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    let skill_file = skill_dir.join("SKILL.md");
+    std::fs::write(&skill_file, "user customized skill\n").unwrap();
+
+    let out = bin()
+        .args(["install-skill", "--path"])
+        .arg(dir.path())
+        .output()
+        .expect("run install-skill");
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("skip:") && stdout.contains("--force"),
+        "expected skip message, got: {stdout}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&skill_file).unwrap(),
+        "user customized skill\n",
+        "divergent SKILL.md must be left untouched without --force"
+    );
+    assert!(
+        !dir.path().join(".claude/skills/async-doctor").exists(),
+        "Claude link must not be created when skill install is skipped"
+    );
+}
+
+#[test]
+fn install_skill_force_overwrites_divergent_skill() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let skill_dir = dir.path().join(".agents/skills/async-doctor");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    let skill_file = skill_dir.join("SKILL.md");
+    std::fs::write(&skill_file, "user customized skill\n").unwrap();
+
+    let out = bin()
+        .args(["install-skill", "--force", "--path"])
+        .arg(dir.path())
+        .output()
+        .expect("run install-skill --force");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let content = std::fs::read_to_string(&skill_file).unwrap();
+    assert!(
+        content.starts_with("---\nname: async-doctor\n"),
+        "--force must overwrite divergent SKILL.md"
+    );
+    #[cfg(unix)]
+    {
+        let target = std::fs::read_link(dir.path().join(".claude/skills/async-doctor")).unwrap();
+        assert_eq!(target, PathBuf::from("../../.agents/skills/async-doctor"));
+    }
+}
+
+#[test]
+fn install_skill_never_deletes_real_claude_skill_directory() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let claude_dir = dir.path().join(".claude/skills/async-doctor");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    let user_file = claude_dir.join("NOTES.md");
+    std::fs::write(&user_file, "keep me\n").unwrap();
+
+    let out = bin()
+        .args(["install-skill", "--path"])
+        .arg(dir.path())
+        .output()
+        .expect("run install-skill");
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("skip:") && stdout.contains("real directory"),
+        "expected skip for real directory, got: {stdout}"
+    );
+    assert_eq!(std::fs::read_to_string(&user_file).unwrap(), "keep me\n");
+
+    let out_force = bin()
+        .args(["install-skill", "--force", "--path"])
+        .arg(dir.path())
+        .output()
+        .expect("run install-skill --force");
+    assert_eq!(out_force.status.code(), Some(0));
+    let force_stdout = String::from_utf8_lossy(&out_force.stdout);
+    assert!(
+        force_stdout.contains("never deletes") || force_stdout.contains("real directory"),
+        "force must still refuse to delete user directory: {force_stdout}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&user_file).unwrap(),
+        "keep me\n",
+        "user files under a real .claude/skills/async-doctor directory must survive --force"
+    );
+    let skill = dir.path().join(".agents/skills/async-doctor/SKILL.md");
+    assert!(
+        skill.is_file(),
+        "--force should still write the agents skill file"
+    );
 }

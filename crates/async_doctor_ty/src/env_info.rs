@@ -65,30 +65,21 @@ pub(crate) fn summarize_environment(
     out
 }
 
-/// Known async frameworks and clients worth surfacing in the environment banner.
+/// Async frameworks / runtimes worth surfacing in the environment banner.
+/// Client and database libraries (httpx, redis, sqlalchemy, …) are omitted —
+/// they are dependencies, not frameworks.
 const KNOWN_FRAMEWORKS: &[&str] = &[
-    "aioboto3",
     "aiohttp",
-    "anthropic",
     "anyio",
     "arq",
-    "asyncpg",
     "celery",
     "channels",
     "django",
     "dramatiq",
     "fastapi",
-    "grpcio",
-    "httpx",
     "litestar",
-    "motor",
-    "openai",
-    "psycopg",
-    "pydantic",
     "quart",
-    "redis",
     "sanic",
-    "sqlalchemy",
     "starlette",
     "tornado",
     "trio",

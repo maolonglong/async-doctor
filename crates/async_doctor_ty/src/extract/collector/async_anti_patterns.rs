@@ -39,8 +39,8 @@ pub(super) fn is_known_async_only_cm_qual(qualname: &str) -> bool {
             | "asyncio.timeouts.timeout_at"
             | "asyncio.timeouts.Timeout"
             | "anyio.create_task_group"
-            | "anyio.fail_after"
-            | "anyio.move_on_after"
+            // anyio.fail_after / move_on_after are sync context managers in
+            // anyio 4.x (`__enter__`, no `__aenter__`); `with` is correct.
             | "anyio.Lock"
             | "anyio.Semaphore"
             | "anyio.CapacityLimiter"
