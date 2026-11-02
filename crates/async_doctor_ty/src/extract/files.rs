@@ -118,7 +118,6 @@ pub(crate) fn extract_files(
             })
             .collect();
         let (outcomes, workers) = run_pass1_parallel(&db, &pass1_specs);
-        db = db.fresh_empty();
         let mut kept_specs: Vec<Pass2FileSpec> = Vec::with_capacity(pass1_specs.len());
         let mut catalog_to_kept: Vec<Option<usize>> = vec![None; pass1_specs.len()];
         for (idx, (spec, outcome)) in pass1_specs.into_iter().zip(outcomes).enumerate() {
@@ -165,7 +164,7 @@ pub(crate) fn extract_files(
                     property_defs: &property_defs,
                     followable_extra_roots: &followable_extra_roots,
                 };
-                run_pass2_parallel(workers, &kept_specs, &catalog_to_kept, &shared)
+                run_pass2_parallel(&mut db, workers, &kept_specs, &catalog_to_kept, &shared)
             };
             merge_pass2_results(
                 &mut facts,
@@ -176,6 +175,9 @@ pub(crate) fn extract_files(
                 base_fn_len,
                 results,
             );
+        } else {
+            drop(workers);
+            db = db.fresh_empty();
         }
     } else {
         // Batched / locality mode: sequential Pass 1 + batched Pass 2.

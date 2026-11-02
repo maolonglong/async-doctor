@@ -20,7 +20,7 @@ use ruff_db::system::SystemPathBuf;
 use ruff_python_ast::visitor::Visitor;
 use ty_python_semantic::SemanticModel;
 
-use crate::db::AsyncDoctorDb;
+use crate::db::{AsyncDoctorDb, release_freed_memory};
 use crate::sitepkgs::{FollowTarget, PackageMetaMemo};
 
 use super::collector::CallCollector;
@@ -29,8 +29,25 @@ use super::ctx::{DefKey, FileCtx, TaskTargets};
 use super::functions::{Pass1FileOutcome, collect_functions_standalone};
 use super::panic_util::panic_message;
 
+/// Cap default Pass-1 / Pass-2 worker count. Beyond 8 threads, Salsa shard lock
+/// contention and per-thread allocator magazines add hundreds of MB of RSS with
+/// no wall-time gain.
+const DEFAULT_MAX_PASS_THREADS: usize = 8;
+
+/// Clear `ParsedModule` ASTs across all read files every N files per worker so
+/// third-party `site-packages` ASTs loaded by `semantic_index` do not accumulate.
+const PASS2_AST_CLEAR_INTERVAL: usize = 25;
+
+/// Maximum first-party files processed per shared `Arc<Zalsa>` wave in Pass 2.
+/// Below this threshold (normal repos and the 400-file `db_resets` guardrail),
+/// Pass 2 runs in a single wave with zero intermediate `fresh_empty()` resets.
+/// Above this threshold (large monorepos), coordinated waves drop the completed
+/// wave's `Arc<Zalsa>` completely (refcount = 0) before starting the next wave,
+/// bounding live Salsa `semantic_index` / inference memos to at most one wave.
+const PASS2_WAVE_FILES: usize = 1000;
+
 /// Worker state carried from parallel Pass 1 into parallel Pass 2 so already
-/// parsed `source_text` / `line_index` / `parsed_module` memos stay warm.
+/// parsed `source_text` / `line_index` memos stay warm.
 pub(crate) struct Pass1Worker {
     pub(crate) db: AsyncDoctorDb,
     pub(crate) warm_catalog_indices: Vec<usize>,
@@ -57,10 +74,13 @@ pub(crate) fn extract_pass1_one_file(db: &AsyncDoctorDb, spec: &Pass2FileSpec) -
             .first()
             .map(|e| e.to_string())
             .unwrap_or_else(|| "syntax error".to_string());
+        parsed.module().clear();
         return Pass1FileOutcome::Skipped(format!("{}: {detail}", spec.rel));
     }
     let index = line_index(db, file);
-    Pass1FileOutcome::Ok(collect_functions_standalone(&index, parsed.suite()))
+    let out = collect_functions_standalone(&index, parsed.suite());
+    parsed.module().clear();
+    Pass1FileOutcome::Ok(out)
 }
 
 /// Run Pass 1 in parallel across worker threads, returning ordered per-file
@@ -78,7 +98,7 @@ pub(crate) fn run_pass1_parallel(
         return (Vec::new(), Vec::new());
     }
     let nthreads = std::thread::available_parallelism()
-        .map(|n| n.get())
+        .map(|n| n.get().min(DEFAULT_MAX_PASS_THREADS))
         .unwrap_or(1)
         .min(files.len())
         .max(1);
@@ -168,23 +188,83 @@ pub(crate) struct BaseFnPatch {
 }
 
 /// Run pass 2 in parallel with per-thread DBs reused from pass 1 and affinity
-/// work-stealing so files already parsed in a worker's DB hit cached ASTs.
+/// work-stealing so files already parsed in a worker's DB hit cached sources.
 ///
-/// Default path keeps one Salsa `Storage` per worker for the whole pass (shared
-/// `Arc<Zalsa>` across clones). Periodic `fresh_empty()` rebuilds are reserved
-/// for `ASYNC_DOCTOR_PASS2_BATCH` locality/fixed modes; on the default path they
-/// multiplied independent Zalsa arenas and drove OOM on large monorepos. Panic
-/// recovery still replaces a poisoned DB.
+/// For repos with `<= PASS2_WAVE_FILES` (1,000) files, all workers share one
+/// `Arc<Zalsa>` for the whole pass (zero intermediate `fresh_empty()` resets)
+/// and release it before `follow_third_party`. For larger monorepos, files
+/// (sorted by path locality) are processed in coordinated waves of
+/// `PASS2_WAVE_FILES` where all workers share one `Arc<Zalsa>` per wave and
+/// drop it completely (refcount = 0) before the next wave begins, bounding
+/// live Salsa memos without retaining multiple retired arenas.
 pub(crate) fn run_pass2_parallel(
+    base_db: &mut AsyncDoctorDb,
     workers: Vec<Pass1Worker>,
     files: &[Pass2FileSpec],
     catalog_to_kept: &[Option<usize>],
     shared: &Pass2Shared,
 ) -> Vec<Pass2FileResult> {
     if files.is_empty() || workers.is_empty() {
+        drop(workers);
+        *base_db = base_db.fresh_empty();
         return Vec::new();
     }
     let nthreads = workers.len();
+
+    if files.len() > PASS2_WAVE_FILES {
+        drop(workers);
+        let mut indexed: Vec<(usize, Pass2FileResult)> = Vec::with_capacity(files.len());
+        let all_indices: Vec<usize> = (0..files.len()).collect();
+        for chunk in all_indices.chunks(PASS2_WAVE_FILES) {
+            let queue = Mutex::new(chunk.iter().copied().collect::<VecDeque<_>>());
+            let wave_db_ref = &*base_db;
+            std::thread::scope(|scope| {
+                let mut handles = Vec::with_capacity(nthreads.min(chunk.len()));
+                let queue_ref = &queue;
+                for _ in 0..nthreads.min(chunk.len()) {
+                    let mut worker_db = wave_db_ref.clone();
+                    handles.push(scope.spawn(move || {
+                        let mut out = Vec::new();
+                        let mut count = 0usize;
+                        loop {
+                            let Some(i) = queue_ref.lock().unwrap().pop_front() else {
+                                break;
+                            };
+                            let result = match catch_unwind(AssertUnwindSafe(|| {
+                                extract_one_file(&worker_db, &files[i], shared)
+                            })) {
+                                Ok(r) => r,
+                                Err(payload) => {
+                                    worker_db = worker_db.fresh_empty();
+                                    Pass2FileResult::skipped(
+                                        &files[i].rel,
+                                        &panic_message(&payload),
+                                    )
+                                }
+                            };
+                            out.push((i, result));
+                            count += 1;
+                            if count.is_multiple_of(PASS2_AST_CLEAR_INTERVAL) {
+                                worker_db.clear_all_parsed_modules();
+                            }
+                        }
+                        worker_db.clear_all_parsed_modules();
+                        drop(worker_db);
+                        out
+                    }));
+                }
+                for h in handles {
+                    indexed.extend(h.join().expect("pass2 wave worker"));
+                }
+            });
+            let next_db = base_db.fresh_empty();
+            *base_db = next_db;
+            release_freed_memory();
+        }
+        indexed.sort_by_key(|(i, _)| *i);
+        return indexed.into_iter().map(|(_, r)| r).collect();
+    }
+
     let mut worker_deques: Vec<VecDeque<usize>> = vec![VecDeque::new(); nthreads];
     let mut assigned = vec![false; files.len()];
     for (t, w) in workers.iter().enumerate() {
@@ -207,7 +287,6 @@ pub(crate) fn run_pass2_parallel(
     let queues: Vec<Mutex<VecDeque<usize>>> = worker_deques.into_iter().map(Mutex::new).collect();
     let mut indexed: Vec<(usize, Pass2FileResult)> = Vec::with_capacity(files.len());
 
-    let mut retired_dbs: Vec<AsyncDoctorDb> = Vec::with_capacity(nthreads);
     std::thread::scope(|scope| {
         let mut handles = Vec::with_capacity(nthreads);
         let queues_ref = &queues;
@@ -215,6 +294,7 @@ pub(crate) fn run_pass2_parallel(
             let mut worker_db = worker.db;
             handles.push(scope.spawn(move || {
                 let mut out = Vec::new();
+                let mut count = 0usize;
                 loop {
                     let mut next_idx = queues_ref[t].lock().unwrap().pop_front();
                     if next_idx.is_none() {
@@ -241,20 +321,24 @@ pub(crate) fn run_pass2_parallel(
                         }
                     };
                     out.push((i, result));
+                    count += 1;
+                    if count.is_multiple_of(PASS2_AST_CLEAR_INTERVAL) {
+                        worker_db.clear_all_parsed_modules();
+                    }
                 }
-                (out, worker_db)
+                worker_db.clear_all_parsed_modules();
+                drop(worker_db);
+                out
             }));
         }
         for h in handles {
-            let (out, worker_db) = h.join().expect("pass2 worker");
+            let out = h.join().expect("pass2 worker");
             indexed.extend(out);
-            retired_dbs.push(worker_db);
         }
     });
-    if !retired_dbs.is_empty() {
-        // Offload Arc<Zalsa> teardown so the main thread can start follow promptly.
-        std::thread::spawn(move || drop(retired_dbs));
-    }
+    let next_db = base_db.fresh_empty();
+    *base_db = next_db;
+    release_freed_memory();
 
     indexed.sort_by_key(|(i, _)| *i);
     indexed.into_iter().map(|(_, r)| r).collect()
@@ -410,6 +494,8 @@ pub(crate) fn extract_one_file(
             new_def_keys.push((key.clone(), idx - base_len));
         }
     }
+
+    parsed.module().clear();
 
     Pass2FileResult {
         new_functions,
@@ -637,4 +723,5 @@ pub(crate) fn visit_one_file_shared(
     for stmt in parsed.suite() {
         visitor.visit_stmt(stmt);
     }
+    parsed.module().clear();
 }

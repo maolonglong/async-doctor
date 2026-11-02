@@ -64,10 +64,12 @@ impl AsyncDoctorDb {
             files: Files::default(),
             system,
             vendored,
-            rule_selection: Arc::new(RuleSelection::from_registry(default_lint_registry())),
-            // Infer unannotated returns so typed receivers like `self.client.get()` resolve.
+            rule_selection: Arc::new(RuleSelection::default()),
+            // Infer unannotated returns so typed receivers like `self.client.get()` resolve;
+            // skip `# type: ignore` comment parsing since async-doctor never emits ty diagnostics.
             analysis_settings: Arc::new(AnalysisSettings {
                 return_type_inference: ty_python_semantic::ReturnTypeInference::Always,
+                respect_type_ignore_comments: false,
                 ..AnalysisSettings::default()
             }),
             program_settings: ProgramSettings::empty(ty_vendored::file_system()),
@@ -159,7 +161,7 @@ impl AsyncDoctorDb {
         let db = Self {
             storage: salsa::Storage::new(None),
             files: Files::default(),
-            system: self.system.clone(),
+            system: self.system.fresh(),
             vendored: self.vendored.clone(),
             rule_selection: Arc::clone(&self.rule_selection),
             analysis_settings: Arc::clone(&self.analysis_settings),
@@ -198,6 +200,35 @@ impl AsyncDoctorDb {
             .filter(|r| !std::path::Path::new(r.as_str()).starts_with(project))
             .cloned()
             .collect()
+    }
+
+    /// Clear `ParsedModule` ASTs for all system files read so far on this DB.
+    ///
+    /// Salsa's `parsed_module` LRU only evicts across revisions, not within a
+    /// single scan revision. `ParsedModule::clear` drops the `IndexedModule`
+    /// behind its `ArcSwapOption` without invalidating `AstNodeRef` indices.
+    pub(crate) fn clear_all_parsed_modules(&self) {
+        let paths = self.system.snapshot_read_paths();
+        let py_ver = self.program_settings.python_version.version;
+        for p in paths {
+            if let Some(file) = self.files.try_system(self, &p) {
+                let pf = ruff_db::PythonFile::new(self, file, py_ver);
+                ruff_db::parsed::parsed_module(self, pf).clear();
+            }
+        }
+        release_freed_memory();
+    }
+}
+
+/// Hint the platform allocator to mark freed magazine pages reusable after bulk
+/// AST or Salsa arena drops.
+pub(crate) fn release_freed_memory() {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        unsafe extern "C" {
+            fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+        }
+        malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
     }
 }
 
@@ -301,8 +332,10 @@ impl SourceDb for AsyncDoctorDb {
 
 #[salsa::db]
 impl ty_python_core::Db for AsyncDoctorDb {
-    fn should_check_file(&self, file: File) -> bool {
-        !file.path(self).is_vendored_path()
+    fn should_check_file(&self, _file: File) -> bool {
+        // async-doctor only queries SemanticModel types/definitions; returning
+        // false skips ty's post-inference lint checks and diagnostic allocations.
+        false
     }
 }
 

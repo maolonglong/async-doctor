@@ -24,25 +24,27 @@ targets and these tables.
 
 | Corpus | Commit | Scan | Files | Findings | Candidates | Cold | Warm | Peak RSS | Identical |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| litellm | `5029d027a1b6` | `litellm/` | 3009 | 4915 | 352 | 15.3s | 0.14s | 2.13 GiB | yes |
-| httpx | `b5addb64f016` | `httpx/` | 23 | 0 | 0 | 0.22s | 0.01s | 92 MiB | yes |
-| starlette | `2745bbc5afa2` | `starlette/` | 36 | 2 | 0 | 0.23s | 0.01s | 94 MiB | yes |
+| litellm | `5029d027a1b6` | `litellm/` | 3009 | 5227 | 7421 | 8.40s | 0.38s | 1.11 GiB | yes |
+| open-webui | `f7ac7ee10962` | `backend/` | 290 | 33 | 31 | 4.55s | 0.09s | 1.00 GiB | yes |
+| httpx | `b5addb64f016` | `httpx/` | 23 | 0 | 0 | 0.11s | 0.01s | 101 MiB | yes |
+| starlette | `2745bbc5afa2` | `starlette/` | 36 | 2 | 0 | 0.11s | 0.01s | 108 MiB | yes |
+| fastapi | `79cab5bed28b` | `fastapi/` | 52 | 0 | 3 | 0.54s | 0.01s | 182 MiB | yes |
 
 ### litellm history (parallel pass-2 + whole-scan warm)
 
 | | Cold | Warm | Peak RSS | Findings | Candidates | Cold==Warm |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
 | **Before** (`f6f249e`) | 41.1s | 44.9s | 2.11 GiB | 4491 | 739 | yes |
-| **After** (default parallel, this VM) | 15.3s | 0.14s | 2.13 GiB | 4915 | 352 | yes |
+| **Parallel pass-2** (`c503648`) | 15.3s | 0.14s | 2.13 GiB | 4915 | 352 | yes |
+| **Recall + AST clear + waves** (current) | 8.40s | 0.38s | 1.11 GiB | 5227 | 7421 | yes |
 
-Cold JSON finding **ids** match the `c503648` audit baseline on litellm (4915).
 Warm ≪ cold via the whole-scan report cache (content-hash keyed). Default
-pass-2 uses **parallel per-thread salsa DB clones** that keep one shared
-`Storage` for the whole pass (no periodic `fresh_empty` rebuilds — those
-regressed RSS; see
+pass-2 caps workers at 8, clears `ParsedModule` ASTs after per-file visits and
+every 25 files per worker, and runs in coordinated 1,000-file Salsa waves that
+drop the completed wave's shared `Arc<Zalsa>` before starting the next (see
 [notes/2026-11-salsa-fresh-empty-rss.md](notes/2026-11-salsa-fresh-empty-rss.md)).
-Set `ASYNC_DOCTOR_PASS2_BATCH=N` or `locality` to trade wall time for lower
-peak RSS.
+Set `ASYNC_DOCTOR_PASS2_BATCH=N` or `locality` to override wave sizing with
+serial batched resets.
 
 ### Where warm time went (package-cache-only warm)
 
@@ -77,17 +79,22 @@ starlette surfaces two `concurrent.futures.Future.result()` calls inside
 `testclient.py`; litellm exercises site-packages follow and third-party rules
 under a real uv venv.
 
-### Large monorepo memory (this VM, 2 Nov 2026)
+### Large monorepo memory (2 Nov 2026)
 
-Default path (no `ASYNC_DOCTOR_PASS2_BATCH`) after removing periodic Salsa
-rebuilds:
+Default path (no `ASYNC_DOCTOR_PASS2_BATCH`) with `ParsedModule::clear` and
+coordinated 1,000-file Pass-2 waves:
 
 - **`litellm/` package subdirectory** (`5029d027a1b6`, harness walk **3009**
-  `.py` files, with venv): **15.3 s** cold / **0.14 s** warm at **2.13 GiB**
-  peak RSS, **4915** findings / **352** candidates, cold==warm.
+  `.py` files, with venv): **8.40 s** cold / **0.38 s** warm at **1.11 GiB**
+  peak RSS (down from **2.30 GiB** before AST clearing and wave releases),
+  **5227** findings / **7421** candidates, cold==warm.
+- **`open-webui/` backend subdirectory** (`f7ac7ee10962`, harness walk **290**
+  `.py` files, with venv): **4.55 s** cold / **0.09 s** warm at **1.00 GiB**
+  peak RSS (down from **1.54 GiB**), **33** findings / **31** candidates,
+  cold==warm.
 - **`home-assistant/core`** (tip `586a6633`, walk **20,337** `.py` files, with
-  venv): completes in **~38 s** cold at **~5.8 GiB** peak RSS (on `56e3fcf` the
-  same corpus was OOM-killed above 8 GiB under periodic Salsa rebuilds),
+  venv): completes in **~38 s** cold (on `56e3fcf` the same corpus was
+  OOM-killed above 8 GiB under uncoordinated per-worker Salsa rebuilds),
   reporting 5 findings. Prefer a package subdirectory when scanning monorepos
   if memory is tight.
 

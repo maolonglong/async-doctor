@@ -19,12 +19,25 @@ use crate::encoding::decode_python_source;
 #[derive(Debug, Clone)]
 pub struct DoctorSystem {
     inner: OsSystem,
+    read_paths: std::sync::Arc<std::sync::Mutex<Vec<SystemPathBuf>>>,
 }
 
 impl DoctorSystem {
     pub fn new(cwd: impl AsRef<SystemPath>) -> Self {
         Self {
             inner: OsSystem::new(cwd),
+            read_paths: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    pub(crate) fn snapshot_read_paths(&self) -> Vec<SystemPathBuf> {
+        self.read_paths.lock().unwrap().clone()
+    }
+
+    pub(crate) fn fresh(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            read_paths: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -53,7 +66,11 @@ impl System for DoctorSystem {
     }
 
     fn read_to_string(&self, path: &SystemPath) -> Result<String> {
-        Self::read_decoded(path.as_std_path())
+        let res = Self::read_decoded(path.as_std_path());
+        if res.is_ok() {
+            self.read_paths.lock().unwrap().push(path.to_path_buf());
+        }
+        res
     }
 
     fn read_to_notebook(&self, path: &SystemPath) -> std::result::Result<Notebook, NotebookError> {

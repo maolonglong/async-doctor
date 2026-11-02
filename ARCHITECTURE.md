@@ -53,13 +53,15 @@ reports (`env_info.rs`), and twin resolution against the scanned venv
 (`twin_resolve.rs`).
 
 `extract/`: path discovery (`files.rs`, `path.rs`), pass-1 function collection
-(`functions.rs`), pass-2 typed edges (`pass2.rs` — default parallel per-thread
-Salsa clones that keep one shared `Storage` for the whole pass, with a shared
-read-only pass-1 function slice overlay; periodic `fresh_empty` only in
-`ASYNC_DOCTOR_PASS2_BATCH` modes), per-file `CallCollector` (`extract/collector/`),
-and third-party follow with budget (`follow.rs`). Package cache: `cache.rs`.
-Whole-scan report cache: `scan_cache.rs`. Site-packages helpers: `sitepkgs/`.
-See [docs/notes/2026-11-salsa-fresh-empty-rss.md](docs/notes/2026-11-salsa-fresh-empty-rss.md).
+(`functions.rs`), pass-2 typed edges (`pass2.rs` — default parallel path caps
+workers at 8, clears `ParsedModule` ASTs after per-file visits and every 25
+files per worker, and runs in coordinated 1,000-file waves where all workers
+share one `Storage` per wave and drop it to refcount 0 between waves, with a
+shared read-only pass-1 function slice overlay), per-file `CallCollector`
+(`extract/collector/`), and third-party follow with budget (`follow.rs`).
+Package cache: `cache.rs`. Whole-scan report cache: `scan_cache.rs`.
+Site-packages helpers: `sitepkgs/`. See
+[docs/notes/2026-11-salsa-fresh-empty-rss.md](docs/notes/2026-11-salsa-fresh-empty-rss.md).
 
 **Architecture invariant:** no ty/ruff types cross into `async_doctor_core`;
 only plain `ProjectFacts` / `Report` values leave this crate.
@@ -183,10 +185,12 @@ surface as exit 2 from the CLI.
 ### Performance
 
 Targets and measured corpora: `docs/benchmark.md`. Warm path relies on the
-whole-scan cache; package cache only skips third-party re-parse. Optional
-`ASYNC_DOCTOR_PASS2_BATCH=N` / `locality` trades wall time for lower peak RSS
-(batched resets); the default parallel path does not periodically rebuild
-Salsa DBs. `ASYNC_DOCTOR_TIMING=1` prints phase spans on stderr.
+whole-scan cache; package cache only skips third-party re-parse. The default
+parallel pass 2 bounds memory via explicit `ParsedModule::clear` calls and
+coordinated 1,000-file Salsa waves (dropping the completed wave's shared
+`Arc<Zalsa>` before starting the next). Optional
+`ASYNC_DOCTOR_PASS2_BATCH=N` / `locality` overrides wave sizing with serial
+batched resets. `ASYNC_DOCTOR_TIMING=1` prints phase spans on stderr.
 
 ### Observability
 
