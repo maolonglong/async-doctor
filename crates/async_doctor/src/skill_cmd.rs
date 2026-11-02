@@ -91,20 +91,21 @@ fn claude_path_conflicts(path: &Path) -> bool {
     if meta.is_file() {
         return true;
     }
-    if meta.is_dir() {
-        #[cfg(unix)]
-        {
-            true
-        }
-        #[cfg(not(unix))]
-        {
-            let existing = path.join("SKILL.md");
-            std::fs::read_to_string(existing)
-                .map(|c| c != BUNDLED_SKILL_MD)
-                .unwrap_or(true)
-        }
-    } else {
+    if !meta.is_dir() {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        // Real directory (user content or leftover) — never auto-delete.
         true
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows installs a directory copy; treat identical SKILL.md as OK.
+        let existing = path.join("SKILL.md");
+        std::fs::read_to_string(existing)
+            .map(|c| c != BUNDLED_SKILL_MD)
+            .unwrap_or(true)
     }
 }
 

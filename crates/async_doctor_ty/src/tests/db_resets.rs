@@ -35,7 +35,11 @@ fn default_parallel_path_bounds_fresh_empty_calls() {
     let report = scan_path(&dir).expect("scan");
     let resets = AsyncDoctorDb::fresh_empty_count();
 
-    assert!(report.complete, "scan should complete: skipped={:?}", report);
+    assert!(
+        report.complete,
+        "scan should complete: skipped={:?}",
+        report
+    );
     // One post-pass-1 rebuild is expected; allow a small cushion for panic-free
     // follow that does nothing. The old intervals would exceed ~400/160 ≈ 2
     // per worker × N workers ≫ 8.
