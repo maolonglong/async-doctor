@@ -6,7 +6,7 @@ description: >-
   full audit. Detects sync/blocking IO reachable from async def (sleep, HTTP,
   DB, file, subprocess, locks), nested event-loop runners, offloaded async defs,
   and non-blocking offload-twin advice. Use explain/why to fix findings and advice.
-version: "1.1.0"
+version: "1.2.0"
 ---
 
 # async-doctor
@@ -25,12 +25,13 @@ resolve — without it, findings silently drop because site-packages follow cann
 see project dependencies. Then run:
 
 ```bash
-async-doctor --changed
+uvx async-doctor --changed
 ```
 
-Once published to PyPI, the same command works as `uvx async-doctor --changed`
-(see README install). Until then, use a wheel/`cargo install` build or an
-already-installed `async-doctor` on `PATH`.
+(`uvx` fetches the package from PyPI; an already-installed `async-doctor` on
+`PATH` works the same.) `--changed` reports only findings whose async entry or
+a chain hop line touches lines changed since the merge-base, including
+uncommitted and untracked files — it is a regression check, not a full audit.
 
 Fix every **finding** before finishing. Candidates and advice do not fail the
 exit code; findings do.
@@ -45,9 +46,13 @@ exit code; findings do.
 
 ```bash
 async-doctor .
-async-doctor --format json .
-async-doctor --expand .   # show all advice (default text caps the list)
+async-doctor --format json --max-findings 50 .  # cap each list; sinkSites/score stay full
+async-doctor --expand .                         # show all advice (default text caps the list)
 ```
+
+For agents reading JSON, prefer `--format json --max-findings 50` — it bounds
+the payload while `omittedFindings`/`omittedCandidates`/`omittedAdvice` record
+what was cut.
 
 JSON includes `environment` (interpreter/venv/site-packages) and additive
 `advice[]` (`schemaVersion` 2). Advice never changes the exit code. SARIF maps

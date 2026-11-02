@@ -31,5 +31,5 @@ possible.
 ## Outcomes & Retrospective
 
 Benchmark + packaging groundwork landed. First PyPI publish is tracked by the
-active [../active/2026-11-01-first-release.md](../active/2026-11-01-first-release.md)
+active [2026-11-01-first-release.md](2026-11-01-first-release.md)
 plan (recall P1s, trusted publisher, fast-rust license, owner confirmation).

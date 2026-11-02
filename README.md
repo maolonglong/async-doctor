@@ -10,7 +10,6 @@ runtime probing, no Trio-only / gevent-eventlet modelling) live in
 ## Install
 
 ```bash
-# Once published to PyPI:
 uvx async-doctor .
 pipx run async-doctor .
 pip install async-doctor && async-doctor .
@@ -113,8 +112,7 @@ jobs:
       - name: Run async-doctor
         run: |
           source .venv/bin/activate
-          # Once published to PyPI: uvx async-doctor …
-          async-doctor --format sarif . > async-doctor.sarif || true
+          uvx async-doctor --format sarif . > async-doctor.sarif || true
       - uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: async-doctor.sarif
@@ -122,13 +120,13 @@ jobs:
 
 ## Large repositories / memory
 
-On this Cloud VM (Linux x86_64, 4 cores, 15 GiB RAM), the `litellm/` package
-subdirectory (**3009** `.py` files, with venv) cold-scans in about **15 s** at
-**~2.1 GiB** peak RSS. Full `home-assistant/core` (~20k `.py` files) completes
-around **~38 s** / **~5.8 GiB**. Prefer a package subdirectory
-(`async-doctor path/to/pkg`) when memory is tight. Warm runs reuse the
-whole-scan cache when inputs are unchanged. See
-[docs/benchmark.md](docs/benchmark.md).
+On a 4-core Cloud VM (Linux x86_64), the `litellm/` package subdirectory
+(**3009** `.py` files, with venv) cold-scans in about **8.40 s** at
+**~1.11 GiB** peak RSS — see [docs/benchmark.md](docs/benchmark.md) for all
+corpora. Prefer a package subdirectory (`async-doctor path/to/pkg`) when memory
+is tight, and `--max-findings N` when the JSON payload is what matters (litellm
+shrinks from ~38 MB to <1 MB at N=50 while score/sinkSites stay full-report).
+Warm runs reuse the whole-scan cache when inputs are unchanged.
 
 ## Benchmark
 
@@ -141,12 +139,11 @@ Public cold/warm numbers on pinned asyncio corpora:
 # Built-in zero-Node installer (writes .agents/skills/async-doctor/SKILL.md + .claude/skills symlink):
 async-doctor install-skill --path .
 
-# Or via Node skills CLI once the repo is public:
+# Or via Node skills CLI:
 npx skills add maolonglong/async-doctor
 ```
 
-Works once the repo is public. For GitHub code scanning, see the SARIF workflow
-above.
+For GitHub code scanning, see the SARIF workflow above.
 
 ## License
 

@@ -16,8 +16,9 @@ building from source, after pre-release audit fixes and owner confirmation.
 - [x] 2026-11-01: Ran `release.yml` `workflow_dispatch` dry-run (`41321070358`, all 8 wheel/sdist/dry-run jobs green) and verified the built wheel with `uvx` (`byte-identical` JSON on `fixtures/miss-probe`).
 - [x] 2026-11-02: Release-blocker fixes — default-path Salsa rebuild OOM, `anyio.fail_after`/`move_on_after` false positives, `install-skill --force`, hermetic `VIRTUAL_ENV` tests, frameworks/pluralization/`audit_compare` hardening.
 - [x] 2026-11-02: Pre-release recall & health-score polish — follow project constructors (`__init__`, `__post_init__`, `__new__`, inherited `__init__`, `super().__init__`, `@classmethod` `cls(...)`), add `pathlib.Path.mkdir`/`unlink`/`rename`/`touch` and `importlib.resources` `Traversable` sinks, follow `@functools.cache`/`@lru_cache` helpers, redesign `Report::compute_score` with log-weighted sink-site and entry-spread penalties, and attribute merged `open`+`write` `sinkSites` to the `open` hop.
-- [ ] Owner confirmation before publish.
-- [ ] Tag/publish 0.1 and verify `uvx async-doctor --version`.
+- [x] Owner confirmation before publish (2026-11-02).
+- [x] Tag/publish 0.1 and verify `uvx async-doctor --version` (2026-11-02:
+  `uvx async-doctor@0.1.0 --version` resolves from PyPI).
 
 ## Surprises & Discoveries
 
