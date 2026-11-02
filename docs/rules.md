@@ -141,10 +141,14 @@ awaited, so the work never runs.
 
 A synchronous `with` statement enters an async-only context manager
 (`httpx.AsyncClient`, `aiohttp.ClientSession`, `asyncio.Lock` / `Semaphore` /
-`Condition` / `TaskGroup` / `timeout`, `sqlalchemy.ext.asyncio.AsyncSession` /
-`AsyncEngine.begin`, `aioboto3.Session.client`, `redis.asyncio.Redis.pipeline`,
-or a project class that defines `__aenter__` without `__enter__`). Entering an
-async-only context manager with sync `with` raises `TypeError` at runtime.
+`Condition` / `TaskGroup` / `timeout`, `anyio.Lock` / `Semaphore` /
+`Condition` / `CapacityLimiter` / `create_task_group`,
+`sqlalchemy.ext.asyncio.AsyncSession` / `AsyncEngine.begin`,
+`aioboto3.Session.client`, `redis.asyncio.Redis.pipeline`, or a project class
+that defines `__aenter__` without `__enter__`). Entering an async-only context
+manager with sync `with` raises `TypeError` at runtime. Sync anyio timeouts
+(`fail_after`, `move_on_after`) are not flagged — they expose `__enter__` and
+`with` is correct.
 
 **Fix:** replace `with ...:` with `async with ...:`.
 

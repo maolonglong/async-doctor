@@ -116,5 +116,10 @@ pub enum Command {
         /// Target project directory (default: current directory).
         #[arg(long, default_value = ".")]
         path: PathBuf,
+        /// Overwrite an existing SKILL.md that differs from the bundled copy,
+        /// and replace a stale Claude skill symlink/file. Never deletes a real
+        /// directory of user files under `.claude/skills/async-doctor`.
+        #[arg(long)]
+        force: bool,
     },
 }

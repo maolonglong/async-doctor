@@ -147,9 +147,15 @@ impl AsyncDoctorDb {
 
     /// New empty salsa storage with the same search paths / settings.
     ///
-    /// Used to bound peak RSS across pass-2 batches: drop a saturated DB and
-    /// continue with a fresh one without re-running environment discovery.
+    /// Used after pass 1 (release the discovery DB before follow), on pass-2
+    /// panic recovery, between `ASYNC_DOCTOR_PASS2_BATCH` chunks, and during
+    /// third-party follow. Do **not** call this periodically on the default
+    /// parallel path: each call allocates a new `Arc<Zalsa>`, and retaining
+    /// retired DBs multiplies peak RSS (see
+    /// `docs/notes/2026-11-salsa-fresh-empty-rss.md`).
     pub(crate) fn fresh_empty(&self) -> Self {
+        #[cfg(test)]
+        FRESH_EMPTY_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let db = Self {
             storage: salsa::Storage::new(None),
             files: Files::default(),
@@ -341,5 +347,20 @@ impl ty_python_semantic::Db for AsyncDoctorDb {
 
     fn dyn_clone(&self) -> Box<dyn ty_python_semantic::Db> {
         Box::new(self.clone())
+    }
+}
+
+#[cfg(test)]
+static FRESH_EMPTY_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+impl AsyncDoctorDb {
+    /// Test seam: how many times [`Self::fresh_empty`] ran in this process.
+    pub(crate) fn fresh_empty_count() -> usize {
+        FRESH_EMPTY_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn reset_fresh_empty_count() {
+        FRESH_EMPTY_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
     }
 }

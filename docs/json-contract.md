@@ -10,7 +10,7 @@ CLI flags: [cli.md](cli.md).
 | `schemaVersion` | integer; bump on breaking changes (currently **2**) |
 | `complete` | false on timeout / parse failure; attach `skipped` |
 | `score` | deterministic `0..=100` health score (`100` when clean; `>= 85` ("Great") iff zero findings and zero unused suppressions) |
-| `environment` | interpreter/venv/site-packages used; `frameworks` when async frameworks/clients are detected in `site-packages`; `note` when degraded (ratio-aware when a venv is active). `environment.note` and `environment.frameworks` are omitted from JSON when empty (`skip_serializing_if`) |
+| `environment` | interpreter/venv/site-packages used; `frameworks` when async frameworks/runtimes (FastAPI, Starlette, Django, aiohttp, anyio, Trio, … — not client libs like httpx/redis) are detected in `site-packages`; `note` when degraded (ratio-aware when a venv is active). `environment.note` and `environment.frameworks` are omitted from JSON when empty (`skip_serializing_if`) |
 | `findings[]` / `candidates[]` / `advice[]` | always emitted (even empty); candidates have `reason`; advice is non-blocking (SARIF `note`) |
 | `locationLessCandidates[]` | always emitted; missing-third-party aggregate lives here with empty `entry.file`/`chain` and empty `why` |
 | `skipped[]` / `sinkSites[]` / `unusedSuppressions[]` / `unresolvedSummary[]` | always emitted (even empty) |

@@ -7,6 +7,7 @@ mod budget;
 mod conditions;
 mod constants;
 mod corpus_gaps;
+mod db_resets;
 mod entries;
 mod follow_and_cache;
 mod guards_and_archives;

@@ -5,7 +5,20 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_async-doctor"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_async-doctor"));
+    cmd.env_remove("VIRTUAL_ENV").env_remove("CONDA_PREFIX");
+    // Isolated cache: caller XDG_CACHE_HOME / prior runs must not affect results.
+    let cache = std::env::temp_dir().join(format!(
+        "async-doctor-test-cache-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::create_dir_all(&cache);
+    cmd.env("XDG_CACHE_HOME", cache);
+    cmd
 }
 
 fn fixture_pkg() -> PathBuf {

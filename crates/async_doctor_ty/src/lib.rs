@@ -22,4 +22,6 @@ pub use scan::{
 pub use scan_cache::take_ignore_candidate_files;
 
 #[cfg(test)]
+mod hermetic_env;
+#[cfg(test)]
 mod tests;

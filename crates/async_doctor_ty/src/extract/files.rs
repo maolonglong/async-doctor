@@ -1,9 +1,9 @@
 //! Orchestrate multi-pass extraction over first-party Python files.
 //!
 //! `ASYNC_DOCTOR_PASS2_BATCH` controls salsa resets during pass 2:
-//! - unset / `0` (default): never reset; parallel per-file salsa clones
-//!   with work-stealing
-//! - `locality`: reset between top-level package groups
+//! - unset / `0` (default): parallel per-file salsa clones with work-stealing;
+//!   one shared `Storage` per worker for the whole pass (no periodic rebuilds)
+//! - `locality`: reset between top-level package groups (lower peak RSS, slower)
 //! - `N>0`: reset every N files (lower peak RSS, slower cold)
 
 use std::collections::{HashMap, HashSet};

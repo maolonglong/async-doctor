@@ -10,8 +10,12 @@ Usage:
   # Compare two directories of `<label>.i.json` (or `<label>.json`) reports:
   python3 scripts/audit_compare.py diff <baseline_dir_or_pattern> <new_dir> [--label LABEL]
 
-  # Run two binaries (or git refs) over a jobs manifest and compare:
-  python3 scripts/audit_compare.py run --jobs <jobs.txt> --base-bin <bin_or_dir> --new-bin <bin> --out <dir>
+  # Run a candidate binary over a jobs manifest and compare against a baseline:
+  python3 scripts/audit_compare.py run \\
+    --jobs <jobs.txt> --root <audit-dir> \\
+    --baseline '<audit-dir>/baseline/{L}.i.json' \\
+    --binary ./target/release/async-doctor \\
+    --out /tmp/async-doctor-audit-out
 """
 
 from __future__ import annotations
@@ -30,9 +34,24 @@ from typing import Any
 
 
 def load_findings(path: Path) -> dict[str, dict[str, Any]]:
-    with path.open(encoding="utf-8") as f:
-        data = json.load(f)
-    return {item["id"]: item for item in data.get("findings", [])}
+    """Load finding-id map from a JSON report.
+
+    Raises ValueError when the file is empty, truncated, or not a report object
+    (e.g. an OOM-killed scan left zero bytes or partial stdout).
+    """
+    text = path.read_text(encoding="utf-8")
+    if not text.strip():
+        raise ValueError(f"empty JSON report: {path}")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON report: {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"JSON report is not an object: {path}")
+    findings = data.get("findings", [])
+    if not isinstance(findings, list):
+        raise ValueError(f"JSON report missing findings array: {path}")
+    return {item["id"]: item for item in findings if isinstance(item, dict) and "id" in item}
 
 
 def location_key(finding: dict[str, Any]) -> tuple[Any, ...]:
@@ -104,8 +123,18 @@ def compare_dirs(base_spec: str, new_dir: Path, summary_label: str = "diff") -> 
         if base_path is None:
             print(f"nobase {label}")
             continue
-        new_map = load_findings(new_path)
-        base_map = load_findings(base_path)
+        try:
+            new_map = load_findings(new_path)
+        except ValueError as exc:
+            print(f"fail {label}: {exc}")
+            totals["failed"] += 1
+            continue
+        try:
+            base_map = load_findings(base_path)
+        except ValueError as exc:
+            print(f"fail {label}: baseline {exc}")
+            totals["failed"] += 1
+            continue
 
         added_ids = set(new_map) - set(base_map)
         removed_ids = set(base_map) - set(new_map)
@@ -137,7 +166,7 @@ def compare_dirs(base_spec: str, new_dir: Path, summary_label: str = "diff") -> 
             print("~", label, describe(new_map[i]))
 
     print(summary_label, dict(totals))
-    return 0
+    return 1 if totals["failed"] else 0
 
 
 def run_batch(

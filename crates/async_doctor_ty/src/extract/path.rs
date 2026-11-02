@@ -7,7 +7,13 @@ use ignore::WalkBuilder;
 use ruff_db::system::{SystemPath, SystemPathBuf};
 
 pub(crate) fn absolute_utf8(path: &Path) -> anyhow::Result<SystemPathBuf> {
-    let path = std::path::absolute(path)
+    // Prefer filesystem canonicalize so `../` segments (common in test
+    // fixtures built from `CARGO_MANIFEST_DIR/../..`) collapse. Lexical
+    // `absolute` alone can leave `..` in the project root string, which
+    // breaks first-party import resolution against on-disk paths.
+    let path = path
+        .canonicalize()
+        .or_else(|_| std::path::absolute(path))
         .with_context(|| format!("cannot resolve path `{}`", path.display()))?;
     SystemPathBuf::from_path_buf(path)
         .map_err(|p| anyhow::anyhow!("`{}` is not valid UTF-8", p.display()))

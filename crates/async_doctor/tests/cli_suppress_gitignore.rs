@@ -1,4 +1,4 @@
-//! Regression: suppressions must not walk gitignored `.py` trees (M3b perf).
+//! Regression: suppressions must not walk gitignored `.py` trees.
 
 use std::fs;
 use std::path::Path;
@@ -8,7 +8,20 @@ use std::time::Instant;
 use tempfile::TempDir;
 
 fn bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_async-doctor"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_async-doctor"));
+    cmd.env_remove("VIRTUAL_ENV").env_remove("CONDA_PREFIX");
+    // Isolated cache: caller XDG_CACHE_HOME / prior runs must not affect results.
+    let cache = std::env::temp_dir().join(format!(
+        "async-doctor-test-cache-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::create_dir_all(&cache);
+    cmd.env("XDG_CACHE_HOME", cache);
+    cmd
 }
 
 fn git(dir: &Path, args: &[&str]) {

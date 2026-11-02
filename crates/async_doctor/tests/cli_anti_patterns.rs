@@ -1,11 +1,24 @@
-//! E2E tests for P2 async anti-pattern rules:
+//! E2E tests for async anti-pattern rules:
 //! - `sync-with-async-cm` (finding)
 //! - `dangling-task` (correctness advice)
 
 use std::process::Command;
 
 fn bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_async-doctor"))
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_async-doctor"));
+    cmd.env_remove("VIRTUAL_ENV").env_remove("CONDA_PREFIX");
+    // Isolated cache: caller XDG_CACHE_HOME / prior runs must not affect results.
+    let cache = std::env::temp_dir().join(format!(
+        "async-doctor-test-cache-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::create_dir_all(&cache);
+    cmd.env("XDG_CACHE_HOME", cache);
+    cmd
 }
 
 #[test]
@@ -129,4 +142,97 @@ fn explain_supports_sync_with_async_cm_and_dangling_task() {
         assert!(stdout.contains(rule));
         assert!(stdout.contains(&format!("#{rule}")));
     }
+}
+
+#[test]
+fn anyio_fail_after_and_move_on_after_are_not_sync_with_async_cm() {
+    // Verified against anyio 4.x: fail_after is a sync @contextmanager and
+    // move_on_after returns a CancelScope with __enter__ (no __aenter__).
+    // `with anyio.fail_after(...)` / `with anyio.move_on_after(...)` is correct;
+    // suggesting `async with` would break callers.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let py = dir.path().join("app.py");
+    std::fs::write(
+        &py,
+        concat!(
+            "import anyio\n\n",
+            "async def ok_timeouts():\n",
+            "    with anyio.fail_after(1.0):\n",
+            "        await anyio.sleep(0)\n",
+            "    with anyio.move_on_after(1.0):\n",
+            "        await anyio.sleep(0)\n\n",
+            "async def bad_lock():\n",
+            "    with anyio.Lock():\n",
+            "        pass\n",
+        ),
+    )
+    .expect("write app.py");
+
+    // Minimal anyio stub so resolution does not require a real install. The
+    // known-qualname allowlist still applies to External callees; Lock must
+    // keep flagging while fail_after / move_on_after must stay silent.
+    let sp = dir
+        .path()
+        .join(".venv/lib/python3.12/site-packages/anyio");
+    std::fs::create_dir_all(&sp).expect("anyio stub dir");
+    std::fs::write(
+        sp.join("__init__.py"),
+        concat!(
+            "class CancelScope:\n",
+            "    def __enter__(self):\n",
+            "        return self\n",
+            "    def __exit__(self, *args):\n",
+            "        return False\n\n",
+            "def fail_after(delay, shield=False, reason=None):\n",
+            "    return CancelScope()\n\n",
+            "def move_on_after(delay, shield=False):\n",
+            "    return CancelScope()\n\n",
+            "class Lock:\n",
+            "    async def __aenter__(self):\n",
+            "        return self\n",
+            "    async def __aexit__(self, *args):\n",
+            "        return False\n\n",
+            "async def sleep(seconds):\n",
+            "    return None\n",
+        ),
+    )
+    .expect("write anyio stub");
+    std::fs::write(
+        dir.path().join(".venv/pyvenv.cfg"),
+        "home = /usr/bin\nversion = 3.12.0\n",
+    )
+    .expect("pyvenv.cfg");
+    std::fs::create_dir_all(sp.parent().unwrap().join("anyio-4.0.0.dist-info")).unwrap();
+
+    let out = bin()
+        .args(["--format", "json"])
+        .arg(dir.path())
+        .output()
+        .expect("run async-doctor");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("parse json");
+    let findings = v["findings"].as_array().expect("findings");
+    let entries: Vec<&str> = findings
+        .iter()
+        .filter_map(|f| f["entry"]["name"].as_str())
+        .collect();
+    assert!(
+        entries.contains(&"bad_lock"),
+        "anyio.Lock remains async-only: {findings:#?}"
+    );
+    assert!(
+        !entries.contains(&"ok_timeouts"),
+        "fail_after/move_on_after must not flag sync-with-async-cm: {findings:#?}"
+    );
+    assert_eq!(
+        findings.len(),
+        1,
+        "expected only the Lock finding, got: {findings:#?}"
+    );
 }
