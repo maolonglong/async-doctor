@@ -226,6 +226,55 @@ fn install_skill_force_overwrites_divergent_skill() {
 }
 
 #[test]
+fn install_skill_updates_managed_claude_directory_copy() {
+    // Simulates the Windows directory-copy install: a real directory that
+    // contains only SKILL.md. Re-runs (especially --force) must update that
+    // copy in place without deleting the directory.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let agents = dir.path().join(".agents/skills/async-doctor");
+    std::fs::create_dir_all(&agents).unwrap();
+    std::fs::write(agents.join("SKILL.md"), "stale agents skill\n").unwrap();
+    let claude = dir.path().join(".claude/skills/async-doctor");
+    std::fs::create_dir_all(&claude).unwrap();
+    std::fs::write(claude.join("SKILL.md"), "stale claude copy\n").unwrap();
+
+    let out = bin()
+        .args(["install-skill", "--force", "--path"])
+        .arg(dir.path())
+        .output()
+        .expect("run install-skill --force");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("updated Claude skill copy") || stdout.contains("installed skill:"),
+        "expected managed-copy update message, got: {stdout}"
+    );
+    let agents_content = std::fs::read_to_string(agents.join("SKILL.md")).unwrap();
+    let claude_content = std::fs::read_to_string(claude.join("SKILL.md")).unwrap();
+    assert!(
+        agents_content.starts_with("---\nname: async-doctor\n"),
+        "agents SKILL.md must be refreshed"
+    );
+    assert_eq!(
+        agents_content, claude_content,
+        "managed Claude copy must match the agents skill after --force"
+    );
+    assert!(
+        claude.is_dir()
+            && !std::fs::symlink_metadata(&claude)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+        "managed copy must remain a real directory"
+    );
+}
+
+#[test]
 fn install_skill_never_deletes_real_claude_skill_directory() {
     let dir = tempfile::tempdir().expect("tempdir");
     let claude_dir = dir.path().join(".claude/skills/async-doctor");

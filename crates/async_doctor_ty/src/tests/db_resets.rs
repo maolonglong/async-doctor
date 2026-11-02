@@ -6,8 +6,7 @@
 
 use std::fs;
 
-use crate::db::AsyncDoctorDb;
-use crate::scan::scan_path;
+use crate::scan::scan_path_counting_fresh_empty;
 
 use super::helpers::temp_project;
 
@@ -31,9 +30,9 @@ fn default_parallel_path_bounds_fresh_empty_calls() {
     // Ensure no site-packages follow work that would add follow resets.
     let _ = fs::remove_dir_all(dir.join(".venv"));
 
-    AsyncDoctorDb::reset_fresh_empty_count();
-    let report = scan_path(&dir).expect("scan");
-    let resets = AsyncDoctorDb::fresh_empty_count();
+    // Counter reset + read happen under the same hermetic env lock as the
+    // scan, so plain multi-threaded `cargo test` cannot race other scans.
+    let (report, resets) = scan_path_counting_fresh_empty(&dir).expect("scan");
 
     assert!(
         report.complete,

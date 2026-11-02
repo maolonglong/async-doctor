@@ -51,12 +51,14 @@ npx skills add maolonglong/async-doctor
 ```
 
 Writes `.agents/skills/async-doctor/SKILL.md` and links
-`.claude/skills/async-doctor` → `../../.agents/skills/async-doctor`. If
-`SKILL.md` already exists and differs from the bundled copy, or if the Claude
-path exists and is not the expected link, the command skips and prints a clear
+`.claude/skills/async-doctor` → `../../.agents/skills/async-doctor` (Unix). On
+Windows the Claude path is a directory copy of `SKILL.md`. If `SKILL.md`
+already exists and differs from the bundled copy, or if the Claude path exists
+and is not the expected link/copy, the command skips and prints a clear
 message; pass `--force` to overwrite the skill file and replace a stale
-symlink/file. A real directory at `.claude/skills/async-doctor` is never
-deleted (user files stay); move it aside and re-run to create the symlink.
+symlink/file, or to refresh a managed Windows directory copy in place. A real
+directory at `.claude/skills/async-doctor` that contains user files is never
+deleted; move it aside and re-run to create the symlink.
 
 Product skill path: `skills/async-doctor/SKILL.md`. No editor stop hook
 ([decisions/2026-10-31-no-stop-hook.md](decisions/2026-10-31-no-stop-hook.md)).

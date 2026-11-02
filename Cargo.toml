@@ -38,6 +38,7 @@ anyhow = "1"
 anstream = "1.0"
 anstyle = "1.0"
 clap = { version = "4", features = ["derive"] }
+dunce = "1"
 ignore = "0.4"
 rayon = "1.10"
 serde = { version = "1", features = ["derive"] }

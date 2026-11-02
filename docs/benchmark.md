@@ -86,9 +86,10 @@ rebuilds:
   `.py` files, with venv): **15.3 s** cold / **0.14 s** warm at **2.13 GiB**
   peak RSS, **4915** findings / **352** candidates, cold==warm.
 - **`home-assistant/core`** (tip `586a6633`, walk **20,337** `.py` files, with
-  venv): completes in **~38 s** cold at **~5.8 GiB** peak RSS (was OOM-killed
-  above 8 GiB on `56e3fcf` before this fix), reporting 5 findings. Prefer a
-  package subdirectory when scanning monorepos if memory is tight.
+  venv): completes in **~38 s** cold at **~5.8 GiB** peak RSS (on `56e3fcf` the
+  same corpus was OOM-killed above 8 GiB under periodic Salsa rebuilds),
+  reporting 5 findings. Prefer a package subdirectory when scanning monorepos
+  if memory is tight.
 
 ## Reproduce
 

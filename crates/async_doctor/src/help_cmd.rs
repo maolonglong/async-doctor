@@ -34,11 +34,12 @@ pub fn run_why(
         include_non_production,
         show_unresolved,
     };
-    let path = resolve_cli_path(path);
-    let mut report = async_doctor_ty::scan_path_with_options(&path, options)
-        .with_context(|| format!("failed to scan `{}`", path.display()))?;
-    // Same rewrite the default scan applies — nested `why:` lines must be runnable.
-    crate::rewrite_why_commands(&mut report, &path);
+    let abs_path = resolve_cli_path(path);
+    let mut report = async_doctor_ty::scan_path_with_options(&abs_path, options)
+        .with_context(|| format!("failed to scan `{}`", abs_path.display()))?;
+    // Same rewrite the default scan applies — keep the caller-facing path for
+    // nested `why:` lines (relative / symlink leaf), not only the absolute form.
+    crate::rewrite_why_commands(&mut report, path);
 
     let matches = findings_at(&report, &file, line);
     let mut out = std::io::stdout().lock();
@@ -46,7 +47,7 @@ pub fn run_why(
         writeln!(
             out,
             "No findings, candidates, or advice touch {file}:{line} under {}.",
-            path.display()
+            abs_path.display()
         )?;
         writeln!(
             out,

@@ -11,8 +11,10 @@ pub(crate) fn absolute_utf8(path: &Path) -> anyhow::Result<SystemPathBuf> {
     // fixtures built from `CARGO_MANIFEST_DIR/../..`) collapse. Lexical
     // `absolute` alone can leave `..` in the project root string, which
     // breaks first-party import resolution against on-disk paths.
-    let path = path
-        .canonicalize()
+    //
+    // Use `dunce::canonicalize` so Windows does not emit `\\?\C:\...`
+    // verbatim paths (we ship Windows wheels without Windows CI).
+    let path = dunce::canonicalize(path)
         .or_else(|_| std::path::absolute(path))
         .with_context(|| format!("cannot resolve path `{}`", path.display()))?;
     SystemPathBuf::from_path_buf(path)
