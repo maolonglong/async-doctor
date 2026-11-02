@@ -157,6 +157,14 @@ pub fn write_report(report: &Report, opts: TextOptions) -> anyhow::Result<()> {
     if !note.is_empty() {
         writeln!(out, "\nnote: {note}")?;
     }
+    let skipped = report.environment.follow_budget_skipped;
+    if skipped > 0 {
+        writeln!(
+            out,
+            "note: third-party follow budget reached ({skipped} callees not followed); \
+             deep library call chains may be missed"
+        )?;
+    }
     if report.message.is_none() {
         write_scan_footer(&mut out, report, opts.elapsed, &pal)?;
     }
@@ -171,6 +179,13 @@ fn write_scan_footer(
     pal: &Palette,
 ) -> anyhow::Result<()> {
     let dim = pal.dim;
+    if report.omitted_findings + report.omitted_candidates + report.omitted_advice > 0 {
+        writeln!(
+            out,
+            "{dim}omitted {} finding(s), {} candidate(s), {} advice (--max-findings){dim:#}",
+            report.omitted_findings, report.omitted_candidates, report.omitted_advice
+        )?;
+    }
     let files = report.file_count;
     let entries = report.async_entry_count;
     let file_s = if files == 1 { "" } else { "s" };
@@ -234,10 +249,17 @@ fn write_environment_banner(
     Ok(())
 }
 
+/// Canonical sink qualname for group headers: `blocking sink \`X\`` on the
+/// primary sink hop. Falls back to the call text when absent.
 pub(crate) fn sink_label(f: &Finding) -> Option<&str> {
     async_doctor_core::primary_sink_step(f).map(|(_, s)| {
-        let t = s.text.trim();
-        t.split('(').next().unwrap_or(t).trim()
+        s.resolution
+            .strip_prefix("blocking sink `")
+            .and_then(|r| r.strip_suffix('`'))
+            .unwrap_or_else(|| {
+                let t = s.text.trim();
+                t.split('(').next().unwrap_or(t).trim()
+            })
     })
 }
 

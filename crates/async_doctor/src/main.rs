@@ -161,6 +161,12 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
         report.refresh_score();
     }
 
+    // Output-only cap: score, exit code and sinkSites stay full-report.
+    let exit_code = report.exit_code();
+    if let Some(n) = cli.max_findings {
+        report.apply_max_findings(n);
+    }
+
     if cli.score {
         println!("{}", report.score);
     } else {
@@ -207,7 +213,7 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
         return Ok(ExitCode::from(EXIT_OK as u8));
     }
 
-    Ok(ExitCode::from(report.exit_code() as u8))
+    Ok(ExitCode::from(exit_code as u8))
 }
 
 pub(crate) fn rewrite_why_commands(report: &mut Report, scan_path: &Path) {

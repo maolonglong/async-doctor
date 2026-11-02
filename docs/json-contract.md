@@ -10,14 +10,14 @@ CLI flags: [cli.md](cli.md).
 | `schemaVersion` | integer; bump on breaking changes (currently **2**) |
 | `complete` | false on timeout / parse failure; attach `skipped` |
 | `score` | deterministic `0..=100` health score (`100` when clean; `>= 85` ("Great") iff zero findings and zero unused suppressions; see **Health score** below) |
-| `environment` | interpreter/venv/site-packages used; `frameworks` when async frameworks/runtimes (FastAPI, Starlette, Django, aiohttp, anyio, Trio, … — not client libs like httpx/redis) are detected in `site-packages`; `note` when degraded (ratio-aware when a venv is active). `environment.note` and `environment.frameworks` are omitted from JSON when empty (`skip_serializing_if`) |
+| `environment` | interpreter/venv/site-packages used; `frameworks` when async frameworks/runtimes (FastAPI, Starlette, Django, aiohttp, anyio, Trio, … — not client libs like httpx/redis) are detected in `site-packages`; `note` when degraded (ratio-aware when a venv is active). `environment.note` and `environment.frameworks` are omitted from JSON when empty (`skip_serializing_if`); `environment.followBudgetSkipped` counts third-party callees not followed because the follow budget was reached — omitted when 0, and it never flips `complete` |
 | `findings[]` / `candidates[]` / `advice[]` | always emitted (even empty); candidates have `reason`; advice is non-blocking (SARIF `note`) |
 | `locationLessCandidates[]` | always emitted; missing-third-party aggregate lives here with empty `entry.file`/`chain` and empty `why` |
 | `skipped[]` / `sinkSites[]` / `unusedSuppressions[]` / `unresolvedSummary[]` | always emitted (even empty); `sinkSites[]` attributes merged `open` + `read`/`write` chains to the primary `open` hop |
-| `hiddenUnresolvedCandidates` / `omittedNonProductionEntries` / `fileCount` / `asyncEntryCount` | always emitted, including `0` |
+| `hiddenUnresolvedCandidates` / `omittedNonProductionEntries` / `fileCount` / `asyncEntryCount` / `omittedFindings` / `omittedCandidates` / `omittedAdvice` | always emitted, including `0` — the `omitted*` trio counts entries cut by `--max-findings` (0 without the flag) |
 | `id` | stable sha256 (16-byte hex) of **rule + entry qualname + sink qualname + chain qualnames + occurrence**; **not** file/line/column |
 | `rule` | e.g. `blocking-sleep`, `blocking-http` |
-| `entry` | async def location + label (`route` / `lifecycle` / `task` / `other`) |
+| `entry` | async def location + label (`route` / `lifecycle` / `task` / `async_def`) |
 | `chain[]` | shortest evidence chain (`file`, `line`, `text`) |
 | `conditions[]` | prove-only tags (see below) |
 | `fix` | hint + `fixGroupId` (shared across same root cause) |
@@ -52,6 +52,8 @@ Home for exit-code semantics (elsewhere link here):
 
 Incomplete analysis sets `complete=false` plus `skipped` / a stderr warning —
 **not** exit 2. Candidates and advice never affect the exit code.
+`async-doctor why file:line` returns `1` when the location matches any finding
+(candidates/advice alone stay `0`), and `2` on tool errors.
 
 **Environment note policy:** no project venv and zero unresolved third-party →
 silent. No project venv with unresolved third-party → activate/`VIRTUAL_ENV`

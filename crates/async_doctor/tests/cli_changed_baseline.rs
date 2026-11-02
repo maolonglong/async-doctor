@@ -631,3 +631,123 @@ fn changed_shallow_detached_without_base_falls_back_to_full_scan() {
         "shallow detached must surface the sleep finding"
     );
 }
+
+fn changed_json(root: &Path, extra: &[&str]) -> serde_json::Value {
+    let mut args: Vec<&str> = vec!["--format", "json", "--changed=HEAD"];
+    args.extend_from_slice(extra);
+    let out = bin().args(args).arg(root).output().unwrap();
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+#[test]
+fn changed_hunk_untouched_legacy_finding_filtered() {
+    let repo = init_repo_with_sleep();
+    let root = repo.path();
+    // Edit a line far away from the committed `time.sleep(1)` hop.
+    fs::write(
+        root.join("app.py"),
+        "import time\n\nasync def handler():\n    time.sleep(1)\n\nasync def another():\n    return 7\n",
+    )
+    .unwrap();
+    let v = changed_json(root, &[]);
+    assert!(
+        v["findings"].as_array().unwrap().is_empty(),
+        "untouched hop in changed file must not report: {v}"
+    );
+}
+
+#[test]
+fn changed_hunk_new_blocking_call_in_existing_async_def_kept() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    git(root, &["init", "-b", "main"]);
+    fs::write(
+        root.join("app.py"),
+        "import time\n\nasync def handler():\n    return 1\n",
+    )
+    .unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "init"]);
+    fs::write(
+        root.join("app.py"),
+        "import time\n\nasync def handler():\n    time.sleep(1)\n",
+    )
+    .unwrap();
+    let v = changed_json(root, &[]);
+    assert_eq!(v["findings"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn changed_hunk_deep_sync_helper_line_kept() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    git(root, &["init", "-b", "main"]);
+    fs::write(
+        root.join("app.py"),
+        "import helper\n\nasync def handler():\n    helper.do_io()\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("helper.py"),
+        "import time\n\ndef do_io():\n    return 1\n",
+    )
+    .unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "init"]);
+    // Only the sink line inside the deep helper changes.
+    fs::write(
+        root.join("helper.py"),
+        "import time\n\ndef do_io():\n    time.sleep(3)\n",
+    )
+    .unwrap();
+    let v = changed_json(root, &[]);
+    assert_eq!(v["findings"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn changed_hunk_untracked_file_kept() {
+    let repo = init_repo_with_sleep();
+    let root = repo.path();
+    fs::write(
+        root.join("new_io.py"),
+        "import time\n\nasync def fresh():\n    time.sleep(4)\n",
+    )
+    .unwrap();
+    let v = changed_json(root, &[]);
+    let names: Vec<&str> = v["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["entry"]["file"].as_str().unwrap())
+        .collect();
+    assert!(
+        names.iter().any(|n| n.contains("new_io.py")),
+        "untracked file finding must report: {names:?}"
+    );
+}
+
+#[test]
+fn changed_hunk_pure_deletion_adjacent_to_hop_kept() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    git(root, &["init", "-b", "main"]);
+    fs::write(
+        root.join("app.py"),
+        "import time\n\nasync def handler():\n    # delete-me\n    time.sleep(1)\n",
+    )
+    .unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "init"]);
+    // Pure deletion: removes the comment line immediately before the hop.
+    fs::write(
+        root.join("app.py"),
+        "import time\n\nasync def handler():\n    time.sleep(1)\n",
+    )
+    .unwrap();
+    let v = changed_json(root, &[]);
+    assert_eq!(
+        v["findings"].as_array().unwrap().len(),
+        1,
+        "deletion adjacent to hop must keep the finding"
+    );
+}

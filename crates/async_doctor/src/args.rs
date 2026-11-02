@@ -88,6 +88,12 @@ pub struct Cli {
     /// partial set).
     #[arg(long, value_name = "FILE")]
     pub write_baseline: Option<PathBuf>,
+
+    /// Cap findings, candidates and advice each to N in the rendered output.
+    /// Output-only: score, exit code and sinkSites still reflect the full
+    /// report. Every sink site keeps an example while N >= site count.
+    #[arg(long, value_name = "N")]
+    pub max_findings: Option<usize>,
 }
 
 #[derive(Subcommand, Debug)]

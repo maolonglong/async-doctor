@@ -25,8 +25,9 @@ async-doctor install-skill [--force] --path DIR  # install .agents/skills/async-
 | `--expand` | Show full advice list (text caps by default) |
 | `--show-unresolved` | Surface `reason=unresolved` candidates (else hidden / aggregated) |
 | `--include-non-production` | Include entries under tests/docs/examples/scripts/hidden dirs |
-| `--changed [base]` | Full analysis; filter reported findings to the git changed set |
+| `--changed [base]` | Full analysis; report only findings/candidates/advice whose entry line or a chain hop touches NEW-side changed lines (from `git diff -U0` vs base, unstaged and cached diffs, and untracked files). Limitations: an edit that changes resolution without touching a chain line (a type annotation elsewhere, a pure file rename) is not reported — run a full scan or `--baseline` before merge |
 | `--baseline` / `--write-baseline` | CI / agent loops; `--write-baseline` cannot combine with `--changed` |
+| `--max-findings N` | Cap `findings`/`candidates`/`advice` each to N (output-only; score, exit code, `sinkSites` and `--write-baseline` use the full report). Findings are picked round-robin over `sinkSites` so every site keeps an example while N >= site count; text/markdown footers and the `omitted*` JSON fields record what was cut |
 
 ## Suppressions
 

@@ -5,7 +5,7 @@
 //! so scanning `svc/` while only root `pos.py` changed does not match
 //! `svc/app/pos.py`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -14,12 +14,33 @@ use async_doctor_core::{Advice, Candidate, Finding, Report};
 
 use crate::paths::normalize_path;
 
+/// Changed lines for one file, in NEW-side line numbers (inclusive ranges).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChangedLines {
+    /// Untracked, renamed without hunks, or unparsable — whole file changed.
+    Whole,
+    /// Inclusive (start, end) line ranges.
+    Ranges(Vec<(u32, u32)>),
+}
+
+impl ChangedLines {
+    fn contains(&self, line: u32) -> bool {
+        match self {
+            ChangedLines::Whole => true,
+            ChangedLines::Ranges(rs) => rs.iter().any(|(a, b)| *a <= line && line <= *b),
+        }
+    }
+}
+
+/// Repo-root-relative path → changed line ranges.
+pub type ChangedFiles = HashMap<String, ChangedLines>;
+
 /// Outcome of resolving the changed-file set for `--changed`.
 #[derive(Debug)]
 pub enum ChangedSet {
     /// Filter reporting to these repo-root-relative paths.
     Filter {
-        files: HashSet<String>,
+        files: ChangedFiles,
         repo_root: PathBuf,
         note: Option<String>,
     },
@@ -52,10 +73,10 @@ pub fn resolve_changed(scan_path: &Path, git_ref: Option<&str>) -> ChangedSet {
     }
 }
 
-/// Resolve the set of changed paths relative to `repo_root`.
+/// Resolve changed paths and NEW-side line ranges relative to `repo_root`.
 ///
 /// `git_ref` is `None` for the default (merge-base with the default branch).
-pub fn changed_files(repo_root: &Path, git_ref: Option<&str>) -> anyhow::Result<HashSet<String>> {
+pub fn changed_files(repo_root: &Path, git_ref: Option<&str>) -> anyhow::Result<ChangedFiles> {
     let repo_root = repo_root
         .canonicalize()
         .with_context(|| format!("canonicalize {}", repo_root.display()))?;
@@ -65,31 +86,125 @@ pub fn changed_files(repo_root: &Path, git_ref: Option<&str>) -> anyhow::Result<
         _ => default_merge_base(&repo_root)?,
     };
 
-    let mut files = HashSet::new();
-    // Committed + unstaged + staged differences vs base.
-    collect_diff_names(
+    let mut files = ChangedFiles::new();
+    // Committed vs base, unstaged, and staged differences — `-U0` gives
+    // precise hunk ranges; union them per file.
+    collect_diff_ranges(
         &repo_root,
-        &["diff", "--name-only", "--diff-filter=ACMR", &base],
+        &["diff", "-U0", "--diff-filter=ACMR", &base],
         &mut files,
     )?;
-    collect_diff_names(
+    collect_diff_ranges(
         &repo_root,
-        &["diff", "--name-only", "--diff-filter=ACMR"],
+        &["diff", "-U0", "--diff-filter=ACMR"],
         &mut files,
     )?;
-    collect_diff_names(
+    collect_diff_ranges(
         &repo_root,
-        &["diff", "--name-only", "--cached", "--diff-filter=ACMR"],
+        &["diff", "-U0", "--diff-filter=ACMR", "--cached"],
         &mut files,
     )?;
     let untracked = git_stdout(&repo_root, &["ls-files", "--others", "--exclude-standard"])?;
     for line in untracked.lines() {
         let line = line.trim();
         if !line.is_empty() {
-            files.insert(normalize_path(line));
+            files.insert(normalize_path(line), ChangedLines::Whole);
         }
     }
     Ok(files)
+}
+
+/// Parse a `git diff -U0` stream into per-file NEW-side ranges and merge into `files`.
+///
+/// - `@@ -a[,n] +b[,m] @@` records `b..=b+m-1` (`m` omitted → 1 line).
+/// - Pure deletion (`m == 0` at line `b`) marks `b` and `b + 1`.
+/// - A file section with no usable `+++`/`@@` lines (rename-only, mode,
+///   binary, unparsable) marks the whole file.
+fn collect_diff_ranges(
+    repo_root: &Path,
+    args: &[&str],
+    files: &mut ChangedFiles,
+) -> anyhow::Result<()> {
+    let out = git_stdout(repo_root, args)?;
+    let mut file = String::new();
+    let mut ranges: Vec<(u32, u32)> = Vec::new();
+    let mut hunks = 0usize;
+    let mut malformed = false;
+    let flush = |file: &mut String, ranges: &mut Vec<(u32, u32)>, files: &mut ChangedFiles| {
+        if file.is_empty() {
+            return;
+        }
+        let entry = ChangedLines::Ranges(std::mem::take(ranges));
+        files
+            .entry(std::mem::take(file))
+            .and_modify(|e| merge_changed_lines(e, &entry))
+            .or_insert(entry);
+    };
+    for line in out.lines() {
+        if line.starts_with("diff --git") {
+            if malformed {
+                files.insert(std::mem::take(&mut file), ChangedLines::Whole);
+            } else {
+                flush(&mut file, &mut ranges, files);
+            }
+            hunks = 0;
+            malformed = false;
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("+++ ") {
+            if let Some(path) = rest.strip_prefix("b/") {
+                file = normalize_path(path);
+            }
+            continue;
+        }
+        if !line.starts_with("@@") {
+            continue;
+        }
+        hunks += 1;
+        let Some((start, count)) = parse_hunk_new_side(line) else {
+            malformed = true;
+            continue;
+        };
+        if count == 0 {
+            // Pure deletion at line `start`: the join line may be either side.
+            ranges.push((start, start.saturating_add(1)));
+        } else {
+            ranges.push((start, start + count - 1));
+        }
+    }
+    if malformed {
+        files.insert(file, ChangedLines::Whole);
+    } else if !file.is_empty() && hunks == 0 {
+        // Rename-only / mode-only / binary section: no NEW-side ranges.
+        files.insert(file, ChangedLines::Whole);
+    } else {
+        flush(&mut file, &mut ranges, files);
+    }
+    Ok(())
+}
+
+/// Merge `incoming` into `existing`; `Whole` dominates.
+fn merge_changed_lines(existing: &mut ChangedLines, incoming: &ChangedLines) {
+    if matches!(existing, ChangedLines::Whole) || matches!(incoming, ChangedLines::Whole) {
+        *existing = ChangedLines::Whole;
+        return;
+    }
+    if let (ChangedLines::Ranges(a), ChangedLines::Ranges(b)) = (existing, incoming) {
+        a.extend(b.iter().copied());
+    }
+}
+
+/// Extract `(new_start, new_count)` from `@@ -o[,n] +s[,m] @@`.
+fn parse_hunk_new_side(header: &str) -> Option<(u32, u32)> {
+    let plus = header.find(" +")? + 2;
+    let rest = &header[plus..];
+    let end = rest.find(' ')?;
+    let spec = &rest[..end];
+    let (start, count) = match spec.split_once(',') {
+        Some((s, c)) => (s.parse().ok()?, c.parse().ok()?),
+        None => (spec.parse().ok()?, 1),
+    };
+    Some((start, count))
 }
 
 /// Keep findings/candidates whose entry or chain touches a changed file.
@@ -98,7 +213,7 @@ pub fn changed_files(repo_root: &Path, git_ref: Option<&str>) -> anyhow::Result<
 /// `changed` / `repo_root` use repo-root-relative paths.
 pub fn filter_report(
     mut report: Report,
-    changed: &HashSet<String>,
+    changed: &ChangedFiles,
     scan_root: &Path,
     repo_root: &Path,
 ) -> Report {
@@ -116,51 +231,47 @@ pub fn filter_report(
 
 fn finding_touches(
     f: &Finding,
-    changed: &HashSet<String>,
+    changed: &ChangedFiles,
     scan_root: &Path,
     repo_root: &Path,
 ) -> bool {
-    path_in_changed(&f.entry.file, changed, scan_root, repo_root)
+    loc_in_changed(&f.entry.file, f.entry.line, changed, scan_root, repo_root)
         || f.chain
             .iter()
-            .any(|s| path_in_changed(&s.file, changed, scan_root, repo_root))
+            .any(|s| loc_in_changed(&s.file, s.line, changed, scan_root, repo_root))
 }
 
 fn candidate_touches(
     c: &Candidate,
-    changed: &HashSet<String>,
+    changed: &ChangedFiles,
     scan_root: &Path,
     repo_root: &Path,
 ) -> bool {
-    path_in_changed(&c.entry.file, changed, scan_root, repo_root)
+    loc_in_changed(&c.entry.file, c.entry.line, changed, scan_root, repo_root)
         || c.chain
             .iter()
-            .any(|s| path_in_changed(&s.file, changed, scan_root, repo_root))
+            .any(|s| loc_in_changed(&s.file, s.line, changed, scan_root, repo_root))
 }
 
-fn advice_touches(
-    a: &Advice,
-    changed: &HashSet<String>,
-    scan_root: &Path,
-    repo_root: &Path,
-) -> bool {
-    path_in_changed(&a.entry.file, changed, scan_root, repo_root)
+fn advice_touches(a: &Advice, changed: &ChangedFiles, scan_root: &Path, repo_root: &Path) -> bool {
+    loc_in_changed(&a.entry.file, a.entry.line, changed, scan_root, repo_root)
         || a.chain
             .iter()
-            .any(|s| path_in_changed(&s.file, changed, scan_root, repo_root))
+            .any(|s| loc_in_changed(&s.file, s.line, changed, scan_root, repo_root))
 }
 
-fn path_in_changed(
+fn loc_in_changed(
     path: &str,
-    changed: &HashSet<String>,
+    line: u32,
+    changed: &ChangedFiles,
     scan_root: &Path,
     repo_root: &Path,
 ) -> bool {
     let Some(repo_rel) = to_repo_relative(path, scan_root, repo_root) else {
         return false;
     };
-    // Exact equality after repo-root normalization — never component suffix.
-    changed.contains(&repo_rel)
+    // Exact path equality after repo-root normalization, then range match.
+    changed.get(&repo_rel).is_some_and(|r| r.contains(line))
 }
 
 /// Convert a finding path (relative to `scan_root`) into a repo-root-relative path.
@@ -313,21 +424,6 @@ fn candidate_base_refs(repo_root: &Path) -> Vec<String> {
     out
 }
 
-fn collect_diff_names(
-    repo_root: &Path,
-    args: &[&str],
-    into: &mut HashSet<String>,
-) -> anyhow::Result<()> {
-    let out = git_stdout(repo_root, args)?;
-    for line in out.lines() {
-        let line = line.trim();
-        if !line.is_empty() {
-            into.insert(normalize_path(line));
-        }
-    }
-    Ok(())
-}
-
 fn git_stdout(repo_root: &Path, args: &[&str]) -> anyhow::Result<String> {
     let output = Command::new("git")
         .args(args)
@@ -391,7 +487,7 @@ mod tests {
 
         let mut report = Report::empty_complete();
         report.findings = vec![finding("app.py")]; // relative to backend/
-        let changed = HashSet::from(["tools/helpers.py".into()]);
+        let changed = ChangedFiles::from([("tools/helpers.py".to_string(), ChangedLines::Whole)]);
         let filtered = filter_report(report, &changed, &backend, repo);
         assert!(
             filtered.findings.is_empty(),
@@ -400,7 +496,7 @@ mod tests {
 
         let mut report = Report::empty_complete();
         report.findings = vec![finding("app.py")];
-        let changed = HashSet::from(["backend/app.py".into()]);
+        let changed = ChangedFiles::from([("backend/app.py".to_string(), ChangedLines::Whole)]);
         let filtered = filter_report(report, &changed, &backend, repo);
         assert_eq!(filtered.findings.len(), 1);
     }
@@ -417,7 +513,7 @@ mod tests {
 
         let mut report = Report::empty_complete();
         report.findings = vec![finding("app/pos.py")]; // relative to svc/
-        let changed = HashSet::from(["pos.py".into()]);
+        let changed = ChangedFiles::from([("pos.py".to_string(), ChangedLines::Whole)]);
         let filtered = filter_report(report, &changed, &repo.join("svc"), repo);
         assert!(
             filtered.findings.is_empty(),
@@ -426,7 +522,7 @@ mod tests {
 
         let mut report = Report::empty_complete();
         report.findings = vec![finding("app/pos.py")];
-        let changed = HashSet::from(["svc/app/pos.py".into()]);
+        let changed = ChangedFiles::from([("svc/app/pos.py".to_string(), ChangedLines::Whole)]);
         let filtered = filter_report(report, &changed, &repo.join("svc"), repo);
         assert_eq!(filtered.findings.len(), 1);
     }

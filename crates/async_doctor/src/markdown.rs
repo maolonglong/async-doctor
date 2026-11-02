@@ -107,6 +107,13 @@ fn write_markdown_to(
         writeln!(out, "> **Note:** {}\n", report.environment.note)?;
     }
 
+    if report.omitted_findings + report.omitted_candidates + report.omitted_advice > 0 {
+        writeln!(
+            out,
+            "_omitted {} finding(s), {} candidate(s), {} advice (--max-findings)_",
+            report.omitted_findings, report.omitted_candidates, report.omitted_advice
+        )?;
+    }
     let files = report.file_count;
     let entries = report.async_entry_count;
     let file_s = if files == 1 { "" } else { "s" };
