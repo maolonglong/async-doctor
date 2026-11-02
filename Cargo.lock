@@ -104,7 +104,7 @@ checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
 name = "async_doctor"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anstream",
  "anstyle",
@@ -123,7 +123,7 @@ dependencies = [
 
 [[package]]
 name = "async_doctor_core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hex",
  "serde",
@@ -132,14 +132,14 @@ dependencies = [
 
 [[package]]
 name = "async_doctor_rules"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async_doctor_core",
 ]
 
 [[package]]
 name = "async_doctor_ty"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async_doctor_core",
