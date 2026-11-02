@@ -329,7 +329,7 @@ fn why_subcommand_matches_constructor_init_and_with_open_write_lines() {
             "\n",
             "class Worker:\n",
             "    def __init__(self, home: Path) -> None:\n",
-            "        (home / \"logs\").mkdir(parents=True, exist_ok=True)\n",
+            "        (home / \"logs\").mkdir(parents=True)\n",
             "\n",
             "async def start(home: Path, out: Path) -> None:\n",
             "    Worker(home)\n",

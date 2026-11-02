@@ -110,6 +110,7 @@ fn edge(
         occurrence: 0,
         is_offload_wrapper: false,
         positional_literals: vec![],
+        keyword_true: vec![],
         positional_callables: vec![],
         positional_externals: vec![],
         positional_constructed_receivers: vec![],

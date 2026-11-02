@@ -8,7 +8,7 @@ use ruff_text_size::Ranged;
 use ty_python_semantic::{ImportAliasResolution, definitions_for_attribute, definitions_for_name};
 
 use super::CallCollector;
-use crate::extract::constants::{is_generator_consumer, literal_arg};
+use crate::extract::constants::{is_generator_consumer, keyword_true_names, literal_arg};
 use crate::extract::ctx::DefKey;
 use crate::extract::helpers::{
     is_asyncio_redis_type, is_callable_ref, is_getattr_call, is_partial_call,
@@ -236,6 +236,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
 
         self.pending_literals = call.arguments.args.iter().map(literal_arg).collect();
+        self.pending_keyword_true = keyword_true_names(&call.arguments.keywords);
         self.pending_callables = self.resolve_positional_callables(call.arguments.args.as_ref());
         self.pending_externals.clear();
         self.pending_constructed_receivers.clear();
@@ -279,11 +280,13 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 CallKind::Call
             };
             let saved_literals = self.pending_literals.clone();
+            let saved_kw_true = self.pending_keyword_true.clone();
             let saved_callables = self.pending_callables.clone();
             let saved_kw_callables = self.pending_keyword_callables.clone();
             for (idx, fid) in ctor_fids.into_iter().enumerate() {
                 if idx > 0 {
                     self.pending_literals = saved_literals.clone();
+                    self.pending_keyword_true = saved_kw_true.clone();
                     self.pending_callables = saved_callables.clone();
                     self.pending_keyword_callables = saved_kw_callables.clone();
                 }
@@ -422,6 +425,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
 
     pub(crate) fn clear_pending_call_args(&mut self) {
         self.pending_literals.clear();
+        self.pending_keyword_true.clear();
         self.pending_callables.clear();
         self.pending_externals.clear();
         self.pending_constructed_receivers.clear();

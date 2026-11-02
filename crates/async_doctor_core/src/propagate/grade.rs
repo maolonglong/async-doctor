@@ -2,7 +2,10 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::graph::{CalleeRef, ConditionTag, FunctionId, LiteralArg, ParamGuard, ProjectFacts};
+use crate::graph::{
+    CallEdge, CalleeRef, ConditionTag, DecoratorRef, FunctionId, LiteralArg, ParamGuard,
+    ProjectFacts,
+};
 use crate::report::{ChainStep, EntryLabel, Finding};
 
 pub(super) fn label_rank(label: EntryLabel) -> u8 {
@@ -178,11 +181,15 @@ pub(super) fn merge_file_io_findings(findings: Vec<Finding>) -> Vec<Finding> {
     let mut others: Vec<Finding> = Vec::new();
     for f in findings {
         let sink_text = f.chain.last().map(|c| c.text.as_str()).unwrap_or("");
-        if is_open_call_text(sink_text)
+        // `open(p).read()` is the rw hop of the inner `open(p)` call on the
+        // same line, not a second open.
+        let chained_open_rw =
+            sink_text.trim_start().starts_with("open(") && is_file_rw_text(sink_text);
+        if is_open_call_text(sink_text) && !chained_open_rw
             || f.fix.fix_group_id.contains("open") && f.rule == "blocking-file"
         {
             // Prefer matching by last chain hop looking like open(
-            if is_open_call_text(sink_text) {
+            if is_open_call_text(sink_text) && !chained_open_rw {
                 opens.push(f);
                 continue;
             }
@@ -526,4 +533,29 @@ pub(super) fn async_twin_hint(
         }
     }
     None
+}
+
+/// Cheap, idempotent path ops (`mkdir(exist_ok=True)`, `makedirs(exist_ok=True)`,
+/// `unlink(missing_ok=True)`) grade as candidates; the flag must be a literal
+/// `True` (keyword, or its stdlib positional slot). `Path.touch` is a candidate
+/// in the sink table itself.
+pub(super) fn is_cheap_path_op(qualname: &str, edge: &CallEdge) -> bool {
+    let (flag, positional) = match qualname {
+        "pathlib.Path.mkdir" | "os.makedirs" => ("exist_ok", 2),
+        "pathlib.Path.unlink" => ("missing_ok", 0),
+        _ => return false,
+    };
+    edge.keyword_true.iter().any(|k| k == flag)
+        || edge.positional_literals.get(positional).copied().flatten() == Some(LiteralArg::True)
+}
+
+/// `functools.cache` / `functools.lru_cache` decorated function: its body only
+/// runs on a cache miss.
+pub(super) fn is_memoized(facts: &ProjectFacts, fid: FunctionId) -> bool {
+    facts.decorator_refs.get(&fid).is_some_and(|refs| {
+        refs.iter().any(|r| {
+            matches!(r, DecoratorRef::External(q)
+                if matches!(q.as_str(), "functools.cache" | "functools.lru_cache"))
+        })
+    })
 }

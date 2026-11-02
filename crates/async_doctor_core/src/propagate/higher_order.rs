@@ -105,6 +105,7 @@ pub(super) fn materialize_higher_order(facts: &ProjectFacts) -> Cow<'_, ProjectF
                 // function, not an argument.
                 edge.callee_is_coroutine = Some(f.is_async);
                 edge.positional_literals.clear();
+                edge.keyword_true.clear();
                 edge.positional_callables.clear();
                 edge.positional_externals.clear();
                 edge.positional_constructed_receivers.clear();
@@ -187,6 +188,7 @@ pub(super) fn materialize_higher_order(facts: &ProjectFacts) -> Cow<'_, ProjectF
                 occurrence: param_edge.occurrence,
                 is_offload_wrapper: false,
                 positional_literals: vec![],
+                keyword_true: vec![],
                 positional_callables: vec![],
                 positional_externals: vec![],
                 positional_constructed_receivers: vec![],

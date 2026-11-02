@@ -88,6 +88,7 @@ pub(crate) struct CallCollector<'a, 'db> {
     pub(super) occurrence_counter: HashMap<(FunctionId, String), u32>,
     /// Literals for the call currently being recorded (set by handle_call).
     pub(super) pending_literals: Vec<Option<LiteralArg>>,
+    pub(super) pending_keyword_true: Vec<String>,
     /// Positional callables for the call currently being recorded.
     pub(super) pending_callables: Vec<Option<FunctionId>>,
     /// Positional external qualnames for the call currently being recorded.
@@ -238,6 +239,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             redis_family_memo: HashMap::new(),
             occurrence_counter: HashMap::new(),
             pending_literals: Vec::new(),
+            pending_keyword_true: Vec::new(),
             pending_callables: Vec::new(),
             pending_externals: Vec::new(),
             pending_constructed_receivers: Vec::new(),

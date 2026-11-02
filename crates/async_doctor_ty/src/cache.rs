@@ -55,7 +55,8 @@ use serde::{Deserialize, Serialize};
 /// `requests.Session.mount|get_adapter`) leave the sink families.
 /// v18: `environment.followBudgetSkipped` counts budget-truncated
 /// third-party follow candidates.
-pub const CACHE_SCHEMA_VERSION: u32 = 18;
+/// v19: edges record keyword args passed a literal `True` (`cheap-path-op`).
+pub const CACHE_SCHEMA_VERSION: u32 = 19;
 
 /// Tool version embedded in the cache path (from this crate's Cargo.toml).
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -150,6 +151,9 @@ pub struct CachedEdge {
     pub occurrence: u32,
     /// Positional literals: `true` / `false` / `none` / omitted (`null`).
     pub positional_literals: Vec<Option<String>>,
+    /// Keyword argument names passed a literal `True`.
+    #[serde(default)]
+    pub keyword_true: Vec<String>,
     /// Positional callable External/full quals when known.
     pub positional_callable_quals: Vec<Option<String>>,
     /// Keyword callable External/full quals when known (`name`, qual).
@@ -485,6 +489,7 @@ mod tests {
                     conditions: vec!["unconditional".into(), "all-paths".into()],
                     occurrence: 0,
                     positional_literals: vec![],
+                    keyword_true: vec![],
                     positional_callable_quals: vec![],
                     keyword_callable_quals: vec![],
                     param_guard_index: None,

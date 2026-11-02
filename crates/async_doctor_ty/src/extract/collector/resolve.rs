@@ -109,6 +109,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             occurrence,
             is_offload_wrapper,
             positional_literals: std::mem::take(&mut self.pending_literals),
+            keyword_true: std::mem::take(&mut self.pending_keyword_true),
             positional_callables: std::mem::take(&mut self.pending_callables),
             positional_externals: std::mem::take(&mut self.pending_externals),
             positional_constructed_receivers: std::mem::take(

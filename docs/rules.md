@@ -56,6 +56,16 @@ blocking `input()` on the loop.
 
 **Notes:**
 
+- Cheap idempotent path ops are `cheap-path-op` candidates, not findings:
+  `Path.mkdir(exist_ok=True)`, `os.makedirs(exist_ok=True)`,
+  `Path.unlink(missing_ok=True)` (flag must be a literal `True`, keyword or its
+  stdlib positional slot) and `Path.touch()`. Plain `mkdir` / `makedirs` /
+  `unlink`, `rename` / `replace`, and `os.remove` / `os.unlink` stay findings.
+- `open(p).read()` in one expression is one finding (the `open(...)` hop),
+  like `with open(p) as f: f.read()`.
+- Paths through a `functools.cache` / `functools.lru_cache` decorated helper
+  carry `cache_miss_dependent` (the body runs only on a cache miss); they stay
+  findings.
 - Project class instantiation (`Cls(...)`, `@dataclass` `__post_init__`,
   `__new__`, inherited `__init__`, `super().__init__`, and `@classmethod`
   `cls(...)` factories), `@property` / `@functools.cached_property` getters,

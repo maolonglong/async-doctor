@@ -151,6 +151,8 @@ pub struct CallEdge {
     pub is_offload_wrapper: bool,
     /// Positional argument literals when known (`None` = unknown / non-literal).
     pub positional_literals: Vec<Option<LiteralArg>>,
+    /// Keyword argument names passed a literal `True` (`exist_ok=True`).
+    pub keyword_true: Vec<String>,
     /// Positional arguments that resolve to project/followed functions (higher-order).
     pub positional_callables: Vec<Option<FunctionId>>,
     /// Positional arguments that resolve to external qualnames (offload targets

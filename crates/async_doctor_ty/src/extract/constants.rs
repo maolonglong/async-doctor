@@ -184,6 +184,15 @@ pub(crate) fn collect_module_constants(suite: &[Stmt]) -> HashMap<String, Module
     values
 }
 
+/// Names of keyword arguments passed a literal `True` (`exist_ok=True`).
+pub(crate) fn keyword_true_names(keywords: &[ruff_python_ast::Keyword]) -> Vec<String> {
+    keywords
+        .iter()
+        .filter(|k| matches!(&k.value, Expr::BooleanLiteral(b) if b.value))
+        .filter_map(|k| k.arg.as_ref().map(|a| a.as_str().to_string()))
+        .collect()
+}
+
 pub(crate) fn literal_arg(expr: &Expr) -> Option<LiteralArg> {
     match expr {
         Expr::BooleanLiteral(b) => Some(if b.value {

@@ -98,8 +98,8 @@ dist-info content fingerprint. Package-cache fingerprints are coarse
 (RECORD/METADATA/one-level `.py`); identical RECORD + unchanged dist-info mtime
 can reuse a package entry even if an unpacked `.py` was patched in place
 (editable installs that refresh dist-info mtime invalidate correctly).
-Package-cache schema is `CACHE_SCHEMA_VERSION` 18: it persists decorator
-qualnames per function so warm runs restore decorator-offload semantics, and a
+Package-cache schema is `CACHE_SCHEMA_VERSION` 19: it persists decorator
+qualnames per function and keyword args passed a literal `True` per edge so warm runs restore decorator-offload semantics, and a
 whole-scan cache hit preserves `environment.followBudgetSkipped` while the rest
 of `environment` is re-detected.
 

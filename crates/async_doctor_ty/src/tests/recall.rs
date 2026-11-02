@@ -23,7 +23,7 @@ fn constructor_init_follows_into_helpers_and_path_mkdir() {
             "class Worker:\n",
             "    def __init__(self, home: Path) -> None:\n",
             "        self.sha = _read_head(Path.cwd())\n",
-            "        (home / \"logs\").mkdir(parents=True, exist_ok=True)\n",
+            "        (home / \"logs\").mkdir(parents=True)\n",
             "\n",
             "async def main() -> None:\n",
             "    w = Worker(Path(\"/tmp\"))\n",
@@ -73,7 +73,7 @@ fn constructor_lifecycle_post_init_new_inheritance_super_classmethod_and_offload
                 "\n",
                 "class BaseWorker:\n",
                 "    def __init__(self, root: Path) -> None:\n",
-                "        (root / \"state\").mkdir(exist_ok=True)\n",
+                "        (root / \"state\").mkdir()\n",
             ),
         ),
         (
@@ -105,7 +105,7 @@ fn constructor_lifecycle_post_init_new_inheritance_super_classmethod_and_offload
                 "\n",
                 "class FactoryService:\n",
                 "    def __init__(self, target: Path) -> None:\n",
-                "        target.unlink(missing_ok=True)\n",
+                "        target.unlink()\n",
                 "\n",
                 "    @classmethod\n",
                 "    def create(cls, target: Path) -> \"FactoryService\":\n",
@@ -339,4 +339,43 @@ fn cached_property_getter_is_followed() {
         report.findings
     );
     let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn pure_constructors_produce_no_findings() {
+    let dir = temp_project(&[(
+        "app.py",
+        concat!(
+            "import time\n",
+            "from dataclasses import dataclass\n",
+            "\n",
+            "class Plain:\n",
+            "    def __init__(self, x):\n",
+            "        self.x = x\n",
+            "\n",
+            "@dataclass\n",
+            "class Holder:\n",
+            "    x: int\n",
+            "\n",
+            "class MyErr(Exception):\n",
+            "    def __init__(self, msg):\n",
+            "        super().__init__(msg)\n",
+            "\n",
+            "async def via_plain():\n",
+            "    Plain(1)\n",
+            "\n",
+            "async def via_dataclass():\n",
+            "    Holder(1)\n",
+            "\n",
+            "async def via_exc():\n",
+            "    MyErr(\"x\")\n",
+        ),
+    )]);
+    let report = scan_path(&dir).unwrap();
+    assert!(
+        report.findings.is_empty() && report.candidates.is_empty(),
+        "pure constructors must not report: {:?} {:?}",
+        report.findings.len(),
+        report.candidates.len()
+    );
 }

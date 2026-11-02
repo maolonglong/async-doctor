@@ -195,7 +195,11 @@ pub fn analyze_with_options(
                 // Name-based async-counterpart rules are only a fallback when
                 // ty could not resolve coroutine-ness. Awaited *sync* defs
                 // (e.g. `await redis.Redis().get(...)`) still seed.
-                if let Some(hit) = sinks.lookup(qualname) {
+                if let Some(mut hit) = sinks.lookup(qualname) {
+                    if grade::is_cheap_path_op(qualname, edge) {
+                        hit.candidate_only = true;
+                        hit.candidate_reason = Some("cheap-path-op");
+                    }
                     if hit.with_only && !matches!(edge.kind, CallKind::WithEnter) {
                         continue;
                     }
@@ -335,6 +339,9 @@ pub fn analyze_with_options(
                 ));
                 if let CalleeRef::Project(fid) = e.callee {
                     chain_qualnames.push(func_full_qualnames[fid.index()].clone());
+                    if grade::is_memoized(facts, fid) {
+                        condition_tags.push(ConditionTag::CacheMissDependent);
+                    }
                 }
                 condition_tags.extend(e.conditions.iter().copied());
             }

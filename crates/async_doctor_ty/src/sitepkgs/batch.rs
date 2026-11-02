@@ -333,6 +333,7 @@ fn edge_to_cached(e: &CallEdge, id_to_external_key: &HashMap<FunctionId, String>
             .collect(),
         occurrence: e.occurrence,
         positional_literals,
+        keyword_true: e.keyword_true.clone(),
         positional_callable_quals,
         keyword_callable_quals,
         param_guard_index: e.param_guard.map(|g| g.index),
@@ -635,6 +636,7 @@ pub(crate) fn materialize_cached_functions(
                 occurrence: edge.occurrence,
                 is_offload_wrapper: edge.is_offload_wrapper,
                 positional_literals,
+                keyword_true: edge.keyword_true.clone(),
                 positional_callables,
                 // First-party offload externals are not stored in the package
                 // cache; third-party offload targets are rare for advice.

@@ -14,6 +14,7 @@ mod guards_and_archives;
 mod helpers;
 mod higher_order_and_narrowing;
 mod offload;
+mod path_ops;
 mod prerelease;
 mod recall;
 mod scan_cache;

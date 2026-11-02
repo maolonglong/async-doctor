@@ -11,7 +11,7 @@ CLI flags: [cli.md](cli.md).
 | `complete` | false on timeout / parse failure; attach `skipped` |
 | `score` | deterministic `0..=100` health score (`100` when clean; `>= 85` ("Great") iff zero findings and zero unused suppressions; see **Health score** below) |
 | `environment` | interpreter/venv/site-packages used; `frameworks` when async frameworks/runtimes (FastAPI, Starlette, Django, aiohttp, anyio, Trio, … — not client libs like httpx/redis) are detected in `site-packages`; `note` when degraded (ratio-aware when a venv is active). `environment.note` and `environment.frameworks` are omitted from JSON when empty (`skip_serializing_if`); `environment.followBudgetSkipped` counts third-party callees not followed because the follow budget was reached — omitted when 0, and it never flips `complete` |
-| `findings[]` / `candidates[]` / `advice[]` | always emitted (even empty); candidates have `reason`; advice is non-blocking (SARIF `note`) |
+| `findings[]` / `candidates[]` / `advice[]` | always emitted (even empty); candidates have `reason` (e.g. `conditional`, `metadata`, `short-lock`, `cheap-path-op`, `unresolved`); advice is non-blocking (SARIF `note`) |
 | `locationLessCandidates[]` | always emitted; missing-third-party aggregate lives here with empty `entry.file`/`chain` and empty `why` |
 | `skipped[]` / `sinkSites[]` / `unusedSuppressions[]` / `unresolvedSummary[]` | always emitted (even empty); `sinkSites[]` attributes merged `open` + `read`/`write` chains to the primary `open` hop |
 | `hiddenUnresolvedCandidates` / `omittedNonProductionEntries` / `fileCount` / `asyncEntryCount` / `omittedFindings` / `omittedCandidates` / `omittedAdvice` | always emitted, including `0` — the `omitted*` trio counts entries cut by `--max-findings` (0 without the flag) |
@@ -36,7 +36,7 @@ filters on the same hop. Literal-constant conditions prune dead branches
 | `all-paths` | Reached on every path through the function (when proven) |
 | `loop` | Under a loop |
 | `async-branch` | Under an `if`/`else`/`try`/`match` (or similar) guard |
-| `cache_miss_dependent` | Behind a module/global cache-miss check (`if _cache is None`) |
+| `cache_miss_dependent` | Behind a module/global cache-miss check (`if _cache is None`), or inside a `functools.cache` / `lru_cache` helper |
 | `no_running_loop_guard` | Under a proven “no running event loop” guard (nested-event-loop seeds with this tag are dropped) |
 | `sync_entry` | FastAPI/Starlette sync `def` route (threadpool) — presentation only |
 

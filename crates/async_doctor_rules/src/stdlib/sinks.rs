@@ -222,10 +222,11 @@ pub static STDLIB_SINKS: &[BuiltinSink] = &[
         RULE_BLOCKING_FILE,
         "Offload with `asyncio.to_thread(path.replace, ...)` or use async file helpers.",
     ),
-    BuiltinSink::finding(
+    BuiltinSink::candidate(
         "pathlib.Path.touch",
         RULE_BLOCKING_FILE,
-        "Offload with `asyncio.to_thread(path.touch, ...)` or use async file helpers.",
+        "Usually cheap; offload with `asyncio.to_thread(path.touch, ...)` on a slow FS.",
+        "cheap-path-op",
     ),
     // --- importlib.resources / importlib_resources (Traversable + functional APIs) ---
     BuiltinSink::finding(
