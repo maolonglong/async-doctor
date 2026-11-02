@@ -309,3 +309,34 @@ fn with_open_write_attributes_sink_site_to_open_line() {
     );
     let _ = fs::remove_dir_all(dir);
 }
+
+/// `@functools.cached_property` getters are followed like `@property`.
+#[test]
+fn cached_property_getter_is_followed() {
+    let dir = temp_project(&[(
+        "cfg.py",
+        concat!(
+            "import functools\n",
+            "from pathlib import Path\n",
+            "\n",
+            "class Cfg:\n",
+            "    @functools.cached_property\n",
+            "    def data(self):\n",
+            "        return Path(\"x\").read_text()\n",
+            "\n",
+            "async def handler():\n",
+            "    c = Cfg()\n",
+            "    return c.data\n",
+        ),
+    )]);
+    let report = scan_path(&dir).unwrap();
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|f| f.rule == "blocking-file" && f.entry.name == "handler"),
+        "cached_property read_text must be a blocking-file finding: {:?}",
+        report.findings
+    );
+    let _ = fs::remove_dir_all(dir);
+}

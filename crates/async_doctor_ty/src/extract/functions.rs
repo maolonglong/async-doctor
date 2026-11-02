@@ -193,6 +193,7 @@ pub(crate) fn merge_pass1_file_data(
             package_version: None,
             invokes_params: Vec::new(),
             is_offload_wrapper: false,
+            offload_decorator: None,
         });
     }
 }
@@ -211,8 +212,8 @@ pub(crate) fn twin_name(method: &str, methods: &[String]) -> Option<String> {
 pub(crate) fn decorator_is_property(expr: &Expr) -> bool {
     match expr {
         Expr::Call(call) => decorator_is_property(&call.func),
-        Expr::Name(n) => n.id.as_str() == "property",
-        Expr::Attribute(a) => a.attr.as_str() == "property",
+        Expr::Name(n) => matches!(n.id.as_str(), "property" | "cached_property"),
+        Expr::Attribute(a) => matches!(a.attr.as_str(), "property" | "cached_property"),
         _ => false,
     }
 }

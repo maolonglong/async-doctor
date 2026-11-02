@@ -172,6 +172,11 @@ pub(crate) struct Pass2FileResult {
     pub sync_route_ids: HashSet<FunctionId>,
     /// Base-function field patches applied during this file's visit.
     pub base_patches: Vec<BaseFnPatch>,
+    /// Decorator / forwarded-param refs recorded during this file's visit.
+    pub decorator_refs:
+        std::collections::BTreeMap<FunctionId, Vec<async_doctor_core::DecoratorRef>>,
+    pub offload_wrapper_refs:
+        std::collections::BTreeMap<FunctionId, Vec<async_doctor_core::DecoratorRef>>,
     pub unresolved_imports: Vec<UnresolvedImport>,
     pub unresolved_third_party_modules: Vec<String>,
     pub resolved_third_party_modules: Vec<String>,
@@ -354,6 +359,8 @@ impl Pass2FileResult {
             task_target_ids: HashSet::new(),
             route_ids: HashSet::new(),
             sync_route_ids: HashSet::new(),
+            decorator_refs: std::collections::BTreeMap::new(),
+            offload_wrapper_refs: std::collections::BTreeMap::new(),
             base_patches: Vec::new(),
             unresolved_imports: Vec::new(),
             unresolved_third_party_modules: Vec::new(),
@@ -509,6 +516,8 @@ pub(crate) fn extract_one_file(
         unresolved_imports: facts.unresolved_imports,
         unresolved_third_party_modules: facts.unresolved_third_party_modules,
         resolved_third_party_modules: facts.resolved_third_party_modules,
+        decorator_refs: facts.decorator_refs,
+        offload_wrapper_refs: facts.offload_wrapper_refs,
         skip_reason: None,
     }
 }
@@ -551,6 +560,22 @@ pub(crate) fn merge_pass2_results(
                 f.invokes_params = patch.invokes_params;
             }
         }
+        for (fid, refs) in result.decorator_refs {
+            let fid = remap.get(&fid).copied().unwrap_or(fid);
+            facts
+                .decorator_refs
+                .entry(fid)
+                .or_default()
+                .extend(refs.into_iter().map(|r| remap_ref(r, &remap)));
+        }
+        for (fid, refs) in result.offload_wrapper_refs {
+            let fid = remap.get(&fid).copied().unwrap_or(fid);
+            facts
+                .offload_wrapper_refs
+                .entry(fid)
+                .or_default()
+                .extend(refs.into_iter().map(|r| remap_ref(r, &remap)));
+        }
         for mut edge in result.edges {
             remap_edge_ids(&mut edge, &remap);
             facts.edges.push(edge);
@@ -580,6 +605,18 @@ pub(crate) fn merge_pass2_results(
         facts
             .resolved_third_party_modules
             .extend(result.resolved_third_party_modules);
+    }
+}
+
+fn remap_ref(
+    r: async_doctor_core::DecoratorRef,
+    remap: &HashMap<FunctionId, FunctionId>,
+) -> async_doctor_core::DecoratorRef {
+    match r {
+        async_doctor_core::DecoratorRef::Function(id) => {
+            async_doctor_core::DecoratorRef::Function(remap.get(&id).copied().unwrap_or(id))
+        }
+        other => other,
     }
 }
 
@@ -653,6 +690,12 @@ impl Pass2FileLens {
         def_map.retain(|_, id| id.index() < self.functions);
         qual_map.retain(|_, id| id.index() < self.functions);
         task_targets.0.retain(|id| id.index() < self.functions);
+        facts
+            .decorator_refs
+            .retain(|id, _| id.index() < self.functions);
+        facts
+            .offload_wrapper_refs
+            .retain(|id, _| id.index() < self.functions);
     }
 }
 

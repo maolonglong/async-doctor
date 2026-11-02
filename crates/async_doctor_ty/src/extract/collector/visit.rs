@@ -1,5 +1,6 @@
 //! AST visitor entry points for [`super::CallCollector`].
 
+use async_doctor_core::FunctionId;
 use ruff_python_ast::visitor::{Visitor, walk_expr, walk_stmt};
 use ruff_python_ast::{self as ast, Expr, Stmt};
 
@@ -47,7 +48,16 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                     self.in_memory_archive_receivers.remove(p);
                 }
                 self.fn_stack.push(func.name.as_str().to_string());
+                self.fn_scopes.push(super::FnScope {
+                    fid,
+                    params: self.current_param_names.clone(),
+                    returned: names_returned_by(&func.body),
+                });
+                if let Some(id) = fid {
+                    self.note_decorator_refs(id, func);
+                }
                 self.visit_body_seq(&func.body);
+                self.fn_scopes.pop();
                 self.fn_stack.pop();
                 self.current_fn = prev;
                 self.current_param_names = prev_params;
@@ -198,7 +208,83 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
     }
 }
 
+/// Names `return`ed by a def body — recursive into if/for/while/with/try/match
+/// bodies but never into nested defs, classes, or lambdas.
+fn names_returned_by(body: &[Stmt]) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    fn walk(stmts: &[Stmt], out: &mut std::collections::HashSet<String>) {
+        for stmt in stmts {
+            match stmt {
+                Stmt::Return(r) => {
+                    if let Some(Expr::Name(n)) = r.value.as_deref() {
+                        out.insert(n.id.as_str().to_string());
+                    }
+                }
+                Stmt::If(s) => {
+                    walk(&s.body, out);
+                    for c in &s.elif_else_clauses {
+                        walk(&c.body, out);
+                    }
+                }
+                Stmt::For(s) => {
+                    walk(&s.body, out);
+                    walk(&s.orelse, out);
+                }
+                Stmt::While(s) => {
+                    walk(&s.body, out);
+                    walk(&s.orelse, out);
+                }
+                Stmt::With(s) => walk(&s.body, out),
+                Stmt::Try(s) => {
+                    walk(&s.body, out);
+                    for h in &s.handlers {
+                        let ast::ExceptHandler::ExceptHandler(h) = h;
+                        walk(&h.body, out);
+                    }
+                    walk(&s.orelse, out);
+                    walk(&s.finalbody, out);
+                }
+                Stmt::Match(s) => {
+                    for c in &s.cases {
+                        walk(&c.body, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    walk(body, &mut out);
+    out
+}
+
 impl<'a, 'db> CallCollector<'a, 'db> {
+    /// Record each decorator of `func` as a [`DecoratorRef`] on `fid` —
+    /// offload classification is deferred until `is_offload_wrapper` is final.
+    pub(crate) fn note_decorator_refs(&mut self, fid: FunctionId, func: &'a ast::StmtFunctionDef) {
+        if func.decorator_list.is_empty() {
+            return;
+        }
+        for deco in &func.decorator_list {
+            let dexpr = match &deco.expression {
+                Expr::Call(c) => c.func.as_ref(),
+                e => e,
+            };
+            if let Some(dfid) = self.resolve_project_function(dexpr) {
+                self.facts
+                    .decorator_refs
+                    .entry(fid)
+                    .or_default()
+                    .push(async_doctor_core::DecoratorRef::Function(dfid));
+            } else if let Some(q) = self.external_qualname(dexpr) {
+                self.facts
+                    .decorator_refs
+                    .entry(fid)
+                    .or_default()
+                    .push(async_doctor_core::DecoratorRef::External(q));
+            }
+        }
+    }
+
     /// Expand the newest non-cyclic genexpr bound to `name`.
     ///
     /// On `out = (sleep…); out = (x for x in out)`, expanding the second

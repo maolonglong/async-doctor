@@ -88,6 +88,7 @@ fn fn_fact(id: u32, name: &str, is_async: bool, file: &str, line: u32) -> Functi
         package_version: None,
         invokes_params: vec![],
         is_offload_wrapper: false,
+        offload_decorator: None,
     }
 }
 

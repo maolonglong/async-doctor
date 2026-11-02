@@ -98,11 +98,16 @@ dist-info content fingerprint. Package-cache fingerprints are coarse
 (RECORD/METADATA/one-level `.py`); identical RECORD + unchanged dist-info mtime
 can reuse a package entry even if an unpacked `.py` was patched in place
 (editable installs that refresh dist-info mtime invalidate correctly).
+Package-cache schema is `CACHE_SCHEMA_VERSION` 18: it persists decorator
+qualnames per function so warm runs restore decorator-offload semantics, and a
+whole-scan cache hit preserves `environment.followBudgetSkipped` while the rest
+of `environment` is re-detected.
 
 ### `crates/async_doctor_core`
 
 Call graph types (`graph.rs`: `ProjectFacts`, `CallEdge`, `ConditionTag`,
-`AnalyzeOptions`), stable finding ids (`id.rs`), environment report struct
+`AnalyzeOptions`, `DecoratorRef`, `OffloadKind`; `FunctionFact.offload_decorator`
+and `is_offload_wrapper` drive offload-edge materialization), stable finding ids (`id.rs`), environment report struct
 (`environment.rs`), sink-site grouping (`sink_sites.rs`), and report schema
 (`report.rs`: `Report`, `Finding`, `Candidate`, `Advice`, `SCHEMA_VERSION`).
 

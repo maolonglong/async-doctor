@@ -9,8 +9,8 @@ mod sink_sites;
 
 pub use environment::{EnvironmentKind, ScanEnvironment};
 pub use graph::{
-    AnalyzeOptions, CallEdge, CallKind, CalleeRef, ConditionTag, FunctionFact, FunctionId,
-    LiteralArg, OffloadKind, ParamGuard, ProjectFacts, UnresolvedImport,
+    AnalyzeOptions, CallEdge, CallKind, CalleeRef, ConditionTag, DecoratorRef, FunctionFact,
+    FunctionId, LiteralArg, OffloadKind, ParamGuard, ProjectFacts, UnresolvedImport,
     is_non_production_entry_path,
 };
 pub use id::{FindingIdParts, finding_id, fix_group_id};

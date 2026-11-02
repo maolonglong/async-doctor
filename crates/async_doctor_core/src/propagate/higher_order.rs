@@ -9,19 +9,76 @@ use crate::graph::{CalleeRef, ProjectFacts};
 pub(super) fn materialize_higher_order(facts: &ProjectFacts) -> Cow<'_, ProjectFacts> {
     use crate::graph::{CallEdge, OffloadKind};
 
-    let needs_materialization = facts.edges.iter().any(|edge| match edge.callee {
-        CalleeRef::Project(fid) => facts
-            .functions
-            .get(fid.index())
-            .is_some_and(|f| f.is_offload_wrapper),
-        CalleeRef::ParamInvoke { .. } => true,
-        _ => false,
-    });
+    let needs_materialization = !facts.decorator_refs.is_empty()
+        || !facts.offload_wrapper_refs.is_empty()
+        || facts.edges.iter().any(|edge| match edge.callee {
+            CalleeRef::Project(fid) => facts
+                .functions
+                .get(fid.index())
+                .is_some_and(|f| f.is_offload_wrapper),
+            CalleeRef::ParamInvoke { .. } => true,
+            _ => false,
+        });
     if !needs_materialization {
         return Cow::Borrowed(facts);
     }
 
     let mut out = facts.clone();
+
+    // `module.qualname` → id index for resolving `DecoratorRef::External`
+    // quals to followed / project functions.
+    let qual_index: std::collections::HashMap<String, crate::graph::FunctionId> =
+        out.functions.iter().map(|f| (ref_key(f), f.id)).collect();
+    let ref_is_offload_wrapper =
+        |r: &crate::graph::DecoratorRef,
+         out: &ProjectFacts,
+         idx: &std::collections::HashMap<String, crate::graph::FunctionId>| {
+            match r {
+                crate::graph::DecoratorRef::Function(id) => {
+                    out.functions[id.index()].is_offload_wrapper
+                }
+                crate::graph::DecoratorRef::External(q) => idx
+                    .get(q.as_str())
+                    .is_some_and(|id| out.functions[id.index()].is_offload_wrapper),
+            }
+        };
+
+    // Deferred wrapper candidates: a nested, returned def forwards an
+    // enclosing param to a callee that turned out to be an offload wrapper.
+    // Iterate to a fixpoint so wrapper chains settle (bounded — marks only grow).
+    loop {
+        let mut changed = false;
+        for (fid, refs) in &out.offload_wrapper_refs.clone() {
+            if out.functions[fid.index()].is_offload_wrapper {
+                continue;
+            }
+            if refs
+                .iter()
+                .any(|r| ref_is_offload_wrapper(r, &out, &qual_index))
+            {
+                out.functions[fid.index()].is_offload_wrapper = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    // Classify decorator refs once wrapper marks are final.
+    for (fid, refs) in &out.decorator_refs.clone() {
+        let kind = refs.iter().find_map(|r| match r {
+            crate::graph::DecoratorRef::External(q) => offload_decorator_qual(q).or_else(|| {
+                ref_is_offload_wrapper(r, &out, &qual_index).then_some(OffloadKind::AsyncioToThread)
+            }),
+            crate::graph::DecoratorRef::Function(_) => {
+                ref_is_offload_wrapper(r, &out, &qual_index).then_some(OffloadKind::AsyncioToThread)
+            }
+        });
+        if let Some(kind) = kind {
+            out.functions[fid.index()].offload_decorator = Some(kind);
+        }
+    }
 
     // Index edges by caller once — avoid O(E²) scans.
     let mut by_caller: Vec<Vec<usize>> = vec![Vec::new(); out.functions.len()];
@@ -32,11 +89,32 @@ pub(super) fn materialize_higher_order(facts: &ProjectFacts) -> Cow<'_, ProjectF
         }
     }
 
-    // Mark call edges to inferred offload wrappers as offload cuts.
+    // Mark call edges to offload-decorated functions and inferred offload
+    // wrappers as offload cuts.
     for edge in &mut out.edges {
-        if let CalleeRef::Project(fid) = edge.callee
-            && out.functions[fid.index()].is_offload_wrapper
-        {
+        if let CalleeRef::Project(fid) = edge.callee {
+            let f = &out.functions[fid.index()];
+            if let Some(kind) = f.offload_decorator {
+                // Calling a `@sync_to_async`-style decorated function runs its
+                // body on a worker thread, never on this caller's loop.
+                edge.is_offload_wrapper = true;
+                edge.callee = CalleeRef::Offload(kind);
+                // The offloaded callable is the decorated function itself;
+                // call args are merely forwarded to it. Drop them so
+                // `offload-coroutine` and twin advice read the decorated
+                // function, not an argument.
+                edge.callee_is_coroutine = Some(f.is_async);
+                edge.positional_literals.clear();
+                edge.positional_callables.clear();
+                edge.positional_externals.clear();
+                edge.positional_constructed_receivers.clear();
+                edge.keyword_callables.clear();
+                edge.constructed_receiver = None;
+                continue;
+            }
+            if !f.is_offload_wrapper {
+                continue;
+            }
             edge.is_offload_wrapper = true;
             edge.callee = CalleeRef::Offload(OffloadKind::AsyncioToThread);
             // The wrapper itself is often `async def`; coroutine-ness for
@@ -125,4 +203,25 @@ pub(super) fn materialize_higher_order(facts: &ProjectFacts) -> Cow<'_, ProjectF
     }
     out.edges.extend(extras);
     Cow::Owned(out)
+}
+
+/// Lookup key for `DecoratorRef::External` quals — `module.qualname` (or bare
+/// `qualname` for script modules), matching ty's `module.Qual` shape.
+fn ref_key(f: &crate::graph::FunctionFact) -> String {
+    if f.module.is_empty() {
+        f.qualname.clone()
+    } else {
+        format!("{}.{}", f.module, f.qualname)
+    }
+}
+
+/// ty-resolved decorator qualnames that are offload boundaries. Bare and
+/// called (`@sync_to_async(thread_sensitive=…)`) forms record the same qual.
+fn offload_decorator_qual(q: &str) -> Option<crate::graph::OffloadKind> {
+    use crate::graph::OffloadKind;
+    match q {
+        "asgiref.sync.sync_to_async" => Some(OffloadKind::AsgirefSyncToAsync),
+        "channels.db.database_sync_to_async" => Some(OffloadKind::ChannelsDbSyncToAsync),
+        _ => None,
+    }
 }

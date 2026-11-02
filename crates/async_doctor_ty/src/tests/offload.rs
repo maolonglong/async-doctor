@@ -75,3 +75,35 @@ fn run_in_executor_cuts() {
     );
     let _ = fs::remove_dir_all(dir);
 }
+
+/// `sync_to_async` / `database_sync_to_async` / project offload decorators cut
+/// the call edge — the decorated body never runs on the caller's loop.
+#[test]
+fn offload_decorators_cut() {
+    use super::helpers::clone_fixture;
+    let dir = clone_fixture("m4_offload_decorators");
+    let report = scan_path(&dir).unwrap();
+    let cut_entries = [
+        "via_bare",
+        "via_called",
+        "via_db",
+        "via_project",
+        "via_project_indirect",
+    ];
+    for entry in cut_entries {
+        assert!(
+            !report.findings.iter().any(|f| f.entry.name == entry),
+            "{entry} must have no findings (offload decorator cut): {:?}",
+            report.findings
+        );
+    }
+    // Transparent decorators must keep reporting.
+    for entry in ["via_fake_name", "via_retry"] {
+        assert!(
+            report.findings.iter().any(|f| f.entry.name == entry),
+            "{entry} must keep its blocking-sleep finding: {:?}",
+            report.findings
+        );
+    }
+    let _ = fs::remove_dir_all(dir);
+}

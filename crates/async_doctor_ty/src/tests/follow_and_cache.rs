@@ -606,6 +606,7 @@ fn m2_cache_fingerprint_invalidates_on_content_change() {
             param_names: vec![],
             invokes_params: vec![],
             is_offload_wrapper: false,
+            decorator_quals: vec![],
             edges: vec![],
         },
     );

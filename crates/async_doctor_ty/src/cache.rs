@@ -49,7 +49,13 @@ use serde::{Deserialize, Serialize};
 /// v16: project class constructor / MRO / `super()` resolution; `Path.mkdir` +
 /// `importlib.resources` Traversable sinks; `open`+`read`/`write` sink-site
 /// attribution; log-scaled health score.
-pub const CACHE_SCHEMA_VERSION: u32 = 16;
+/// v17: offload decorators (`sync_to_async` / `database_sync_to_async` /
+/// project wrappers) cut call edges; `functools.cached_property` getters
+/// followed; non-IO methods (`httpx.Client.build_request`,
+/// `requests.Session.mount|get_adapter`) leave the sink families.
+/// v18: `environment.followBudgetSkipped` counts budget-truncated
+/// third-party follow candidates.
+pub const CACHE_SCHEMA_VERSION: u32 = 18;
 
 /// Tool version embedded in the cache path (from this crate's Cargo.toml).
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -172,6 +178,10 @@ pub struct CachedFunction {
     pub param_names: Vec<String>,
     pub invokes_params: Vec<u32>,
     pub is_offload_wrapper: bool,
+    /// Decorator refs persisted as `module.qual` keys — restored as
+    /// `DecoratorRef::External` on materialization.
+    #[serde(default)]
+    pub decorator_quals: Vec<String>,
     pub edges: Vec<CachedEdge>,
 }
 
@@ -461,6 +471,7 @@ mod tests {
                 param_names: vec![],
                 invokes_params: vec![],
                 is_offload_wrapper: false,
+                decorator_quals: vec![],
                 edges: vec![CachedEdge {
                     callee_qualname: "time.sleep".into(),
                     callee_kind: "external".into(),

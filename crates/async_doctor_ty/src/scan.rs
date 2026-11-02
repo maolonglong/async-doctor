@@ -176,6 +176,7 @@ fn refresh_environment_on_cache_hit(report: &mut Report, scan_root: &Path) {
     };
     live.unresolved_third_party = report.environment.unresolved_third_party;
     live.resolved_third_party = report.environment.resolved_third_party;
+    live.follow_budget_skipped = report.environment.follow_budget_skipped;
     live.refresh_note();
     report.environment = live;
 }

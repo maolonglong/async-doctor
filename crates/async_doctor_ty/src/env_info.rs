@@ -60,6 +60,7 @@ pub(crate) fn summarize_environment(
         unresolved_third_party: 0,
         resolved_third_party: 0,
         note: String::new(),
+        follow_budget_skipped: 0,
     };
     out.refresh_note();
     out

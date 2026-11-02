@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use async_doctor_core::{FunctionId, LiteralArg, ParamGuard, ProjectFacts};
-use ruff_python_ast::{self as ast};
+use ruff_python_ast::{self as ast, Expr};
 use ty_python_semantic::SemanticModel;
 
 use crate::sitepkgs::{FollowTarget, PackageMetaMemo};
@@ -156,6 +156,22 @@ pub(crate) struct CallCollector<'a, 'db> {
     pub(super) base_route_ids: HashSet<FunctionId>,
     /// Base sync functions labeled as routes while visiting with `functions_base`.
     pub(super) base_sync_route_ids: HashSet<FunctionId>,
+    /// Function scopes enclosing the current def (index-aligned with
+    /// `fn_stack`): used to detect decorator factories `D(fn)` whose returned
+    /// nested def forwards `fn` into an offload boundary.
+    pub(super) fn_scopes: Vec<FnScope>,
+}
+
+/// One enclosing `def` scope for nested-def offload-wrapper detection.
+pub(super) struct FnScope {
+    /// The enclosing function's id (None for defs outside the qual map).
+    pub fid: Option<FunctionId>,
+    /// Its parameter names — a nested def forwarding one of these is the
+    /// decorator-factory shape `D(fn) -> wrapper`.
+    pub params: Vec<String>,
+    /// Names this function returns directly (`return wrapper`), including
+    /// returns inside if/try/with bodies but not inside nested defs/classes.
+    pub returned: std::collections::HashSet<String>,
 }
 
 /// Hard cap on nested local-genexpr expansions (belt alongside the pointer set).
@@ -249,6 +265,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             base_invokes_params: HashMap::new(),
             base_route_ids: HashSet::new(),
             base_sync_route_ids: HashSet::new(),
+            fn_scopes: Vec::new(),
         }
     }
 
@@ -346,6 +363,57 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             .get(key)
             .copied()
             .or_else(|| self.def_map_base.and_then(|b| b.get(key).copied()))
+    }
+
+    /// When inside a nested def, return the enclosing function whose parameter
+    /// `name` is — provided every scope between it and the current def returns
+    /// the next def (`D(fn) -> wrapper`, `D(fn) -> outer -> wrapper`).
+    pub(super) fn enclosing_param_scope(&self, name: &str) -> Option<FunctionId> {
+        let n = self.fn_scopes.len();
+        if n < 2 {
+            return None;
+        }
+        for i in (0..n - 1).rev() {
+            let scope = &self.fn_scopes[i];
+            if !scope.params.iter().any(|p| p == name) {
+                continue;
+            }
+            let returned_chain = ((i + 1)..n).all(|j| {
+                self.fn_scopes[j - 1]
+                    .returned
+                    .contains(self.fn_stack[j].as_str())
+            });
+            if returned_chain {
+                return scope.fid;
+            }
+        }
+        None
+    }
+
+    /// Inside a nested, returned def: an enclosing function's param forwarded
+    /// as the *callable* argument to this callee may make it an inferred
+    /// offload wrapper (`D(fn) -> wrapper` calling `real_wrapper(fn)`).
+    /// Offload wrappers take the callable first, so only arg 0 counts —
+    /// `run_in_threadpool(handler, conn, exc)` forwards `conn` as data.
+    /// Checked after merge via [`ProjectFacts::offload_wrapper_refs`].
+    pub(super) fn note_forwarded_enclosing_param(
+        &mut self,
+        call: &'a ast::ExprCall,
+        target: async_doctor_core::DecoratorRef,
+    ) {
+        if self.fn_scopes.len() < 2 {
+            return;
+        }
+        let Some(Expr::Name(n)) = call.arguments.args.first() else {
+            return;
+        };
+        if let Some(owner) = self.enclosing_param_scope(n.id.as_str()) {
+            self.facts
+                .offload_wrapper_refs
+                .entry(owner)
+                .or_default()
+                .push(target);
+        }
     }
 
     pub(super) fn qual_get(&self, key: &(String, String)) -> Option<FunctionId> {

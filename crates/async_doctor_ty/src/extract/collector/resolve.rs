@@ -185,6 +185,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             "anyio.to_thread.run_sync" => Some(OffloadKind::AnyioToThread),
             "starlette.concurrency.run_in_threadpool" => Some(OffloadKind::StarletteThreadpool),
             "asgiref.sync.sync_to_async" => Some(OffloadKind::AsgirefSyncToAsync),
+            "channels.db.database_sync_to_async" => Some(OffloadKind::ChannelsDbSyncToAsync),
             // `Executor.map` blocks on consumption — handled as a sink, not an
             // offload cut (unlike `submit`, which returns a Future immediately).
             "concurrent.futures.Executor.submit"

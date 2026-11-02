@@ -50,6 +50,13 @@ pub struct ScanEnvironment {
     /// Short advisory when resolution may be degraded (empty when fine).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
+    /// Third-party callees skipped because the follow budget was reached.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub follow_budget_skipped: u32,
+}
+
+fn is_zero(v: &u32) -> bool {
+    *v == 0
 }
 
 impl ScanEnvironment {
@@ -68,6 +75,7 @@ impl ScanEnvironment {
             unresolved_third_party: 0,
             resolved_third_party: 0,
             note: String::new(),
+            follow_budget_skipped: 0,
         }
     }
 
@@ -172,6 +180,7 @@ mod tests {
             unresolved_third_party: 98,
             resolved_third_party: 50,
             note: String::new(),
+            follow_budget_skipped: 0,
         };
         env.refresh_note();
         assert!(
@@ -198,6 +207,7 @@ mod tests {
             unresolved_third_party: 2,
             resolved_third_party: 40,
             note: String::new(),
+            follow_budget_skipped: 0,
         };
         env.refresh_note();
         assert!(

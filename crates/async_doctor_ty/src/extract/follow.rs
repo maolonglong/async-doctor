@@ -1,6 +1,8 @@
 //! Follow reachable third-party site-packages callees into the call graph.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+use async_doctor_core::DecoratorRef;
 use std::path::Path;
 
 use async_doctor_core::{CalleeRef, EntryLabel, FunctionFact, FunctionId, ProjectFacts, SinkTable};
@@ -223,6 +225,7 @@ pub(crate) fn follow_third_party(
                         &facts.edges,
                         &id_to_external_key,
                         follow_targets,
+                        decorator_quals_for(facts, id),
                     );
                 }
             }
@@ -262,6 +265,7 @@ pub(crate) fn follow_third_party(
     // cache hits must charge `follow_budget` the same way (one unit per
     // materialized/extracted function, no free transitive closure).
     let mut followed: usize = 0;
+    let mut budget_skipped: usize = 0;
     loop {
         let mut wave_candidates: BTreeMap<String, u32> = BTreeMap::new();
         for &fid in &reachable_fns {
@@ -300,8 +304,11 @@ pub(crate) fn follow_third_party(
         ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
         let remaining = follow_budget.saturating_sub(followed);
         if remaining == 0 {
+            // Every candidate in this (and later) waves is skipped by budget.
+            budget_skipped += ranked.len();
             break;
         }
+        budget_skipped += ranked.len().saturating_sub(remaining);
         ranked.truncate(remaining);
 
         let mut progressed = false;
@@ -397,6 +404,7 @@ pub(crate) fn follow_third_party(
                         &facts.edges,
                         &id_to_external_key,
                         follow_targets,
+                        decorator_quals_for(facts, id),
                     );
                 }
             }
@@ -441,6 +449,7 @@ pub(crate) fn follow_third_party(
 
     // One atomic write per dirty package.
     cache_batch.flush();
+    facts.environment.follow_budget_skipped = budget_skipped as u32;
 }
 
 /// Rewrite External→Project for extracted callees, skipping known sinks.
@@ -616,6 +625,7 @@ pub(crate) fn extract_third_party_function(
         package_version: target.package_version.clone(),
         invokes_params: Vec::new(),
         is_offload_wrapper: false,
+        offload_decorator: None,
     });
     def_map.insert(key, id);
     qual_map.insert((module.clone(), qualname), id);
@@ -654,4 +664,27 @@ pub(crate) fn extract_third_party_function(
     visitor.current_param_names = param_names_for_visit;
     visitor.visit_body_seq(&func.body);
     Some(id)
+}
+
+/// Convert a followed function's decorator refs to `module.qual` cache keys.
+fn decorator_quals_for(facts: &ProjectFacts, id: FunctionId) -> Vec<String> {
+    facts
+        .decorator_refs
+        .get(&id)
+        .map(|refs| {
+            refs.iter()
+                .map(|r| match r {
+                    DecoratorRef::External(q) => q.clone(),
+                    DecoratorRef::Function(dfid) => {
+                        let f = &facts.functions[dfid.index()];
+                        if f.module.is_empty() {
+                            f.qualname.clone()
+                        } else {
+                            format!("{}.{}", f.module, f.qualname)
+                        }
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }

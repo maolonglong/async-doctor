@@ -23,6 +23,20 @@ Sync HTTP clients (`urllib`, `requests`, sync `httpx` / `urllib3`).
 
 **Fix:** `httpx.AsyncClient` / `aiohttp`, or `await asyncio.to_thread(...)`.
 
+**Notes:**
+
+- Non-IO client methods do not report: `httpx.Client.build_request` only
+  builds a `Request` object, `httpx.Client.mount` registers transports, and
+  `requests.Session.mount` / `requests.Session.get_adapter` are
+  adapter-registry lookups.
+- `openai` / `anthropic` `with_options` / `copy` return new clients — no
+  request. `pymysql.err.*` / `pymysql.constants.*` / `pymysql.converters.*`
+  (exception constructors, constants, converters) are not IO.
+- `kafka-python` consumer local-state mutators and metrics snapshots do no
+  broker RPC: `pause`/`resume`/`seek`/`assignment`/`subscription`/`paused`/
+  `metrics`/`bootstrap_connected` on `KafkaConsumer`, and `metrics` /
+  `bootstrap_connected` on `KafkaProducer` do not report.
+
 ## blocking-subprocess
 
 `subprocess.run` / `Popen.wait` / `os.system` wait on the event-loop thread.
@@ -44,8 +58,9 @@ blocking `input()` on the loop.
 
 - Project class instantiation (`Cls(...)`, `@dataclass` `__post_init__`,
   `__new__`, inherited `__init__`, `super().__init__`, and `@classmethod`
-  `cls(...)` factories) and `@functools.cache` / `@lru_cache` sync helpers are
-  followed into their bodies; `await asyncio.to_thread(Cls, ...)` /
+  `cls(...)` factories), `@property` / `@functools.cached_property` getters,
+  and `@functools.cache` / `@lru_cache` sync helpers are followed into their
+  bodies; `await asyncio.to_thread(Cls, ...)` /
   `run_in_executor(None, Cls, ...)` cuts the constructor call as offloaded.
 - In-memory buffers (`io.BytesIO` / `StringIO`, including locals bound to them)
   are not file IO: `open`/`Image.open` and `zipfile`/`tarfile` opened on those
@@ -108,7 +123,8 @@ exit code by itself. Inspect, add types, or offload if the call is sync IO.
 
 An offload boundary (`asyncio.to_thread`, `run_in_executor`,
 `anyio.to_thread.run_sync`, `starlette.concurrency.run_in_threadpool`,
-`asgiref.sync.sync_to_async`, inferred wrappers) cuts a sync call that only
+`asgiref.sync.sync_to_async`, `channels.db.database_sync_to_async`, inferred
+wrappers) cuts a sync call that only
 reaches sinks with a high-confidence same-package async twin
 (`httpx.AsyncClient` including module-level `httpx.get`/`post`/…,
 `redis.asyncio`, `openai.AsyncOpenAI`, `openai.AsyncAzureOpenAI`,
@@ -124,6 +140,15 @@ removes the thread hop and keeps cancellation/context on the event loop.
 
 **Fix:** call the async client/API directly from `async def` instead of
 offloading the sync client.
+
+**Notes:**
+
+- Decorator offloads count as boundaries too: a function decorated with
+  `@sync_to_async` / `@database_sync_to_async` (bare or called form), or with
+  a project decorator whose returned nested def passes the wrapped callable
+  into an offload primitive / inferred wrapper, runs its body on a worker —
+  calls to it never reach its body on the caller's loop. Unknown or
+  non-offloading decorators stay transparent.
 
 ## nested-event-loop
 

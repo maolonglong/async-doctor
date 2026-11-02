@@ -279,6 +279,13 @@ pub struct Report {
     /// Always emitted (including `0`) for a stable JSON contract.
     #[serde(default)]
     pub hidden_unresolved_candidates: u32,
+    /// Entries cut by `--max-findings` (always emitted; 0 without the flag).
+    #[serde(default)]
+    pub omitted_findings: u32,
+    #[serde(default)]
+    pub omitted_candidates: u32,
+    #[serde(default)]
+    pub omitted_advice: u32,
     /// Aggregated unresolved patterns (populated when `--show-unresolved`).
     #[serde(default)]
     pub unresolved_summary: Vec<UnresolvedPattern>,
@@ -334,11 +341,67 @@ impl Report {
             message: None,
             omitted_non_production_entries: 0,
             hidden_unresolved_candidates: 0,
+            omitted_findings: 0,
+            omitted_candidates: 0,
+            omitted_advice: 0,
             unresolved_summary: Vec::new(),
             unused_suppressions: Vec::new(),
             sink_sites: Vec::new(),
             file_count: 0,
             async_entry_count: 0,
+        }
+    }
+
+    /// `--max-findings` output cap. Findings are chosen round-robin over
+    /// `sink_sites` order so each site keeps an example while `n >= sites`;
+    /// emitted order stays the original sort. `sink_sites`, `score` and
+    /// `exit_code()` must be read before calling.
+    pub fn apply_max_findings(&mut self, n: usize) {
+        if self.findings.len() > n {
+            let site_index: std::collections::HashMap<(String, String, u32), usize> = self
+                .sink_sites
+                .iter()
+                .enumerate()
+                .map(|(i, s)| ((s.rule.clone(), s.file.clone(), s.line), i))
+                .collect();
+            let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); self.sink_sites.len()];
+            let mut rest: Vec<usize> = Vec::new();
+            for (i, f) in self.findings.iter().enumerate() {
+                let key = crate::sink_sites::primary_sink_step(f)
+                    .map(|(_, st)| (f.rule.clone(), st.file.clone(), st.line));
+                match key.as_ref().and_then(|k| site_index.get(k)) {
+                    Some(&si) => buckets[si].push(i),
+                    None => rest.push(i),
+                }
+            }
+            buckets.push(rest);
+            let mut picked: Vec<usize> = Vec::with_capacity(n);
+            let mut heads = vec![0usize; buckets.len()];
+            while picked.len() < n {
+                let mut any = false;
+                for (b, head) in heads.iter_mut().enumerate() {
+                    if *head < buckets[b].len() && picked.len() < n {
+                        picked.push(buckets[b][*head]);
+                        *head += 1;
+                        any = true;
+                    }
+                }
+                if !any {
+                    break;
+                }
+            }
+            picked.sort_unstable();
+            self.omitted_findings = (self.findings.len() - picked.len()) as u32;
+            let old = std::mem::take(&mut self.findings);
+            self.findings = picked.into_iter().map(|i| old[i].clone()).collect();
+        }
+        if self.candidates.len() > n {
+            self.omitted_candidates = (self.candidates.len() - n) as u32;
+            self.candidates.truncate(n);
+        }
+        if self.advice.len() > n {
+            self.omitted_advice = (self.advice.len() - n) as u32;
+            self.advice.truncate(n);
         }
     }
 

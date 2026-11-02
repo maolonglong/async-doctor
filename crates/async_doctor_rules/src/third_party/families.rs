@@ -7,8 +7,10 @@ use crate::{BuiltinSink, RULE_BLOCKING_DB, RULE_BLOCKING_HTTP};
 use super::hit;
 
 pub(super) fn match_family(q: &str) -> Option<SinkHit> {
-    // requests Session / module-level HTTP verbs
-    if q.starts_with("requests.Session.")
+    // requests Session / module-level HTTP verbs. `mount` / `get_adapter` are
+    // adapter-registry lookups — no IO.
+    if (q.starts_with("requests.Session.")
+        && !matches!(q, "requests.Session.mount" | "requests.Session.get_adapter"))
         || matches!(
             q,
             "requests.get"
@@ -27,8 +29,10 @@ pub(super) fn match_family(q: &str) -> Option<SinkHit> {
             "Use `httpx.AsyncClient` (or `aiohttp`) instead of sync `requests`.",
         )));
     }
-    // httpx sync Client
-    if q.starts_with("httpx.Client.") {
+    // httpx sync Client. `build_request` only constructs the Request — no IO.
+    if q.starts_with("httpx.Client.")
+        && !matches!(q, "httpx.Client.build_request" | "httpx.Client.mount")
+    {
         return Some(hit(&BuiltinSink::finding(
             "httpx.Client.request",
             RULE_BLOCKING_HTTP,
@@ -200,8 +204,13 @@ pub(super) fn match_family(q: &str) -> Option<SinkHit> {
             "Use `psycopg` async (`AsyncConnection`) / `asyncpg`, or offload.",
         )));
     }
-    // pymysql
-    if q.starts_with("pymysql.") {
+    // pymysql — exception constructors, constants and pure converters are
+    // not IO; only the driver surface below stays a sink.
+    if q.starts_with("pymysql.")
+        && !q.starts_with("pymysql.err.")
+        && !q.starts_with("pymysql.constants.")
+        && !q.starts_with("pymysql.converters.")
+    {
         return Some(hit(&BuiltinSink::finding(
             "pymysql.connect",
             RULE_BLOCKING_DB,
@@ -259,6 +268,21 @@ pub(super) fn match_family(q: &str) -> Option<SinkHit> {
     // openai sync client / sync resource *public* methods only — never
     // `openai.lib._parsing._completions.*`, private `_Stream` helpers, or
     // anything that merely contains the substring "completions".
+    // `with_options` / `copy` return new client objects — no request.
+    let client_copy = matches!(
+        q,
+        "openai.OpenAI.with_options"
+            | "openai.OpenAI.copy"
+            | "openai.AzureOpenAI.with_options"
+            | "openai.AzureOpenAI.copy"
+            | "openai.lib.azure.AzureOpenAI.with_options"
+            | "openai.lib.azure.AzureOpenAI.copy"
+            | "anthropic.Anthropic.with_options"
+            | "anthropic.Anthropic.copy"
+    );
+    if client_copy {
+        return None;
+    }
     if !q.contains("Async")
         && (q.starts_with("openai.AzureOpenAI.") || q.starts_with("openai.lib.azure.AzureOpenAI."))
     {
@@ -289,12 +313,31 @@ pub(super) fn match_family(q: &str) -> Option<SinkHit> {
             "Use `anthropic.AsyncAnthropic` instead of sync `Anthropic`.",
         )));
     }
-    // kafka-python
+    // kafka-python. Consumer local-state mutators and metrics snapshots do no
+    // broker RPC: pause/resume/seek/assignment/subscription/paused/metrics and
+    // bootstrap_connected on either class spelling.
+    let method = q.rsplit_once('.').map(|(_, m)| m).unwrap_or("");
+    let kafka_non_io = (q.contains("KafkaConsumer.")
+        && matches!(
+            method,
+            "pause"
+                | "resume"
+                | "seek"
+                | "assignment"
+                | "subscription"
+                | "paused"
+                | "metrics"
+                | "bootstrap_connected"
+        ))
+        || (q.contains("KafkaProducer.") && matches!(method, "metrics" | "bootstrap_connected"));
     if q.starts_with("kafka.KafkaProducer.")
         || q.starts_with("kafka.KafkaConsumer.")
         || q.starts_with("kafka.producer.")
         || q.starts_with("kafka.consumer.")
     {
+        if kafka_non_io {
+            return None;
+        }
         return Some(hit(&BuiltinSink::finding(
             "kafka.KafkaProducer.send",
             RULE_BLOCKING_HTTP,

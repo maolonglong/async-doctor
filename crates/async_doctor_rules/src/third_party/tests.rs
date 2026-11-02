@@ -311,3 +311,67 @@ fn stdlib_p1_sinks_resolve() {
     assert!(t.lookup("asyncio.futures.Future.result").is_none());
     assert!(t.lookup("asyncio.Future.result").is_none());
 }
+
+#[test]
+fn non_io_client_methods_never_fire() {
+    let t = BuiltinSinkTable::new();
+    for q in [
+        "httpx.Client.build_request",
+        "requests.Session.mount",
+        "requests.Session.get_adapter",
+    ] {
+        assert!(t.lookup(q).is_none(), "{q} must not be a sink");
+    }
+    // Neighboring methods still fire.
+    for q in [
+        "httpx.Client.request",
+        "httpx.Client.get",
+        "httpx.Client.send",
+        "httpx.Client.close",
+        "requests.Session.get",
+        "requests.Session.send",
+        "requests.Session.request",
+        "requests.Session.prepare_request",
+        "requests.Session.merge_environment_settings",
+        "requests.Session.close",
+        "requests.Session.mount_for",
+    ] {
+        assert!(t.lookup(q).is_some(), "{q} must remain a sink");
+    }
+}
+
+#[test]
+fn m2_non_io_client_and_namespace_exclusions() {
+    let t = BuiltinSinkTable::new();
+    for q in [
+        "httpx.Client.mount",
+        "pymysql.err.ProgrammingError",
+        "pymysql.constants.CLIENT",
+        "pymysql.converters.escape_str",
+        "kafka.KafkaConsumer.pause",
+        "kafka.consumer.group.KafkaConsumer.assignment",
+        "kafka.KafkaConsumer.bootstrap_connected",
+        "kafka.consumer.KafkaConsumer.subscription",
+        "kafka.producer.kafka.KafkaProducer.metrics",
+        "openai.OpenAI.with_options",
+        "openai.AzureOpenAI.copy",
+        "openai.lib.azure.AzureOpenAI.with_options",
+        "anthropic.Anthropic.copy",
+    ] {
+        assert!(t.lookup(q).is_none(), "{q} must not be a sink");
+    }
+    // Neighbours still fire.
+    for q in [
+        "httpx.Client.request",
+        "pymysql.connect",
+        "pymysql.connections.Connection.cursor",
+        "kafka.KafkaConsumer.poll",
+        "kafka.consumer.group.KafkaConsumer.commit",
+        "kafka.KafkaProducer.send",
+        "openai.OpenAI.close",
+        "openai.resources.chat.completions.Completions.create",
+        "anthropic.Anthropic.messages",
+    ] {
+        assert!(t.lookup(q).is_some(), "{q} must remain a sink");
+    }
+}

@@ -88,6 +88,8 @@ pub enum OffloadKind {
     ThreadPoolExecutor,
     /// `asgiref.sync.sync_to_async` — Django/ASGI sync→async offload boundary.
     AsgirefSyncToAsync,
+    /// `channels.db.database_sync_to_async` — Django Channels ORM offload boundary.
+    ChannelsDbSyncToAsync,
 }
 
 impl OffloadKind {
@@ -99,6 +101,7 @@ impl OffloadKind {
             Self::StarletteThreadpool => "starlette.concurrency.run_in_threadpool",
             Self::ThreadPoolExecutor => "concurrent.futures.ThreadPoolExecutor",
             Self::AsgirefSyncToAsync => "asgiref.sync.sync_to_async",
+            Self::ChannelsDbSyncToAsync => "channels.db.database_sync_to_async",
         }
     }
 
@@ -195,6 +198,16 @@ pub struct ParamGuard {
     pub inverted: bool,
 }
 
+/// A decorator reference recorded during pass-2 extraction. Whether it is an
+/// offload boundary is decided after merge, once `is_offload_wrapper` is final.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecoratorRef {
+    /// ty-resolved to a project or followed function.
+    Function(FunctionId),
+    /// ty-resolved external qualname (`module.Qual`, dotted scopes included).
+    External(String),
+}
+
 /// A first-party or followed third-party function or method.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionFact {
@@ -225,6 +238,10 @@ pub struct FunctionFact {
     pub invokes_params: Vec<u32>,
     /// Inferred offload wrapper: body passes a callable param into a real offload primitive.
     pub is_offload_wrapper: bool,
+    /// The function is decorated by an offload decorator (`sync_to_async`,
+    /// `database_sync_to_async`, or an inferred offload wrapper). Calls to it
+    /// become offload cuts — the body never runs on the caller's loop.
+    pub offload_decorator: Option<OffloadKind>,
 }
 
 impl FunctionFact {
@@ -275,6 +292,12 @@ pub struct UnresolvedImport {
 pub struct ProjectFacts {
     pub functions: Vec<FunctionFact>,
     pub edges: Vec<CallEdge>,
+    /// Decorator references per function id (resolved during pass-2; offload
+    /// classification happens in [`crate::propagate`] higher-order materialization).
+    pub decorator_refs: std::collections::BTreeMap<FunctionId, Vec<DecoratorRef>>,
+    /// Functions whose nested, returned defs forward an enclosing parameter to a
+    /// callee that may be an inferred offload wrapper (checked after merge).
+    pub offload_wrapper_refs: std::collections::BTreeMap<FunctionId, Vec<DecoratorRef>>,
     pub complete: bool,
     pub skipped: Vec<String>,
     /// Directory scan found no `.py` files (empty dir or non-Python tree).

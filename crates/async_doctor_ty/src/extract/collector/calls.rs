@@ -245,6 +245,10 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         // Fast path for first-party project function calls: skips external qualname
         // and stdlib buffer/archive/lock/offload checks.
         if let Some(fid) = self.resolve_project_function(&call.func) {
+            self.note_forwarded_enclosing_param(
+                call,
+                async_doctor_core::DecoratorRef::Function(fid),
+            );
             let kind = if self.pending_with_enter {
                 CallKind::WithEnter
             } else if self.consuming_generator && self.function(fid).is_generator {
@@ -339,9 +343,14 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             let callable_idx = kind.callable_arg_index();
             if let Some(arg) = call.arguments.args.get(callable_idx)
                 && let Expr::Name(n) = arg
-                && self.current_param_names.iter().any(|p| p == n.id.as_str())
             {
-                self.mark_offload_wrapper(caller);
+                if self.current_param_names.iter().any(|p| p == n.id.as_str()) {
+                    self.mark_offload_wrapper(caller);
+                } else if let Some(owner) = self.enclosing_param_scope(n.id.as_str()) {
+                    // `D(fn) -> wrapper` where the returned nested def offloads
+                    // `fn` — the decorator factory is an offload wrapper.
+                    self.mark_offload_wrapper(owner);
+                }
             }
             // Prefer structural coroutine-ness of the offloaded target when known.
             let target_coro = call
@@ -382,6 +391,12 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
 
         if let Some(callee) = self.resolve_non_project_callee(&call.func, func_ext_qual) {
+            if let CalleeRef::External { qualname } = &callee {
+                self.note_forwarded_enclosing_param(
+                    call,
+                    async_doctor_core::DecoratorRef::External(qualname.clone()),
+                );
+            }
             if let CalleeRef::External { qualname } = &callee
                 && qualname.starts_with("openai.")
             {
@@ -726,6 +741,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             package_version: None,
             invokes_params: Vec::new(),
             is_offload_wrapper: false,
+            offload_decorator: None,
         });
         // Analyze lambda body as edges from the synthetic function.
         // Judge body edges relative to the lambda itself — enclosing try/if/loop

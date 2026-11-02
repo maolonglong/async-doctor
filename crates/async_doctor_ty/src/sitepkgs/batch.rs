@@ -175,6 +175,7 @@ impl PackageCacheBatch {
         edges: &[CallEdge],
         id_to_external_key: &HashMap<FunctionId, String>,
         follow_targets: &HashMap<String, FollowTarget>,
+        decorator_quals: Vec<String>,
     ) {
         let cache = self.cache_mut(package, version, fingerprint);
         let mut cached_edges: Vec<CachedEdge> = edges
@@ -229,6 +230,7 @@ impl PackageCacheBatch {
                 param_names: func.param_names.clone(),
                 invokes_params: func.invokes_params.clone(),
                 is_offload_wrapper: func.is_offload_wrapper,
+                decorator_quals,
                 edges: cached_edges,
             },
         );
@@ -545,7 +547,13 @@ pub(crate) fn materialize_cached_functions(
             package_version: Some(version.to_string()),
             invokes_params: cf.invokes_params.clone(),
             is_offload_wrapper: cf.is_offload_wrapper,
+            offload_decorator: None,
         });
+        facts.decorator_refs.entry(id).or_default().extend(
+            cf.decorator_quals
+                .iter()
+                .map(|q| async_doctor_core::DecoratorRef::External(q.clone())),
+        );
         qual_to_id.insert(q.clone(), id);
         id_to_external_key.insert(id, q.clone());
         pending_edges.push((id, cf.edges.clone()));
@@ -656,6 +664,7 @@ fn cached_callee_to_ref(edge: &CachedEdge, qual_to_id: &BTreeMap<String, Functio
                 Some("starlette.concurrency.run_in_threadpool") => OffloadKind::StarletteThreadpool,
                 Some("concurrent.futures.ThreadPoolExecutor") => OffloadKind::ThreadPoolExecutor,
                 Some("asgiref.sync.sync_to_async") => OffloadKind::AsgirefSyncToAsync,
+                Some("channels.db.database_sync_to_async") => OffloadKind::ChannelsDbSyncToAsync,
                 _ => OffloadKind::AsyncioToThread,
             };
             CalleeRef::Offload(kind)

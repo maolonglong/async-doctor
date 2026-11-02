@@ -148,6 +148,7 @@ fn materialize_cached_functions_loads_only_wanted_keys() {
             param_names: vec![],
             invokes_params: vec![],
             is_offload_wrapper: false,
+            decorator_quals: vec![],
             edges: vec![CachedEdge {
                 callee_qualname: "liba.core.a1".into(),
                 callee_kind: "third_party".into(),
@@ -182,6 +183,7 @@ fn materialize_cached_functions_loads_only_wanted_keys() {
             param_names: vec![],
             invokes_params: vec![],
             is_offload_wrapper: false,
+            decorator_quals: vec![],
             edges: vec![CachedEdge {
                 callee_qualname: "time.sleep".into(),
                 callee_kind: "external".into(),
@@ -260,4 +262,40 @@ fn materialize_cached_functions_loads_only_wanted_keys() {
     );
 
     let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn follow_budget_skipped_reported_and_identical_cold_warm() {
+    let dir = clone_fixture("m2_follow_budget_truncation");
+    let cache = fresh_cache_dir("budget-skipped");
+    let cold = report_json_with_cache_budget(&dir, &cache, TINY_BUDGET);
+    let warm = report_json_with_cache_budget(&dir, &cache, TINY_BUDGET);
+    let cold_skipped =
+        serde_json::from_str::<serde_json::Value>(&cold).unwrap()["environment"]
+            ["followBudgetSkipped"]
+            .as_u64()
+            .unwrap_or(0);
+    let warm_skipped =
+        serde_json::from_str::<serde_json::Value>(&warm).unwrap()["environment"]
+            ["followBudgetSkipped"]
+            .as_u64()
+            .unwrap_or(0);
+    assert!(
+        cold_skipped > 0,
+        "tiny budget must report skipped callees: {cold_skipped}"
+    );
+    assert_eq!(
+        cold_skipped, warm_skipped,
+        "cold/warm skipped count must match"
+    );
+
+    let full = report_json_with_cache_budget(&dir, &cache, FOLLOW_BUDGET_DEFAULT);
+    let v: serde_json::Value = serde_json::from_str(&full).unwrap();
+    assert!(
+        v["environment"].get("followBudgetSkipped").is_none()
+            || v["environment"]["followBudgetSkipped"].as_u64() == Some(0),
+        "default budget must omit/zero the field: {}",
+        v["environment"]
+    );
+    let _ = std::fs::remove_dir_all(dir);
 }
