@@ -198,6 +198,87 @@ pub static STDLIB_SINKS: &[BuiltinSink] = &[
         "Offload file IO, or use async file helpers.",
     ),
     BuiltinSink::finding(
+        "pathlib.Path.mkdir",
+        RULE_BLOCKING_FILE,
+        "Offload with `asyncio.to_thread(path.mkdir, ...)` or use async file helpers.",
+    ),
+    BuiltinSink::finding(
+        "pathlib.Path.rmdir",
+        RULE_BLOCKING_FILE,
+        "Offload with `asyncio.to_thread(path.rmdir)` or use async file helpers.",
+    ),
+    BuiltinSink::finding(
+        "pathlib.Path.unlink",
+        RULE_BLOCKING_FILE,
+        "Offload with `asyncio.to_thread(path.unlink, ...)` or use async file helpers.",
+    ),
+    BuiltinSink::finding(
+        "pathlib.Path.rename",
+        RULE_BLOCKING_FILE,
+        "Offload with `asyncio.to_thread(path.rename, ...)` or use async file helpers.",
+    ),
+    BuiltinSink::finding(
+        "pathlib.Path.replace",
+        RULE_BLOCKING_FILE,
+        "Offload with `asyncio.to_thread(path.replace, ...)` or use async file helpers.",
+    ),
+    BuiltinSink::finding(
+        "pathlib.Path.touch",
+        RULE_BLOCKING_FILE,
+        "Offload with `asyncio.to_thread(path.touch, ...)` or use async file helpers.",
+    ),
+    // --- importlib.resources / importlib_resources (Traversable + functional APIs) ---
+    BuiltinSink::finding(
+        "importlib.resources.abc.Traversable.read_text",
+        RULE_BLOCKING_FILE,
+        "Offload package resource reads with `asyncio.to_thread` or cache at startup.",
+    ),
+    BuiltinSink::finding(
+        "importlib.resources.abc.Traversable.read_bytes",
+        RULE_BLOCKING_FILE,
+        "Offload package resource reads with `asyncio.to_thread` or cache at startup.",
+    ),
+    BuiltinSink::finding(
+        "importlib.resources.abc.Traversable.open",
+        RULE_BLOCKING_FILE,
+        "Offload package resource IO with `asyncio.to_thread` or cache at startup.",
+    ),
+    BuiltinSink::finding(
+        "importlib.resources.abc.Traversable.iterdir",
+        RULE_BLOCKING_FILE,
+        "Offload package resource traversal with `asyncio.to_thread`.",
+    ),
+    BuiltinSink::finding(
+        "importlib.resources.read_text",
+        RULE_BLOCKING_FILE,
+        "Offload package resource reads with `asyncio.to_thread` or cache at startup.",
+    ),
+    BuiltinSink::finding(
+        "importlib.resources.read_binary",
+        RULE_BLOCKING_FILE,
+        "Offload package resource reads with `asyncio.to_thread` or cache at startup.",
+    ),
+    BuiltinSink::finding(
+        "importlib.resources.open_text",
+        RULE_BLOCKING_FILE,
+        "Offload package resource IO with `asyncio.to_thread` or cache at startup.",
+    ),
+    BuiltinSink::finding(
+        "importlib.resources.open_binary",
+        RULE_BLOCKING_FILE,
+        "Offload package resource IO with `asyncio.to_thread` or cache at startup.",
+    ),
+    BuiltinSink::finding(
+        "importlib.resources.as_file",
+        RULE_BLOCKING_FILE,
+        "Offload `importlib.resources.as_file` extraction/IO with `asyncio.to_thread`.",
+    ),
+    BuiltinSink::finding(
+        "importlib.resources.contents",
+        RULE_BLOCKING_FILE,
+        "Offload package resource listing with `asyncio.to_thread`.",
+    ),
+    BuiltinSink::finding(
         "os.listdir",
         RULE_BLOCKING_FILE,
         "Offload with `asyncio.to_thread(os.listdir, ...)`.",
@@ -326,6 +407,24 @@ pub static STDLIB_SINKS: &[BuiltinSink] = &[
         "pathlib.Path.is_dir",
         RULE_BLOCKING_FILE,
         "Usually cheap; offload if on a slow FS.",
+        "metadata",
+    ),
+    BuiltinSink::candidate(
+        "importlib.resources.abc.Traversable.is_file",
+        RULE_BLOCKING_FILE,
+        "Usually cheap; offload if on a slow FS or zip-backed resource.",
+        "metadata",
+    ),
+    BuiltinSink::candidate(
+        "importlib.resources.abc.Traversable.is_dir",
+        RULE_BLOCKING_FILE,
+        "Usually cheap; offload if on a slow FS or zip-backed resource.",
+        "metadata",
+    ),
+    BuiltinSink::candidate(
+        "importlib.resources.is_resource",
+        RULE_BLOCKING_FILE,
+        "Usually cheap; offload if on a slow FS or zip-backed resource.",
         "metadata",
     ),
     // --- threading / queue locks ---

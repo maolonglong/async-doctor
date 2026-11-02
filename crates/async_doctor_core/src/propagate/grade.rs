@@ -399,6 +399,7 @@ pub(super) fn merge_same_line_ctor_call_findings(findings: Vec<Finding>) -> Vec<
                 }
             }
             if let Some(sink) = method_sink {
+                f.why = format!("async-doctor why {}:{}", sink.file, sink.line);
                 f.chain.push(sink);
             }
         }

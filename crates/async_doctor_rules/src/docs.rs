@@ -97,11 +97,12 @@ running for the entire child lifetime.",
     RuleDoc {
         id: "blocking-file",
         title: "Blocking file / path IO",
-        summary: "`open`, path/glob walks, archives, and `input` block on IO.",
+        summary: "`open`, path/resource IO (`Path.mkdir`, `importlib.resources`), walks, archives, and `input` block on IO.",
         body: "\
-Disk IO (including `pathlib` walks, `glob`, `zipfile` / `tarfile`, and blocking\n\
-`input()`) can stall under load or on network filesystems. Inside `async def`,\n\
-use async helpers or offload sync calls.",
+Disk IO (including `pathlib` reads/writes/`mkdir`/`unlink`, `importlib.resources`\n\
+`Traversable` reads, `glob`, `zipfile` / `tarfile`, and blocking `input()`) can\n\
+stall under load or on network filesystems. Inside `async def`, use async helpers\n\
+or offload sync calls.",
         fix: "\
 - Use `aiofiles` / AnyIO file APIs where practical.\n\
 - Or `await asyncio.to_thread(path.read_text)` / `to_thread(open, ...)`.",

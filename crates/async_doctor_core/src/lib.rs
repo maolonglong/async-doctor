@@ -22,4 +22,4 @@ pub use report::{
     EntryLabel, Finding, Fix, Location, Report, SCHEMA_VERSION, SinkSiteSummary, UnresolvedPattern,
     UnusedSuppression,
 };
-pub use sink_sites::{group_choke_point, summarize as summarize_sink_sites};
+pub use sink_sites::{group_choke_point, primary_sink_step, summarize as summarize_sink_sites};

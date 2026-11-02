@@ -265,6 +265,38 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             return Some(false);
         }
 
+        // Project class constructor (`Worker(...)`, `cls(...)`, inherited `__init__`,
+        // `__new__`, `__post_init__`).
+        let ctor_fids = self.resolve_project_constructors(&call.func);
+        if !ctor_fids.is_empty() {
+            let kind = if self.pending_with_enter {
+                CallKind::WithEnter
+            } else {
+                CallKind::Call
+            };
+            let saved_literals = self.pending_literals.clone();
+            let saved_callables = self.pending_callables.clone();
+            let saved_kw_callables = self.pending_keyword_callables.clone();
+            for (idx, fid) in ctor_fids.into_iter().enumerate() {
+                if idx > 0 {
+                    self.pending_literals = saved_literals.clone();
+                    self.pending_callables = saved_callables.clone();
+                    self.pending_keyword_callables = saved_kw_callables.clone();
+                }
+                let is_coro = Some(self.function(fid).is_async);
+                self.push_edge(
+                    caller,
+                    CalleeRef::Project(fid),
+                    call.range(),
+                    kind,
+                    false,
+                    is_coro,
+                );
+            }
+            self.clear_pending_call_args();
+            return Some(false);
+        }
+
         let func_ext_qual = self.external_qualname(&call.func);
 
         // In-memory buffer args to open/Image.open: not blocking file IO — skip
@@ -392,12 +424,17 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 continue;
             };
             let fid = match &kw.value {
-                Expr::Name(_) | Expr::Attribute(_) => self.resolve_project_function(&kw.value),
-                Expr::Call(c) if is_partial_call(c) => c
-                    .arguments
-                    .args
-                    .first()
-                    .and_then(|a| self.resolve_project_function(a)),
+                Expr::Name(_) | Expr::Attribute(_) => {
+                    self.resolve_project_function(&kw.value).or_else(|| {
+                        self.resolve_project_constructors(&kw.value)
+                            .into_iter()
+                            .next()
+                    })
+                }
+                Expr::Call(c) if is_partial_call(c) => c.arguments.args.first().and_then(|a| {
+                    self.resolve_project_function(a)
+                        .or_else(|| self.resolve_project_constructors(a).into_iter().next())
+                }),
                 Expr::Lambda(lam) => Some(self.ensure_lambda_fact(lam)),
                 _ => None,
             };
@@ -572,12 +609,13 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         let mut out = Vec::with_capacity(args.len());
         for arg in args {
             let fid = match arg {
-                Expr::Name(_) | Expr::Attribute(_) => self.resolve_project_function(arg),
-                Expr::Call(c) if is_partial_call(c) => c
-                    .arguments
-                    .args
-                    .first()
-                    .and_then(|a| self.resolve_project_function(a)),
+                Expr::Name(_) | Expr::Attribute(_) => self
+                    .resolve_project_function(arg)
+                    .or_else(|| self.resolve_project_constructors(arg).into_iter().next()),
+                Expr::Call(c) if is_partial_call(c) => c.arguments.args.first().and_then(|a| {
+                    self.resolve_project_function(a)
+                        .or_else(|| self.resolve_project_constructors(a).into_iter().next())
+                }),
                 Expr::Lambda(lam) => Some(self.ensure_lambda_fact(lam)),
                 _ => None,
             };
@@ -603,7 +641,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 out.push(None);
                 continue;
             };
-            if self.resolve_project_function(target).is_some() {
+            if self.resolve_project_function(target).is_some()
+                || !self.resolve_project_constructors(target).is_empty()
+            {
                 out.push(None);
                 continue;
             }

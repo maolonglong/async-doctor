@@ -4,6 +4,7 @@ mod async_anti_patterns;
 mod boto;
 mod buffers;
 mod calls;
+mod constructors;
 mod control_flow;
 mod imports;
 pub(crate) mod loop_guards;

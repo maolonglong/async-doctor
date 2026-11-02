@@ -31,20 +31,31 @@ Sync HTTP clients (`urllib`, `requests`, sync `httpx` / `urllib3`).
 
 ## blocking-file
 
-`open`, path read/write, directory walks (`os.listdir` / `pathlib.Path.iterdir` /
-`glob`), archives (`zipfile` / `tarfile`), and blocking `input()` on the loop.
+`open`, path read/write/mutation (`pathlib.Path.read_text` / `write_text` /
+`mkdir` / `unlink` / `rename` / `touch`), `importlib.resources` /
+`importlib_resources` `Traversable` reads (`files(...).joinpath(...).read_text` /
+`read_bytes` / `open` / `iterdir`), directory walks (`os.listdir` /
+`pathlib.Path.iterdir` / `glob`), archives (`zipfile` / `tarfile`), and
+blocking `input()` on the loop.
 
 **Fix:** async file helpers, or `await asyncio.to_thread(...)`.
 
 **Notes:**
 
+- Project class instantiation (`Cls(...)`, `@dataclass` `__post_init__`,
+  `__new__`, inherited `__init__`, `super().__init__`, and `@classmethod`
+  `cls(...)` factories) and `@functools.cache` / `@lru_cache` sync helpers are
+  followed into their bodies; `await asyncio.to_thread(Cls, ...)` /
+  `run_in_executor(None, Cls, ...)` cuts the constructor call as offloaded.
 - In-memory buffers (`io.BytesIO` / `StringIO`, including locals bound to them)
   are not file IO: `open`/`Image.open` and `zipfile`/`tarfile` opened on those
   buffers stay clean for pure in-memory ops (`writestr`/`read`/`namelist`/…).
   Disk-touching methods on a buffer-backed archive (`write(path)`, `extractall`,
   `add`, …) still report.
 - `open`/`ZipFile` plus later `read`/`write`/`writestr` on the same call-path
-  prefix merge into one finding; `SMTP(...).sendmail(...)` on one line likewise.
+  prefix merge into one finding whose `sinkSites` entry and `why` locator point
+  at the `open` hop while retaining both hops in `chain[]` (so `async-doctor why`
+  matches either line); `SMTP(...).sendmail(...)` on one line likewise.
 
 ## blocking-lock
 

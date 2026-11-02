@@ -9,7 +9,35 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use sha2::{Digest, Sha256};
 
-use crate::report::{Finding, SinkSiteSummary};
+use crate::report::{ChainStep, Finding, SinkSiteSummary};
+
+/// Return the `(index, step)` of the primary sink hop in `f.chain`.
+///
+/// For `with open(...) as f: f.write(...)`, `merge_file_io_findings` appends the
+/// `read`/`write` step after the `open` step while `f.why` and `f.id` remain
+/// anchored at the `open` hop. Prefer the step matching `f.why` when present so
+/// `sinkSites`, `f.why`, and `async-doctor why` agree on the primary sink line.
+pub fn primary_sink_step(f: &Finding) -> Option<(usize, &ChainStep)> {
+    let last_idx = f.chain.len().checked_sub(1)?;
+    if let Some((why_file, why_line)) = why_file_line(&f.why)
+        && let Some((idx, step)) = f
+            .chain
+            .iter()
+            .enumerate()
+            .rfind(|(_, s)| s.line == why_line && s.file == why_file)
+    {
+        return Some((idx, step));
+    }
+    Some((last_idx, &f.chain[last_idx]))
+}
+
+fn why_file_line(why: &str) -> Option<(&str, u32)> {
+    let rest = why.strip_prefix("async-doctor why ")?;
+    let loc = rest.split_whitespace().next()?;
+    let (file, line_str) = loc.rsplit_once(':')?;
+    let line = line_str.parse::<u32>().ok()?;
+    Some((file, line))
+}
 
 /// Build an additive `sinkSites` summary from findings (largest sites first).
 pub fn summarize(findings: &[Finding]) -> Vec<SinkSiteSummary> {
@@ -17,16 +45,20 @@ pub fn summarize(findings: &[Finding]) -> Vec<SinkSiteSummary> {
     let mut sites: BTreeMap<(&str, &str, u32), SiteAcc<'_>> = BTreeMap::new();
 
     for (f_idx, f) in findings.iter().enumerate() {
-        let Some(last) = f.chain.last() else {
+        let Some((sink_idx, sink_step)) = primary_sink_step(f) else {
             continue;
         };
-        let key = (f.fix.fix_group_id.as_str(), last.file.as_str(), last.line);
+        let key = (
+            f.fix.fix_group_id.as_str(),
+            sink_step.file.as_str(),
+            sink_step.line,
+        );
         let acc = sites.entry(key).or_insert_with(|| SiteAcc {
             rule: f.rule.as_str(),
             fix_group_id: f.fix.fix_group_id.as_str(),
-            file: last.file.as_str(),
-            line: last.line,
-            text: last.text.as_str(),
+            file: sink_step.file.as_str(),
+            line: sink_step.line,
+            text: sink_step.text.as_str(),
             finding_count: 0,
             entries: BTreeSet::new(),
             intermediates: BTreeMap::new(),
@@ -34,9 +66,8 @@ pub fn summarize(findings: &[Finding]) -> Vec<SinkSiteSummary> {
         acc.finding_count += 1;
         acc.entries
             .insert((f.entry.file.as_str(), f.entry.name.as_str()));
-        let n = f.chain.len();
-        if n >= 2 {
-            for step in &f.chain[..n - 1] {
+        if sink_idx >= 1 {
+            for step in &f.chain[..sink_idx] {
                 let ikey = (step.file.as_str(), step.line, step.text.as_str());
                 let entry = acc.intermediates.entry(ikey).or_insert((0, usize::MAX));
                 if entry.1 != f_idx {
@@ -147,11 +178,13 @@ pub fn group_choke_point(findings: &[&Finding]) -> Option<(String, u32, String, 
     }
     let mut counts: BTreeMap<(String, u32, String), u32> = BTreeMap::new();
     for f in findings {
-        let n = f.chain.len();
-        if n < 2 {
+        let Some((sink_idx, _)) = primary_sink_step(f) else {
+            continue;
+        };
+        if sink_idx < 1 {
             continue;
         }
-        for step in &f.chain[..n - 1] {
+        for step in &f.chain[..sink_idx] {
             *counts
                 .entry((step.file.clone(), step.line, step.text.clone()))
                 .or_default() += 1;

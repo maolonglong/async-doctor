@@ -73,14 +73,14 @@ fn score_recomputes_after_baseline_suppression_and_appears_in_json_text_markdown
     let v: serde_json::Value = serde_json::from_slice(&json_out.stdout).expect("parse json");
     let initial_score = v["score"].as_u64().expect("score field in json");
     assert_eq!(
-        initial_score, 80,
-        "1 finding at 1 sink site should score 80"
+        initial_score, 59,
+        "1 blocking-sleep finding affecting 1/1 async entry should score 59"
     );
 
     let text_out = bin().arg(dir.path()).output().expect("run text");
     let text_stdout = String::from_utf8_lossy(&text_out.stdout);
     assert!(
-        text_stdout.contains("Score: 80/100 (Needs work)"),
+        text_stdout.contains("Score: 59/100 (Critical)"),
         "expected score in text footer, got:\n{text_stdout}"
     );
 
@@ -91,7 +91,7 @@ fn score_recomputes_after_baseline_suppression_and_appears_in_json_text_markdown
         .expect("run markdown");
     let md_stdout = String::from_utf8_lossy(&md_out.stdout);
     assert!(
-        md_stdout.contains("| **Score** | **80 / 100** (Needs work) |"),
+        md_stdout.contains("| **Score** | **59 / 100** (Critical) |"),
         "expected score row in markdown table, got:\n{md_stdout}"
     );
 
@@ -316,4 +316,47 @@ fn install_skill_never_deletes_real_claude_skill_directory() {
         skill.is_file(),
         "--force should still write the agents skill file"
     );
+}
+
+#[test]
+fn why_subcommand_matches_constructor_init_and_with_open_write_lines() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let py = dir.path().join("app.py");
+    std::fs::write(
+        &py,
+        concat!(
+            "from pathlib import Path\n",
+            "\n",
+            "class Worker:\n",
+            "    def __init__(self, home: Path) -> None:\n",
+            "        (home / \"logs\").mkdir(parents=True, exist_ok=True)\n",
+            "\n",
+            "async def start(home: Path, out: Path) -> None:\n",
+            "    Worker(home)\n",
+            "    with open(out, \"w\", encoding=\"utf-8\") as f:\n",
+            "        f.write(\"ok\")\n",
+        ),
+    )
+    .expect("write app.py");
+
+    // Constructor sink line (line 5: mkdir) and call site (line 8: Worker(home))
+    for line in [5, 8, 9, 10] {
+        let out = bin()
+            .args(["why", &format!("app.py:{line}"), "--path"])
+            .arg(dir.path())
+            .output()
+            .expect("run why");
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "expected `why app.py:{line}` to match a finding (exit 1), stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains(&format!("Evidence for app.py:{line} (1 finding(s)"))
+                && stdout.contains("blocking-file"),
+            "expected blocking-file evidence in `why app.py:{line}` output:\n{stdout}"
+        );
+    }
 }

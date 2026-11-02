@@ -10,13 +10,16 @@ fn scan_cache_warm_is_much_faster_when_unchanged() {
     let dir = clone_fixture("m2_sitepkgs_cache");
     let cache = fresh_cache_dir("scan-warm-fast");
 
-    let t0 = Instant::now();
-    let cold = report_json_with_cache(&dir, &cache);
-    let cold_ms = t0.elapsed();
+    let (cold, cold_ms, warm, warm_ms) = crate::hermetic_env::with_clean_venv_env(|| {
+        let t0 = Instant::now();
+        let cold = report_json_with_cache(&dir, &cache);
+        let cold_ms = t0.elapsed();
 
-    let t1 = Instant::now();
-    let warm = report_json_with_cache(&dir, &cache);
-    let warm_ms = t1.elapsed();
+        let t1 = Instant::now();
+        let warm = report_json_with_cache(&dir, &cache);
+        let warm_ms = t1.elapsed();
+        (cold, cold_ms, warm, warm_ms)
+    });
 
     assert_eq!(cold, warm, "scan-cache warm must be byte-identical to cold");
 
@@ -51,9 +54,7 @@ fn scan_cache_warm_is_much_faster_when_unchanged() {
 }
 
 fn async_doctor_ty_cache_schema() -> u32 {
-    // Keep in sync with crate::cache::CACHE_SCHEMA_VERSION (not re-exported).
-    // v15: occurrence counted by canonical sink key for external edges.
-    15
+    crate::cache::CACHE_SCHEMA_VERSION
 }
 
 #[test]

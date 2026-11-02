@@ -235,7 +235,7 @@ fn write_environment_banner(
 }
 
 pub(crate) fn sink_label(f: &Finding) -> Option<&str> {
-    f.chain.last().map(|s| {
+    async_doctor_core::primary_sink_step(f).map(|(_, s)| {
         let t = s.text.trim();
         t.split('(').next().unwrap_or(t).trim()
     })

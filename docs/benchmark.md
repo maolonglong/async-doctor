@@ -59,7 +59,7 @@ Warm was not faster: the package cache only skips third-party re-parse;
 first-party `SemanticModel` work dominated. After the whole-scan report cache,
 warm is discovery + fingerprint + scan-cache load (~50 ms) plus JSON emit.
 
-- **async-doctor:** `0.1.0` (CACHE_SCHEMA_VERSION **v15**)
+- **async-doctor:** `0.1.0` (CACHE_SCHEMA_VERSION **v16**)
 - **jemalloc:** non-MSVC builds link `tikv-jemallocator`; building the Python
   sdist/wheel that vendors the native binary needs a working `make` (jemalloc's
   autotools build).

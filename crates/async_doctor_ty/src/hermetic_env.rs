@@ -5,9 +5,13 @@
 //! otherwise pick the caller's environment and flake. A shared
 //! `XDG_CACHE_HOME` can also serve a stale whole-scan report across tests.
 
+use std::cell::Cell;
 use std::sync::{Mutex, MutexGuard};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
+thread_local! {
+    static HOLDING_ENV_LOCK: Cell<bool> = const { Cell::new(false) };
+}
 
 struct SavedEnv {
     virtual_env: Option<std::ffi::OsString>,
@@ -66,12 +70,19 @@ fn restore_foreign_venv_env(saved: SavedEnv) {
 }
 
 /// Run `f` with `VIRTUAL_ENV` / `CONDA_PREFIX` cleared and an isolated
-/// `XDG_CACHE_HOME`, restoring afterward.
+/// `XDG_CACHE_HOME`, restoring afterward. Re-entrant on the same thread so
+/// cold/warm timing tests can hold the lock across both scans without measuring
+/// `ENV_LOCK` queue wait time.
 pub(crate) fn with_clean_venv_env<R>(f: impl FnOnce() -> R) -> R {
+    if HOLDING_ENV_LOCK.with(|c| c.get()) {
+        return f();
+    }
     let _guard: MutexGuard<'_, ()> = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    HOLDING_ENV_LOCK.with(|c| c.set(true));
     let saved = take_foreign_venv_env();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
     restore_foreign_venv_env(saved);
+    HOLDING_ENV_LOCK.with(|c| c.set(false));
     match result {
         Ok(v) => v,
         Err(payload) => std::panic::resume_unwind(payload),

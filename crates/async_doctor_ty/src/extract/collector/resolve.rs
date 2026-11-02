@@ -131,6 +131,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         if let Some(fid) = self.resolve_project_function(func) {
             return Some(self.function(fid).is_async);
         }
+        if !self.resolve_project_constructors(func).is_empty() {
+            return Some(false);
+        }
         let resolved = match func {
             Expr::Name(name) => definitions_for_name(
                 self.model,
@@ -436,6 +439,12 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             }
         }
 
+        if let Expr::Attribute(attr) = func
+            && let Some(fid) = self.resolve_inherited_or_super_method(attr)
+        {
+            return Some(fid);
+        }
+
         // Type-based: FunctionLiteral / BoundMethod → definition.
         let ty = func.inferred_type(self.model)?;
         let env = self.model.program_environment();
@@ -570,6 +579,10 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 }
                 return Some(q);
             }
+        }
+
+        if let Some(q) = self.resolve_uninstalled_resource_qualname(func) {
+            return Some(q);
         }
 
         let ty = func.inferred_type(self.model)?;

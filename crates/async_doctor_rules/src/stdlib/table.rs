@@ -27,6 +27,33 @@ impl StdlibSinkTable {
             ("_thread.", "threading."),
             ("pathlib._local.Path.", "pathlib.Path."),
             ("pathlib._local.", "pathlib."),
+            ("pathlib.PosixPath.", "pathlib.Path."),
+            ("pathlib.WindowsPath.", "pathlib.Path."),
+            (
+                "importlib_resources.abc.Traversable.",
+                "importlib.resources.abc.Traversable.",
+            ),
+            ("importlib_resources._common.", "importlib.resources."),
+            ("importlib_resources._functional.", "importlib.resources."),
+            ("importlib_resources.", "importlib.resources."),
+            (
+                "importlib.resources.simple.SimpleReader.",
+                "importlib.resources.abc.Traversable.",
+            ),
+            (
+                "importlib.resources.readers.",
+                "importlib.resources.abc.Traversable.",
+            ),
+            (
+                "importlib.abc.Traversable.",
+                "importlib.resources.abc.Traversable.",
+            ),
+            (
+                "importlib._abc.Traversable.",
+                "importlib.resources.abc.Traversable.",
+            ),
+            ("importlib.resources._common.", "importlib.resources."),
+            ("importlib.resources._functional.", "importlib.resources."),
             ("sqlite3.dbapi2.", "sqlite3."),
             // CPython hides Future behind concurrent.futures._base.
             (
@@ -108,11 +135,43 @@ impl SinkTable for StdlibSinkTable {
             ("Path.read_bytes", "pathlib.Path.read_bytes"),
             ("Path.write_bytes", "pathlib.Path.write_bytes"),
             ("Path.open", "pathlib.Path.open"),
+            ("Path.mkdir", "pathlib.Path.mkdir"),
+            ("Path.rmdir", "pathlib.Path.rmdir"),
+            ("Path.unlink", "pathlib.Path.unlink"),
+            ("Path.rename", "pathlib.Path.rename"),
+            ("Path.replace", "pathlib.Path.replace"),
+            ("Path.touch", "pathlib.Path.touch"),
             ("Path.exists", "pathlib.Path.exists"),
             ("Path.stat", "pathlib.Path.stat"),
+            ("Path.is_file", "pathlib.Path.is_file"),
+            ("Path.is_dir", "pathlib.Path.is_dir"),
             ("Path.iterdir", "pathlib.Path.iterdir"),
             ("Path.glob", "pathlib.Path.glob"),
             ("Path.rglob", "pathlib.Path.rglob"),
+            (
+                "Traversable.read_text",
+                "importlib.resources.abc.Traversable.read_text",
+            ),
+            (
+                "Traversable.read_bytes",
+                "importlib.resources.abc.Traversable.read_bytes",
+            ),
+            (
+                "Traversable.open",
+                "importlib.resources.abc.Traversable.open",
+            ),
+            (
+                "Traversable.iterdir",
+                "importlib.resources.abc.Traversable.iterdir",
+            ),
+            (
+                "Traversable.is_file",
+                "importlib.resources.abc.Traversable.is_file",
+            ),
+            (
+                "Traversable.is_dir",
+                "importlib.resources.abc.Traversable.is_dir",
+            ),
             ("ZipFile.extractall", "zipfile.ZipFile.extractall"),
             ("ZipFile.extract", "zipfile.ZipFile.extract"),
             ("TarFile.extractall", "tarfile.TarFile.extractall"),

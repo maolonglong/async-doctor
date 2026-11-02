@@ -131,9 +131,8 @@ pub(super) fn write_grouped(
             .first()
             .and_then(|top| {
                 group.iter().find(|f| {
-                    f.chain
-                        .last()
-                        .is_some_and(|s| s.file == top.file && s.line == top.line)
+                    async_doctor_core::primary_sink_step(f)
+                        .is_some_and(|(_, s)| s.file == top.file && s.line == top.line)
                 })
             })
             .copied()

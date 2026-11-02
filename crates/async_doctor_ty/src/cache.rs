@@ -46,7 +46,10 @@ use serde::{Deserialize, Serialize};
 /// always-emitted top-level arrays.
 /// v15: edge occurrence for externals counted by canonical sink key (family
 /// aliases like Session.client → boto3.client) so finding ids cannot collide.
-pub const CACHE_SCHEMA_VERSION: u32 = 15;
+/// v16: project class constructor / MRO / `super()` resolution; `Path.mkdir` +
+/// `importlib.resources` Traversable sinks; `open`+`read`/`write` sink-site
+/// attribution; log-scaled health score.
+pub const CACHE_SCHEMA_VERSION: u32 = 16;
 
 /// Tool version embedded in the cache path (from this crate's Cargo.toml).
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
