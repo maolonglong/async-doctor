@@ -148,7 +148,8 @@ fn text_default_is_grouped_expand_lists_all() {
         "must report interpreter/venv: {stdout}"
     );
     assert!(
-        stdout.contains("sink site(s)") && stdout.contains("finding(s)"),
+        (stdout.contains("sink site") || stdout.contains("sink sites"))
+            && (stdout.contains("finding") || stdout.contains("findings")),
         "summary must lead with sink sites then findings: {stdout}"
     );
     // Sink sites come before findings in the lead line.

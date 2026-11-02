@@ -171,9 +171,7 @@ fn anyio_fail_after_and_move_on_after_are_not_sync_with_async_cm() {
     // Minimal anyio stub so resolution does not require a real install. The
     // known-qualname allowlist still applies to External callees; Lock must
     // keep flagging while fail_after / move_on_after must stay silent.
-    let sp = dir
-        .path()
-        .join(".venv/lib/python3.12/site-packages/anyio");
+    let sp = dir.path().join(".venv/lib/python3.12/site-packages/anyio");
     std::fs::create_dir_all(&sp).expect("anyio stub dir");
     std::fs::write(
         sp.join("__init__.py"),

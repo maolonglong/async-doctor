@@ -120,7 +120,9 @@ fn environment_banner_and_json_report_detected_frameworks() {
         "expected fastapi and starlette in frameworks, got {fw_strs:?}"
     );
     assert!(
-        fw_strs.iter().all(|s| !s.starts_with("httpx") && !s.starts_with("redis")),
+        fw_strs
+            .iter()
+            .all(|s| !s.starts_with("httpx") && !s.starts_with("redis")),
         "client libs must not appear under frameworks, got {fw_strs:?}"
     );
 

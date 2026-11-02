@@ -122,12 +122,13 @@ jobs:
 
 ## Large repositories / memory
 
-A pre-release audit on **1 Nov 2026** measured peak RSS for the full litellm
-repo (**8686** `.py` files, with venv) at about **~6.9 GB**. Scanning the
-`litellm/` package subdirectory alone was about **~2.3 GB**. Prefer a package
-subdirectory (`async-doctor path/to/pkg`) when memory is tight. Warm runs reuse
-the whole-scan cache when inputs are unchanged. See also
-[docs/benchmark.md](docs/benchmark.md) (subdir timings).
+On this Cloud VM (Linux x86_64, 4 cores, 15 GiB RAM), the `litellm/` package
+subdirectory (**3009** `.py` files, with venv) cold-scans in about **15 s** at
+**~2.1 GiB** peak RSS. Full `home-assistant/core` (~20k `.py` files) completes
+around **~38 s** / **~5.8 GiB**. Prefer a package subdirectory
+(`async-doctor path/to/pkg`) when memory is tight. Warm runs reuse the
+whole-scan cache when inputs are unchanged. See
+[docs/benchmark.md](docs/benchmark.md).
 
 ## Benchmark
 

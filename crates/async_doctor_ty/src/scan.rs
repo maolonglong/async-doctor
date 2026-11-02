@@ -67,9 +67,9 @@ fn scan_path_with_options_cache_budget(
 ) -> anyhow::Result<Report> {
     #[cfg(test)]
     {
-        return crate::hermetic_env::with_clean_venv_env(|| {
+        crate::hermetic_env::with_clean_venv_env(|| {
             scan_path_with_options_cache_budget_inner(path, options, cache_dir, follow_budget)
-        });
+        })
     }
     #[cfg(not(test))]
     {
