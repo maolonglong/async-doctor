@@ -50,20 +50,22 @@ fn default_parallel_path_bounds_fresh_empty_calls() {
 
 #[test]
 fn multi_wave_pass2_resolves_cross_wave_edges_and_bounds_resets() {
-    // 1,050 files crosses PASS2_WAVE_FILES (1,000) into 2 coordinated waves.
-    // Wave 1 (last file `m1049.py`) calls a blocking helper in Wave 0 (`m0000.py`).
-    let mut owned: Vec<(String, String)> = Vec::with_capacity(1050);
+    // PASS2_WAVE_FILES + 50 files crosses into 2 coordinated waves. Wave 1
+    // (last file) calls a blocking helper in Wave 0 (`m0000.py`).
+    let total = crate::extract::pass2::PASS2_WAVE_FILES + 50;
+    let last = total - 1;
+    let mut owned: Vec<(String, String)> = Vec::with_capacity(total);
     owned.push((
         "m0000.py".to_string(),
         "import time\ndef sync_helper():\n    time.sleep(0.1)\n".to_string(),
     ));
-    for i in 1..1049 {
+    for i in 1..last {
         let name = format!("m{i:04}.py");
         let body = format!("async def entry_{i}():\n    return {i}\n");
         owned.push((name, body));
     }
     owned.push((
-        "m1049.py".to_string(),
+        format!("m{last:04}.py"),
         "from m0000 import sync_helper\nasync def late_caller():\n    sync_helper()\n".to_string(),
     ));
     let files: Vec<(&str, &str)> = owned
@@ -82,12 +84,12 @@ fn multi_wave_pass2_resolves_cross_wave_edges_and_bounds_resets() {
     assert_eq!(
         report.findings.len(),
         1,
-        "cross-wave call from m1049.py to m0000.py must produce 1 finding"
+        "cross-wave call from the last file to m0000.py must produce 1 finding"
     );
     assert_eq!(report.findings[0].entry.name, "late_caller");
     // 2 coordinated waves = 2 wave resets (never per-worker × N workers).
     assert!(
         (2..=4).contains(&resets),
-        "expected 2 coordinated wave resets for 1,050 files, got {resets}"
+        "expected 2 coordinated wave resets for {total} files, got {resets}"
     );
 }

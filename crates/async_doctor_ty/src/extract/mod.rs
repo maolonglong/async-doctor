@@ -10,7 +10,7 @@ mod follow;
 mod functions;
 mod helpers;
 mod panic_util;
-mod pass2;
+pub(crate) mod pass2;
 mod path;
 
 use std::path::Path;

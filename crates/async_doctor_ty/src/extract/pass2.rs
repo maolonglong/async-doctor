@@ -44,7 +44,9 @@ const PASS2_AST_CLEAR_INTERVAL: usize = 25;
 /// Above this threshold (large monorepos), coordinated waves drop the completed
 /// wave's `Arc<Zalsa>` completely (refcount = 0) before starting the next wave,
 /// bounding live Salsa `semantic_index` / inference memos to at most one wave.
-const PASS2_WAVE_FILES: usize = 1000;
+/// 2,500 (was 1,000): every extra wave re-infers shared heavy modules, which
+/// cost +20-81% cold wall on public monorepos for a smaller RSS win.
+pub(crate) const PASS2_WAVE_FILES: usize = 2500;
 
 /// Worker state carried from parallel Pass 1 into parallel Pass 2 so already
 /// parsed `source_text` / `line_index` memos stay warm.

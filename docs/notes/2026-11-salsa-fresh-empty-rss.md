@@ -49,3 +49,20 @@ of total Salsa query/struct memory by the end of Pass 2.
 bounded on both 400-file single-wave scans (`1..=2`) and 1,050-file multi-wave
 scans (`2..=4`, while verifying cross-wave call resolution). Benchmark RSS:
 [../benchmark.md](../benchmark.md).
+
+## 2026-11-02 follow-up: wave size 1,000 → 2,500
+
+Each extra wave re-infers shared heavy modules. Cold scans on public repos
+(macOS, no venv, one run each; wall s / peak RSS GiB):
+
+| repo (files) | waves 1000 | waves 2500 | waves off |
+| --- | --- | --- | --- |
+| litellm (2399) | 5.79 / 1.00 | 5.38 / 1.43 | 4.81 / 1.59 |
+| saleor (2645) | 3.25 / 0.37 | 2.04 / 0.57 | 2.05 / 0.75 |
+| dify `api` (3945) | 7.32 / 1.01 | 4.58 / 1.43 | 4.43 / 1.62 |
+| HA core (9265) | 12.36 / 0.67 | 6.83 / 0.82 | 7.24 / 2.04 |
+
+JSON was byte-identical across all three settings. `PASS2_WAVE_FILES` is now
+2,500. A memory-triggered wave (roll only past an RSS / Salsa memo threshold)
+is still open; validate it on a Linux box with project venvs, where the
+first-release audit saw larger slowdowns (saleor 15-20 s → 42-50 s).

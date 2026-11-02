@@ -40,7 +40,7 @@ targets and these tables.
 
 Warm ≪ cold via the whole-scan report cache (content-hash keyed). Default
 pass-2 caps workers at 8, clears `ParsedModule` ASTs after per-file visits and
-every 25 files per worker, and runs in coordinated 1,000-file Salsa waves that
+every 25 files per worker, and runs in coordinated 2,500-file Salsa waves that
 drop the completed wave's shared `Arc<Zalsa>` before starting the next (see
 [notes/2026-11-salsa-fresh-empty-rss.md](notes/2026-11-salsa-fresh-empty-rss.md)).
 Set `ASYNC_DOCTOR_PASS2_BATCH=N` or `locality` to override wave sizing with

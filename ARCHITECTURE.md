@@ -55,7 +55,7 @@ reports (`env_info.rs`), and twin resolution against the scanned venv
 `extract/`: path discovery (`files.rs`, `path.rs`), pass-1 function collection
 (`functions.rs`), pass-2 typed edges (`pass2.rs` — default parallel path caps
 workers at 8, clears `ParsedModule` ASTs after per-file visits and every 25
-files per worker, and runs in coordinated 1,000-file waves where all workers
+files per worker, and runs in coordinated 2,500-file waves where all workers
 share one `Storage` per wave and drop it to refcount 0 between waves, with a
 shared read-only pass-1 function slice overlay), per-file `CallCollector`
 (`extract/collector/`), and third-party follow with budget (`follow.rs`).
@@ -192,7 +192,7 @@ surface as exit 2 from the CLI.
 Targets and measured corpora: `docs/benchmark.md`. Warm path relies on the
 whole-scan cache; package cache only skips third-party re-parse. The default
 parallel pass 2 bounds memory via explicit `ParsedModule::clear` calls and
-coordinated 1,000-file Salsa waves (dropping the completed wave's shared
+coordinated 2,500-file Salsa waves (dropping the completed wave's shared
 `Arc<Zalsa>` before starting the next). Optional
 `ASYNC_DOCTOR_PASS2_BATCH=N` / `locality` overrides wave sizing with serial
 batched resets. `ASYNC_DOCTOR_TIMING=1` prints phase spans on stderr.
