@@ -76,6 +76,9 @@ under parallel tests — pass an explicit cache dir instead.
   reachable, never finding entries. Reverse propagation stops at third-party
   async. Awaited *sync* sinks still seed (sync body runs on the loop before
   `await`); awaited known-async APIs do not.
+- Named function bodies reset definition-site execution depths and parameter
+  guards; call-site edges carry the enclosing conditions. Dead definitions
+  retain their dead status.
 - Outside-scan-root editables are follow-only (never entry sources). Scanning a
   package directory (one containing a Python package init module) adds its
   parent for self-imports.
@@ -98,7 +101,8 @@ dist-info content fingerprint. Package-cache fingerprints are coarse
 (RECORD/METADATA/one-level `.py`); identical RECORD + unchanged dist-info mtime
 can reuse a package entry even if an unpacked `.py` was patched in place
 (editable installs that refresh dist-info mtime invalidate correctly).
-Package-cache schema is `CACHE_SCHEMA_VERSION` 19: it persists decorator
+Package-cache schema is `CACHE_SCHEMA_VERSION` 20: it invalidates edges carrying
+definition-site guards into named function bodies, and persists decorator
 qualnames per function and keyword args passed a literal `True` per edge so warm runs restore decorator-offload semantics, and a
 whole-scan cache hit preserves `environment.followBudgetSkipped` while the rest
 of `environment` is re-detected.

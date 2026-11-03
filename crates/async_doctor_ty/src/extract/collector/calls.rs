@@ -767,7 +767,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
 
     /// Snapshot + clear branch/loop depths so nested callable bodies are graded
     /// relative to themselves (not the enclosing offload site's try/if/loop).
-    fn take_enclosing_depths(&mut self) -> (u32, u32, u32, u32, u32, u32) {
+    pub(super) fn take_enclosing_depths(&mut self) -> (u32, u32, u32, u32, u32, u32) {
         let depths = (
             self.dead_depth,
             self.loop_depth,
@@ -785,7 +785,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         depths
     }
 
-    fn restore_enclosing_depths(&mut self, depths: (u32, u32, u32, u32, u32, u32)) {
+    pub(super) fn restore_enclosing_depths(&mut self, depths: (u32, u32, u32, u32, u32, u32)) {
         self.dead_depth = depths.0;
         self.loop_depth = depths.1;
         self.branch_depth = depths.2;

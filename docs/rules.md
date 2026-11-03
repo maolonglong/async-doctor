@@ -159,6 +159,13 @@ offloading the sync client.
   into an offload primitive / inferred wrapper, runs its body on a worker —
   calls to it never reach its body on the caller's loop. Unknown or
   non-offloading decorators stay transparent.
+- Named nested function bodies, like lambda bodies, are analyzed relative to
+  their own execution: guards surrounding the definition do not make the
+  body's sinks conditional. Conditions inside the body still apply, and
+  statically dead definitions stay excluded.
+- A wrapper that offloads a local closure capturing an enclosing callable
+  parameter is not necessarily inferred as an offload wrapper. Missing advice
+  on that shape does not prove there is no async alternative.
 
 ## nested-event-loop
 

@@ -56,7 +56,8 @@ use serde::{Deserialize, Serialize};
 /// v18: `environment.followBudgetSkipped` counts budget-truncated
 /// third-party follow candidates.
 /// v19: edges record keyword args passed a literal `True` (`cheap-path-op`).
-pub const CACHE_SCHEMA_VERSION: u32 = 19;
+/// v20: named function bodies do not inherit definition-site execution guards.
+pub const CACHE_SCHEMA_VERSION: u32 = 20;
 
 /// Tool version embedded in the cache path (from this crate's Cargo.toml).
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -1,6 +1,7 @@
 //! Integration tests for call-graph extraction + propagation.
 
 mod advice;
+mod advice_scope;
 mod basics;
 mod boto;
 mod budget;

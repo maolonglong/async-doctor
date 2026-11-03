@@ -56,7 +56,15 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 if let Some(id) = fid {
                     self.note_decorator_refs(id, func);
                 }
+                // A def creates a callable; its body runs under the eventual
+                // call site's conditions, not the definition site's guards.
+                // Statically dead definitions still have no executable body.
+                let depths = self.take_enclosing_depths();
+                self.dead_depth = depths.0;
+                let prev_guard = self.active_param_guard.take();
                 self.visit_body_seq(&func.body);
+                self.active_param_guard = prev_guard;
+                self.restore_enclosing_depths(depths);
                 self.fn_scopes.pop();
                 self.fn_stack.pop();
                 self.current_fn = prev;
