@@ -119,7 +119,9 @@ fn edge(
         is_awaited: false,
         callee_is_coroutine: None,
         is_eager_offload_arg: false,
+        is_bound_call: false,
         context_from_caller: None,
+        context_from_edge: None,
         constructed_receiver: None,
     }
 }

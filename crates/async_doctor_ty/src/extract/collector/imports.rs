@@ -82,6 +82,10 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         if first_party_head_at(project, head) {
             return true;
         }
+        let src_dir = project.join("src");
+        if src_dir.is_dir() && first_party_head_at(&src_dir, head) {
+            return true;
+        }
         for root in self.ctx.db.extra_src_roots() {
             if first_party_head_at(Path::new(root.as_str()), head) {
                 return true;

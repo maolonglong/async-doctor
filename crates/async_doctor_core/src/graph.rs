@@ -182,10 +182,18 @@ pub struct CallEdge {
     /// True when this call is an argument to an offload wrapper and was
     /// *evaluated* (eager `to_thread(f())`) rather than passed as a callable.
     pub is_eager_offload_arg: bool,
+    /// True when the call expression implicitly binds parameter 0 (`self` or
+    /// `cls` on a bound method / constructor call), shifting call-site
+    /// positional arguments by 1 relative to `FunctionFact::param_names`.
+    pub is_bound_call: bool,
     /// Higher-order materialization: this edge (`apply → block`) is only valid
     /// when the previous hop’s caller is this function (the call site that
     /// passed `block`). Cheap call-context sensitivity without cloning graphs.
     pub context_from_caller: Option<FunctionId>,
+    /// Exact edge index in `ProjectFacts::edges` that bound this higher-order
+    /// callback (refines `context_from_caller` when a caller invokes `apply`
+    /// more than once).
+    pub context_from_edge: Option<usize>,
     /// Root constructed client class for an attribute callee
     /// (`AzureOpenAI` for `AzureOpenAI().chat.completions.create(...)`).
     pub constructed_receiver: Option<String>,
@@ -340,6 +348,12 @@ pub fn is_non_production_entry_path(file: &str) -> bool {
     }
     if name.starts_with("test_") || name.ends_with("_test.py") {
         return true;
+    }
+    // Never classify host ancestor directories when a path could not be made
+    // project-relative (Unix `/...` or Windows `C:/...`).
+    let is_abs = f.starts_with('/') || (f.len() >= 2 && f.as_bytes()[1] == b':');
+    if is_abs {
+        return false;
     }
     for part in f.split('/') {
         if part.is_empty() {

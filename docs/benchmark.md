@@ -38,10 +38,12 @@ targets and these tables.
 | **Parallel pass-2** (`c503648`) | 15.3s | 0.14s | 2.13 GiB | 4915 | 352 | yes |
 | **Recall + AST clear + waves** (current) | 8.40s | 0.38s | 1.11 GiB | 5227 | 7421 | yes |
 
-Warm ≪ cold via the whole-scan report cache (content-hash keyed). Default
-pass-2 caps workers at 8, clears `ParsedModule` ASTs after per-file visits and
-every 25 files per worker, and runs in coordinated 2,500-file Salsa waves that
-drop the completed wave's shared `Arc<Zalsa>` before starting the next (see
+Warm ≪ cold via the whole-scan report cache (content-hash keyed; skipped on
+single-file targets). Default pass-2 caps workers at 8, clears per-worker
+`ParsedModule` ASTs and evicts file contents after per-file visits inside each
+worker's local Salsa fork, purges jemalloc dirty arenas between waves, and runs
+in coordinated 2,500-file Salsa waves that drop the completed wave's shared
+`Arc<Zalsa>` before starting the next (see
 [notes/2026-11-salsa-fresh-empty-rss.md](notes/2026-11-salsa-fresh-empty-rss.md)).
 Set `ASYNC_DOCTOR_PASS2_BATCH=N` or `locality` to override wave sizing with
 serial batched resets.
@@ -61,7 +63,7 @@ Warm was not faster: the package cache only skips third-party re-parse;
 first-party `SemanticModel` work dominated. After the whole-scan report cache,
 warm is discovery + fingerprint + scan-cache load (~50 ms) plus JSON emit.
 
-- **async-doctor:** `0.1.0` (CACHE_SCHEMA_VERSION **v16**)
+- **async-doctor:** `0.1.1` (`CACHE_SCHEMA_VERSION` **v21**, stripped release binary ~28.1 MiB on macOS arm64)
 - **jemalloc:** non-MSVC builds link `tikv-jemallocator`; building the Python
   sdist/wheel that vendors the native binary needs a working `make` (jemalloc's
   autotools build).
@@ -97,6 +99,20 @@ coordinated 1,000-file Pass-2 waves:
   OOM-killed above 8 GiB under uncoordinated per-worker Salsa rebuilds),
   reporting 5 findings. Prefer a package subdirectory when scanning monorepos
   if memory is tight.
+
+### Audit remediation delta (11 Nov 2026, macOS arm64)
+
+Same-host comparison before (`40bd0ba`) vs after audit remediation + v21 cache schema:
+
+| Corpus | Cold (before → after) | Warm | Peak RSS | Findings (before → after) | Candidates | Identical |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `litellm/` | 11.27s → **10.12s** | 0.21s | 1.62 GiB | 3874 → **4524** (+650, 0 lost) | 7466 → 7614 | yes |
+| `backend/` (`open-webui`) | 0.78s → **0.77s** | 0.01s | 326 MiB | 25 → **25** | 32 → 32 | yes |
+| `httpx/` | 0.13s → **0.12s** | 0.01s | 97 → **89 MiB** | 0 → **0** | 0 → 0 | yes |
+| `starlette/` | 0.13s → **0.16s** | 0.01s | 105 MiB | 2 → **2** | 0 → 0 | yes |
+| `fastapi/` | 0.60s → **0.70s** | 0.01s | 178 MiB | 0 → **0** | 3 → 3 | yes |
+
+All +650 newly recalled `litellm` findings trace to bound higher-order credential callbacks (`self._get_or_set_cached_credentials(..., lambda: ...)`) calling synchronous `boto3`/`botocore` STS, file `read()`, `httpx.Client`, and `Future.result()` sinks across 19 sink sites, with zero lost baseline `(entry, sink)` sites across all five corpora.
 
 ## Reproduce
 

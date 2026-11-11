@@ -283,9 +283,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             None
         };
         self.visit_body_seq(&if_stmt.body);
-        if let Some(key) = pushed_narrow {
-            self.narrowed_locals.remove(&key);
-        }
+        self.pop_narrowing(pushed_narrow);
         self.active_param_guard = prev_guard;
         if let Some(prev) = prev_done {
             self.future_done_receivers = prev;
@@ -402,9 +400,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 None
             };
             self.visit_body_seq(&clause.body);
-            if let Some(key) = pushed_narrow {
-                self.narrowed_locals.remove(&key);
-            }
+            self.pop_narrowing(pushed_narrow);
             self.active_param_guard = prev_guard;
             if let Some(prev) = prev_done {
                 self.future_done_receivers = prev;
@@ -427,8 +423,12 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
     }
 
-    /// Apply one cheap narrowing for the duration of a branch body.
-    fn push_narrowing(&mut self, test: &Expr) -> Option<String> {
+    /// Apply one cheap narrowing for the duration of a branch body, returning
+    /// the shadowed previous fact (if any) so `pop_narrowing` restores it.
+    fn push_narrowing(
+        &mut self,
+        test: &Expr,
+    ) -> Option<(String, Option<crate::extract::helpers::NarrowFact>)> {
         let (name, mut fact) = narrow_from_test(test)?;
         // Don't overwrite a tighter isinstance with NotNone.
         if matches!(
@@ -451,8 +451,24 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         {
             fact = crate::extract::helpers::NarrowFact::IsInstance(q);
         }
-        self.narrowed_locals.insert(name.clone(), fact);
-        Some(name)
+        let prev = self.narrowed_locals.insert(name.clone(), fact);
+        Some((name, prev))
+    }
+
+    fn pop_narrowing(
+        &mut self,
+        pushed: Option<(String, Option<crate::extract::helpers::NarrowFact>)>,
+    ) {
+        if let Some((key, prev)) = pushed {
+            match prev {
+                Some(old) => {
+                    self.narrowed_locals.insert(key, old);
+                }
+                None => {
+                    self.narrowed_locals.remove(&key);
+                }
+            }
+        }
     }
 
     pub(crate) fn visit_try(&mut self, try_stmt: &'a ast::StmtTry) {

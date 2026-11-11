@@ -5,6 +5,7 @@
 //! coding cookie are analysed instead of silently becoming empty sources.
 
 use std::any::Any;
+use std::collections::HashSet;
 
 use ruff_db::system::walk_directory::WalkDirectoryBuilder;
 use ruff_db::system::{
@@ -13,37 +14,37 @@ use ruff_db::system::{
 };
 use ruff_notebook::{Notebook, NotebookError};
 
-use crate::encoding::decode_python_source;
+use crate::encoding::decode_python_source_owned;
 
 /// OS filesystem with PEP 263-aware `read_to_string`.
 #[derive(Debug, Clone)]
 pub struct DoctorSystem {
     inner: OsSystem,
-    read_paths: std::sync::Arc<std::sync::Mutex<Vec<SystemPathBuf>>>,
+    read_paths: std::sync::Arc<std::sync::Mutex<HashSet<SystemPathBuf>>>,
 }
 
 impl DoctorSystem {
     pub fn new(cwd: impl AsRef<SystemPath>) -> Self {
         Self {
             inner: OsSystem::new(cwd),
-            read_paths: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            read_paths: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
         }
     }
 
     pub(crate) fn snapshot_read_paths(&self) -> Vec<SystemPathBuf> {
-        self.read_paths.lock().unwrap().clone()
+        self.read_paths.lock().unwrap().iter().cloned().collect()
     }
 
     pub(crate) fn fresh(&self) -> Self {
         Self {
             inner: self.inner.clone(),
-            read_paths: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            read_paths: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
         }
     }
 
     fn read_decoded(path: &std::path::Path) -> Result<String> {
         let bytes = std::fs::read(path)?;
-        decode_python_source(&bytes)
+        decode_python_source_owned(bytes)
             .map_err(|msg| std::io::Error::new(std::io::ErrorKind::InvalidData, msg))
     }
 }
@@ -68,7 +69,10 @@ impl System for DoctorSystem {
     fn read_to_string(&self, path: &SystemPath) -> Result<String> {
         let res = Self::read_decoded(path.as_std_path());
         if res.is_ok() {
-            self.read_paths.lock().unwrap().push(path.to_path_buf());
+            let mut guard = self.read_paths.lock().unwrap();
+            if !guard.contains(path) {
+                guard.insert(path.to_path_buf());
+            }
         }
         res
     }

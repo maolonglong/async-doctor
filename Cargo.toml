@@ -40,7 +40,6 @@ anstyle = "1.0"
 clap = { version = "4", features = ["derive"] }
 dunce = "1"
 ignore = "0.4"
-rayon = "1.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -51,6 +50,7 @@ toml = "0.8"
 [profile.release]
 lto = "thin"
 codegen-units = 4
+strip = "symbols"
 
 # Dev/test: lightly optimize workspace crates; heavily optimize deps (ty/ruff/salsa).
 # Unoptimized deps make analysis-heavy tests spend minutes in ty/ruff on CI.

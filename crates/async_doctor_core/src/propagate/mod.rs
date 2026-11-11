@@ -22,9 +22,10 @@ use advice::collect_offload_twin_advice;
 use grade::{
     ParamVerdict, PathToEntry, async_twin_hint, chain_step_for, evaluate_param_guards, label_rank,
     merge_file_io_findings, merge_same_line_ctor_call_findings, reconcile_conditions,
-    resolution_for_edge, shortest_paths_to_async_entries, unresolved_pattern,
+    resolution_for_edge, shortest_paths_to_async_entries, unique_site_finding_id,
+    unresolved_pattern,
 };
-use higher_order::materialize_higher_order;
+use higher_order::{materialize_higher_order, materialize_higher_order_owned};
 use special::{collect_offload_coroutine_findings, nested_event_loop_hit};
 
 #[derive(Debug, Clone, Copy)]
@@ -80,8 +81,24 @@ pub fn analyze_with_options(
     options: AnalyzeOptions,
 ) -> Report {
     let owned = materialize_higher_order(facts);
-    let facts = &owned;
+    analyze_materialized(&owned, sinks, options)
+}
 
+/// Analyze owned project facts without cloning [`ProjectFacts`] during higher-order materialization.
+pub fn analyze_owned(
+    facts: ProjectFacts,
+    sinks: &dyn SinkTable,
+    options: AnalyzeOptions,
+) -> Report {
+    let materialized = materialize_higher_order_owned(facts);
+    analyze_materialized(&materialized, sinks, options)
+}
+
+fn analyze_materialized(
+    facts: &ProjectFacts,
+    sinks: &dyn SinkTable,
+    options: AnalyzeOptions,
+) -> Report {
     let mut first_party_files = HashSet::new();
     let mut async_entry_count = 0u32;
     for f in &facts.functions {
@@ -230,8 +247,8 @@ pub fn analyze_with_options(
     let mut unresolved_agg: HashMap<String, (u32, HashSet<FunctionId>)> = HashMap::new();
 
     let mut emitted: HashSet<String> = HashSet::new();
-    // Finding id → sink site `(file, line)` for collision diagnostics.
-    let mut emitted_sink_sites: HashMap<String, (String, u32)> = HashMap::new();
+    // Finding id → `(entry_id, sink_file, sink_line)` for site disambiguation.
+    let mut emitted_sink_sites: HashMap<String, (FunctionId, String, u32)> = HashMap::new();
     let mut omitted_entries: HashSet<FunctionId> = HashSet::new();
     let mut raw_findings: Vec<Finding> = Vec::new();
     let mut raw_candidates: Vec<Candidate> = Vec::new();
@@ -281,7 +298,8 @@ pub fn analyze_with_options(
             let mut chain_steps: Vec<ChainStep> = Vec::new();
             let mut chain_qualnames: Vec<String> = Vec::new();
             let mut condition_tags: Vec<ConditionTag> = Vec::new();
-            let mut param_guards: Vec<(FunctionId, ParamGuard)> = Vec::new();
+            let mut edge_param_guards: Vec<(FunctionId, ParamGuard)> = Vec::new();
+            let mut third_party_edge_guards: Vec<(FunctionId, ParamGuard)> = Vec::new();
 
             // When the async entry *receives* a kwargs/partial callback, the
             // reverse path stops at that receiver and would omit the call site
@@ -289,28 +307,25 @@ pub fn analyze_with_options(
             // which line to change.
             for &edge_idx in &path.edges {
                 let e = &facts.edges[edge_idx];
-                let Some(binder) = e.context_from_caller else {
+                let resolved_bind = if let Some(bi) = e.context_from_edge {
+                    facts.edges.get(bi).map(|be| (bi, be))
+                } else if let Some(binder) = e.context_from_caller {
+                    facts.edges.iter().enumerate().find(|(_, be)| {
+                        be.caller == binder
+                            && matches!(be.callee, CalleeRef::Project(id) if id == e.caller)
+                            && (!be.positional_callables.is_empty()
+                                || !be.keyword_callables.is_empty())
+                    })
+                } else {
+                    None
+                };
+                let Some((bind_idx, bind_e)) = resolved_bind else {
                     continue;
                 };
-                if binder == entry_id {
+                if bind_e.caller == entry_id || path.edges.contains(&bind_idx) {
                     continue;
                 }
-                let already = path.edges.iter().any(|&i| {
-                    let be = &facts.edges[i];
-                    be.caller == binder
-                        && matches!(be.callee, CalleeRef::Project(id) if id == e.caller)
-                });
-                if already {
-                    continue;
-                }
-                let Some((bind_idx, bind_e)) = facts.edges.iter().enumerate().find(|(_, be)| {
-                    be.caller == binder
-                        && matches!(be.callee, CalleeRef::Project(id) if id == e.caller)
-                        && (!be.positional_callables.is_empty() || !be.keyword_callables.is_empty())
-                }) else {
-                    continue;
-                };
-                let binder_fn = facts.function(binder);
+                let binder_fn = facts.function(bind_e.caller);
                 let res = edge_resolutions[bind_idx]
                     .get_or_insert_with(|| resolution_for_edge(facts, bind_e))
                     .clone();
@@ -344,6 +359,12 @@ pub fn analyze_with_options(
                     }
                 }
                 condition_tags.extend(e.conditions.iter().copied());
+                if let Some(g) = e.param_guard {
+                    edge_param_guards.push((e.caller, g));
+                    if caller_fn.is_installed_third_party() {
+                        third_party_edge_guards.push((e.caller, g));
+                    }
+                }
             }
 
             let seed_caller_fn = facts.function(seed_caller);
@@ -359,18 +380,28 @@ pub fn analyze_with_options(
                 seed_res,
             );
             condition_tags.extend(seed_edge.conditions.iter().copied());
+            let mut seed_param_guards: Vec<(FunctionId, ParamGuard)> = Vec::new();
             if let Some(g) = seed_edge.param_guard {
-                param_guards.push((seed_caller, g));
+                seed_param_guards.push((seed_caller, g));
             }
 
             let conditions = reconcile_conditions(&condition_tags);
 
+            // Intermediate parameter guards prune provably dead multi-hop chains;
+            // unknown runtime args on first-party intermediate hops remain normal
+            // `async-branch` findings rather than parameter-toggled sinks.
+            if evaluate_param_guards(facts, path, &edge_param_guards) == ParamVerdict::ProvablyFalse
+            {
+                continue;
+            }
             // Parameter-controlled sink: demote unless the guarding arg is provably truthy.
-            let param_verdict = evaluate_param_guards(facts, path, &param_guards);
+            let param_verdict = evaluate_param_guards(facts, path, &seed_param_guards);
             if param_verdict == ParamVerdict::ProvablyFalse {
                 continue;
             }
-            let mut force_conditional = param_verdict == ParamVerdict::Unknown;
+            let mut force_conditional = param_verdict == ParamVerdict::Unknown
+                || evaluate_param_guards(facts, path, &third_party_edge_guards)
+                    == ParamVerdict::Unknown;
             // Installed third-party sinks under a param/branch guard (e.g. PIL
             // `if is_path(fp): open(...)`) are not provable for arbitrary caller
             // args → candidates. Outside-editable follow-only code keeps
@@ -408,30 +439,21 @@ pub fn analyze_with_options(
                     chain_qualnames.push(hit.sink_qualname.to_string());
                     let chain_refs: Vec<&str> =
                         chain_qualnames.iter().map(String::as_str).collect();
-                    let id = finding_id(FindingIdParts {
-                        rule: hit.rule,
-                        entry_qualname: &func_full_qualnames[entry_id.index()],
-                        sink_qualname: hit.sink_qualname,
-                        chain_qualnames: &chain_refs,
-                        occurrence: seed_edge.occurrence,
-                    });
-                    if let Some((prev_file, prev_line)) = emitted_sink_sites
-                        .insert(id.clone(), (seed_edge.file.clone(), seed_edge.line))
-                    {
-                        // Same id from a distinct call site means occurrence was
-                        // counted on a different key than finding_id hashes.
-                        debug_assert!(
-                            prev_file == seed_edge.file && prev_line == seed_edge.line,
-                            "finding-id collision across distinct sink sites: \
-                             id={id} {prev_file}:{prev_line} vs {}:{}",
-                            seed_edge.file,
-                            seed_edge.line
-                        );
+                    let Some(id) = unique_site_finding_id(
+                        FindingIdParts {
+                            rule: hit.rule,
+                            entry_qualname: &func_full_qualnames[entry_id.index()],
+                            sink_qualname: hit.sink_qualname,
+                            chain_qualnames: &chain_refs,
+                            occurrence: seed_edge.occurrence,
+                        },
+                        entry_id,
+                        (&seed_edge.file, seed_edge.line),
+                        &mut emitted_sink_sites,
+                        &mut emitted,
+                    ) else {
                         continue;
-                    }
-                    if !emitted.insert(id.clone()) {
-                        continue;
-                    }
+                    };
 
                     let mut hint = hit.fix_hint.to_string();
                     // Eager offload may mark the edge into the sink's caller
@@ -653,6 +675,7 @@ pub fn analyze_with_options(
         facts,
         &reverse,
         options.include_non_production,
+        &mut emitted_sink_sites,
         &mut emitted,
     ));
     // Empty entry.file/chain belong in locationLessCandidates, not candidates.

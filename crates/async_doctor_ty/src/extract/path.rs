@@ -78,9 +78,17 @@ fn discover_first_party_files(root: &Path, extensions: &[&str]) -> anyhow::Resul
 }
 
 pub(crate) fn relative_display(root: &SystemPath, path: &SystemPath) -> String {
-    path.strip_prefix(root)
-        .map(|p| p.as_str().replace('\\', "/"))
-        .unwrap_or_else(|_| path.as_str().replace('\\', "/"))
+    if let Ok(rel) = path.strip_prefix(root) {
+        return rel.as_str().replace('\\', "/");
+    }
+    if let (Ok(canon_root), Ok(canon_path)) = (
+        dunce::canonicalize(root.as_std_path()),
+        dunce::canonicalize(path.as_std_path()),
+    ) && let Ok(rel) = canon_path.strip_prefix(&canon_root)
+    {
+        return rel.to_string_lossy().replace('\\', "/");
+    }
+    path.as_str().replace('\\', "/")
 }
 
 pub(crate) fn module_name_from_relative(rel: &str) -> String {

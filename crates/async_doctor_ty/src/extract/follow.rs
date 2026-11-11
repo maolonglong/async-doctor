@@ -222,7 +222,7 @@ pub(crate) fn follow_third_party(
                         &pfp,
                         q,
                         &facts.functions[id.index()],
-                        &facts.edges,
+                        &facts.edges[edge_before..],
                         &id_to_external_key,
                         follow_targets,
                         decorator_quals_for(facts, id),
@@ -239,6 +239,11 @@ pub(crate) fn follow_third_party(
         let Some(target) = follow_targets.get(q).cloned() else {
             continue;
         };
+        if uncached_since_reset >= FOLLOW_DB_RESET_INTERVAL {
+            *db = db.fresh_empty();
+            uncached_since_reset = 0;
+        }
+        uncached_since_reset += 1;
         let edge_before = facts.edges.len();
         if let Some(id) = extract_third_party_function(
             db,
@@ -265,7 +270,7 @@ pub(crate) fn follow_third_party(
     // cache hits must charge `follow_budget` the same way (one unit per
     // materialized/extracted function, no free transitive closure).
     let mut followed: usize = 0;
-    let mut budget_skipped: usize = 0;
+    let mut skipped_by_budget: BTreeSet<String> = BTreeSet::new();
     loop {
         let mut wave_candidates: BTreeMap<String, u32> = BTreeMap::new();
         for &fid in &reachable_fns {
@@ -305,11 +310,17 @@ pub(crate) fn follow_third_party(
         let remaining = follow_budget.saturating_sub(followed);
         if remaining == 0 {
             // Every candidate in this (and later) waves is skipped by budget.
-            budget_skipped += ranked.len();
+            for (_, q) in ranked {
+                skipped_by_budget.insert(q);
+            }
             break;
         }
-        budget_skipped += ranked.len().saturating_sub(remaining);
-        ranked.truncate(remaining);
+        if ranked.len() > remaining {
+            for (_, q) in &ranked[remaining..] {
+                skipped_by_budget.insert(q.clone());
+            }
+            ranked.truncate(remaining);
+        }
 
         let mut progressed = false;
         // Try cache hits for this wave's packages before extracting.
@@ -401,7 +412,7 @@ pub(crate) fn follow_third_party(
                         &pfp,
                         &qualname,
                         &facts.functions[id.index()],
-                        &facts.edges,
+                        &facts.edges[edge_before..],
                         &id_to_external_key,
                         follow_targets,
                         decorator_quals_for(facts, id),
@@ -449,6 +460,10 @@ pub(crate) fn follow_third_party(
 
     // One atomic write per dirty package.
     cache_batch.flush();
+    let budget_skipped = skipped_by_budget
+        .iter()
+        .filter(|q| !qual_to_id.contains_key(*q))
+        .count();
     facts.environment.follow_budget_skipped = budget_skipped as u32;
 }
 
@@ -641,8 +656,8 @@ pub(crate) fn extract_third_party_function(
         index,
     };
     let model = SemanticModel::new(db, program_file);
-    let module_constants = HashMap::new();
-    let property_defs: HashSet<DefKey> = HashSet::new();
+    let module_constants = super::constants::collect_module_constants(parsed.suite());
+    let property_defs: HashSet<FunctionId> = HashSet::new();
     let mut task_targets = TaskTargets::default();
     let mut visitor = CallCollector::new(
         &ctx,
@@ -660,9 +675,15 @@ pub(crate) fn extract_third_party_function(
         false,
         &module_constants,
     );
+    super::collector::loop_guards::collect_idle_loop_helpers(
+        parsed.suite(),
+        &mut visitor.idle_loop_helpers,
+    );
     visitor.current_fn = Some(id);
     visitor.current_param_names = param_names_for_visit;
+    visitor.note_decorator_refs(id, func);
     visitor.visit_body_seq(&func.body);
+    parsed.module().clear();
     Some(id)
 }
 

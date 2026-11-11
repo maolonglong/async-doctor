@@ -39,8 +39,12 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         let Some(target) = self.resolve_class_target(func) else {
             return Vec::new();
         };
+        let has_post_init = self.target_has_post_init_semantics(target);
         let mut out = Vec::new();
         for &method in CONSTRUCTOR_METHODS {
+            if method == "__post_init__" && !has_post_init {
+                continue;
+            }
             let mut visited = HashSet::new();
             let fids = match target {
                 ClassTarget::Def(def) => {
@@ -71,6 +75,14 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         // `super().method(...)` or `super(Cls, self).method(...)`
         if self.expr_is_super_call(recv) {
             let mut visited = HashSet::new();
+            if let Some(explicit_cls) = self.super_explicit_class_arg(recv)
+                && let Some(ClassTarget::Def(def)) = self.resolve_class_target(explicit_cls)
+            {
+                return self
+                    .lookup_method_in_class_def(def, method, false, &mut visited)
+                    .into_iter()
+                    .next();
+            }
             return self
                 .lookup_method_in_enclosing_class(method, false, &mut visited)
                 .into_iter()
@@ -329,7 +341,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
     }
 
-    fn expr_is_super_call(&self, expr: &Expr) -> bool {
+    pub(crate) fn expr_is_super_call(&self, expr: &Expr) -> bool {
         match expr {
             Expr::Call(call) => match call.func.as_ref() {
                 Expr::Name(n) => n.id.as_str() == "super",
@@ -343,22 +355,80 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
     }
 
+    fn super_explicit_class_arg<'b>(&self, expr: &'b Expr) -> Option<&'b Expr> {
+        let Expr::Call(call) = expr else {
+            return None;
+        };
+        call.arguments.args.first()
+    }
+
+    fn target_has_post_init_semantics(&self, target: ClassTarget<'db>) -> bool {
+        let mut visited = HashSet::new();
+        match target {
+            ClassTarget::Def(def) => self.class_def_has_post_init(def, &mut visited),
+            ClassTarget::Enclosing => {
+                let Some(class_def) = self.class_def_stack.last().copied() else {
+                    return false;
+                };
+                self.stmt_class_has_post_init(self.model, &self.ctx.rel, class_def, &mut visited)
+            }
+        }
+    }
+
+    fn class_def_has_post_init(
+        &self,
+        def: Definition<'db>,
+        visited: &mut HashSet<(String, u32)>,
+    ) -> bool {
+        let db = self.model.db();
+        let DefinitionKind::Class(cdef) = def.kind(db) else {
+            return false;
+        };
+        let FilePath::System(sys) = def.file(db).path(db) else {
+            return false;
+        };
+        let rel = relative_display(self.ctx.db.project_root(), sys);
+        let parsed = parsed_module(db, def.python_file(db)).load(db);
+        let class_node = cdef.node(&parsed);
+        let class_model = SemanticModel::new(db, def.program_file(db));
+        self.stmt_class_has_post_init(&class_model, &rel, class_node, visited)
+    }
+
+    fn stmt_class_has_post_init(
+        &self,
+        model: &SemanticModel<'db>,
+        rel: &str,
+        class_node: &ast::StmtClassDef,
+        visited: &mut HashSet<(String, u32)>,
+    ) -> bool {
+        let visit_key = (rel.to_string(), u32::from(class_node.name.range.start()));
+        if !visited.insert(visit_key) {
+            return false;
+        }
+        if class_node
+            .decorator_list
+            .iter()
+            .any(|d| decorator_enables_post_init(&d.expression))
+        {
+            return true;
+        }
+        for base in class_node.bases() {
+            if let Some(base_def) = self.resolve_base_class_def(model, base)
+                && self.class_def_has_post_init(base_def, visited)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     fn lookup_method_in_enclosing_class(
         &self,
         method: &str,
         include_self: bool,
         visited: &mut HashSet<(String, u32)>,
     ) -> Vec<FunctionId> {
-        if self.class_stack.is_empty() {
-            return Vec::new();
-        }
-        let parsed = parsed_module(
-            self.model.db(),
-            self.ctx.program_file.python_file(self.model.db()),
-        )
-        .load(self.model.db());
-        let Some(class_def) = find_class_in_suite(parsed.suite(), self.class_stack.as_slice())
-        else {
+        let Some(class_def) = self.class_def_stack.last().copied() else {
             return Vec::new();
         };
         self.lookup_method_in_stmt_class(
@@ -523,60 +593,17 @@ impl<'a, 'db> CallCollector<'a, 'db> {
     }
 }
 
-fn find_class_in_suite<'a>(
-    body: &'a [Stmt],
-    class_stack: &[String],
-) -> Option<&'a ast::StmtClassDef> {
-    let (head, rest) = class_stack.split_first()?;
-    for stmt in body {
-        match stmt {
-            Stmt::ClassDef(class) if class.name.as_str() == head.as_str() => {
-                if rest.is_empty() {
-                    return Some(class);
-                }
-                if let Some(inner) = find_class_in_suite(&class.body, rest) {
-                    return Some(inner);
-                }
-            }
-            Stmt::FunctionDef(func) => {
-                if let Some(found) = find_class_in_suite(&func.body, class_stack) {
-                    return Some(found);
-                }
-            }
-            Stmt::If(if_stmt) => {
-                if let Some(found) = find_class_in_suite(&if_stmt.body, class_stack) {
-                    return Some(found);
-                }
-                for clause in &if_stmt.elif_else_clauses {
-                    if let Some(found) = find_class_in_suite(&clause.body, class_stack) {
-                        return Some(found);
-                    }
-                }
-            }
-            Stmt::With(w) => {
-                if let Some(found) = find_class_in_suite(&w.body, class_stack) {
-                    return Some(found);
-                }
-            }
-            Stmt::Try(t) => {
-                if let Some(found) = find_class_in_suite(&t.body, class_stack) {
-                    return Some(found);
-                }
-                for h in &t.handlers {
-                    let ast::ExceptHandler::ExceptHandler(eh) = h;
-                    if let Some(found) = find_class_in_suite(&eh.body, class_stack) {
-                        return Some(found);
-                    }
-                }
-                if let Some(found) = find_class_in_suite(&t.orelse, class_stack) {
-                    return Some(found);
-                }
-                if let Some(found) = find_class_in_suite(&t.finalbody, class_stack) {
-                    return Some(found);
-                }
-            }
-            _ => {}
-        }
+fn decorator_enables_post_init(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call(call) => decorator_enables_post_init(&call.func),
+        Expr::Name(n) => matches!(
+            n.id.as_str(),
+            "dataclass" | "define" | "frozen" | "mutable" | "attrs"
+        ),
+        Expr::Attribute(attr) => matches!(
+            attr.attr.as_str(),
+            "dataclass" | "define" | "frozen" | "mutable" | "s" | "attrs"
+        ),
+        _ => false,
     }
-    None
 }

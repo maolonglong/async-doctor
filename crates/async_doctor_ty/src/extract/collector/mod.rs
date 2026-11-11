@@ -7,6 +7,7 @@ mod calls;
 mod constructors;
 mod control_flow;
 mod imports;
+mod locals;
 pub(crate) mod loop_guards;
 mod nonblocking;
 mod redis_mro;
@@ -41,7 +42,7 @@ pub(crate) struct CallCollector<'a, 'db> {
     pub(super) def_map_base: Option<&'a HashMap<DefKey, FunctionId>>,
     pub(super) qual_map: &'a mut HashMap<(String, String), FunctionId>,
     pub(super) qual_map_base: Option<&'a HashMap<(String, String), FunctionId>>,
-    pub(super) property_defs: &'a HashSet<DefKey>,
+    pub(super) property_defs: &'a HashSet<FunctionId>,
     pub(super) task_targets: &'a mut TaskTargets,
     pub(super) follow_targets: &'a mut HashMap<String, FollowTarget>,
     pub(super) package_meta: &'a mut PackageMetaMemo,
@@ -53,6 +54,7 @@ pub(crate) struct CallCollector<'a, 'db> {
     pub(super) current_fn: Option<FunctionId>,
     pub(super) current_param_names: Vec<String>,
     pub(super) class_stack: Vec<String>,
+    pub(super) class_def_stack: Vec<&'a ast::StmtClassDef>,
     pub(super) fn_stack: Vec<String>,
     pub(super) dead_depth: u32,
     pub(super) loop_depth: u32,
@@ -76,6 +78,7 @@ pub(crate) struct CallCollector<'a, 'db> {
     /// When true, the *next* recorded Call edge is the direct operand of
     /// `await` / `async for` iter / `async with` context (nested arg calls are not).
     pub(super) pending_is_awaited: bool,
+    pub(super) pending_is_bound_call: bool,
     /// When true, the next Call edge is a `with` context Call (e.g. `Engine.begin()`).
     pub(super) pending_with_enter: bool,
     /// True while visiting an eagerly-evaluated offload argument (`to_thread(f())`).
@@ -192,7 +195,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         def_map_base: Option<&'a HashMap<DefKey, FunctionId>>,
         qual_map: &'a mut HashMap<(String, String), FunctionId>,
         qual_map_base: Option<&'a HashMap<(String, String), FunctionId>>,
-        property_defs: &'a HashSet<DefKey>,
+        property_defs: &'a HashSet<FunctionId>,
         task_targets: &'a mut TaskTargets,
         follow_targets: &'a mut HashMap<String, FollowTarget>,
         package_meta: &'a mut PackageMetaMemo,
@@ -219,6 +222,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             current_fn: None,
             current_param_names: Vec::new(),
             class_stack: Vec::new(),
+            class_def_stack: Vec::new(),
             fn_stack: Vec::new(),
             dead_depth: 0,
             loop_depth: 0,
@@ -233,6 +237,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             skip_lambda_body: false,
             in_callee_position: false,
             pending_is_awaited: false,
+            pending_is_bound_call: false,
             pending_with_enter: false,
             in_eager_offload_arg: false,
             async_with_receivers: HashMap::new(),

@@ -1,14 +1,17 @@
 //! Special finding rules: `nested-event-loop` and `offload-coroutine`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use crate::graph::{CalleeRef, ConditionTag, ProjectFacts, is_non_production_entry_path};
-use crate::id::{FindingIdParts, finding_id, fix_group_id};
+use crate::graph::{
+    CalleeRef, ConditionTag, FunctionId, ProjectFacts, is_non_production_entry_path,
+};
+use crate::id::{FindingIdParts, fix_group_id};
 use crate::report::{Entry, Finding, Fix};
 
 use super::SinkHit;
 use super::grade::{
     chain_step_for, reconcile_conditions, resolution_for_edge, shortest_paths_to_async_entries,
+    unique_site_finding_id,
 };
 
 pub(super) const RULE_NESTED_EVENT_LOOP: &str = "nested-event-loop";
@@ -70,6 +73,7 @@ pub(super) fn collect_offload_coroutine_findings(
     facts: &ProjectFacts,
     reverse: &[Vec<usize>],
     include_non_production: bool,
+    emitted_sites: &mut HashMap<String, (FunctionId, String, u32)>,
     emitted: &mut HashSet<String>,
 ) -> Vec<Finding> {
     let mut out = Vec::new();
@@ -141,16 +145,21 @@ pub(super) fn collect_offload_coroutine_findings(
 
             let conditions = reconcile_conditions(&condition_tags);
             let chain_refs: Vec<&str> = chain_qualnames.iter().map(String::as_str).collect();
-            let id = finding_id(FindingIdParts {
-                rule: RULE_OFFLOAD_COROUTINE,
-                entry_qualname: &entry.full_qualname(),
-                sink_qualname: RULE_OFFLOAD_COROUTINE,
-                chain_qualnames: &chain_refs,
-                occurrence: edge.occurrence,
-            });
-            if !emitted.insert(id.clone()) {
+            let Some(id) = unique_site_finding_id(
+                FindingIdParts {
+                    rule: RULE_OFFLOAD_COROUTINE,
+                    entry_qualname: &entry.full_qualname(),
+                    sink_qualname: RULE_OFFLOAD_COROUTINE,
+                    chain_qualnames: &chain_refs,
+                    occurrence: edge.occurrence,
+                },
+                entry_id,
+                (&edge.file, edge.line),
+                emitted_sites,
+                emitted,
+            ) else {
                 continue;
-            }
+            };
             out.push(Finding {
                 id,
                 rule: RULE_OFFLOAD_COROUTINE.to_string(),

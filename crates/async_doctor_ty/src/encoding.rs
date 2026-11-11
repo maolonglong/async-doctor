@@ -6,6 +6,29 @@
 
 use std::borrow::Cow;
 
+/// Decode owned `bytes` as a Python source file, reusing the `Vec<u8>` buffer
+/// directly without copying on the common UTF-8 (no BOM, no non-UTF-8 cookie) path.
+pub fn decode_python_source_owned(bytes: Vec<u8>) -> Result<String, String> {
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF])
+        || bytes.starts_with(&[0xFF, 0xFE])
+        || bytes.starts_with(&[0xFE, 0xFF])
+    {
+        return decode_python_source(&bytes);
+    }
+    match coding_cookie(&bytes) {
+        None => {
+            String::from_utf8(bytes).map_err(|e| format!("not valid UTF-8 ({})", e.utf8_error()))
+        }
+        Some(enc) if is_utf8_family(&enc) => {
+            String::from_utf8(bytes).map_err(|e| format!("not valid UTF-8 ({})", e.utf8_error()))
+        }
+        Some(enc) => match decode_named(&bytes, &enc) {
+            Ok(s) => Ok(s),
+            Err(err) => String::from_utf8(bytes).map_err(|_| err),
+        },
+    }
+}
+
 /// Decode `bytes` as a Python source file.
 ///
 /// Order: UTF-8/UTF-16 BOM → coding cookie on line 1–2 → UTF-8 default.
@@ -44,16 +67,35 @@ fn is_utf8_family(encoding: &str) -> bool {
 }
 
 fn coding_cookie(bytes: &[u8]) -> Option<String> {
-    // PEP 263: cookie only on the first or second line.
+    // PEP 263: cookie only on the first or second line, and only inside a `#` comment.
     let prefix = &bytes[..bytes.len().min(512)];
-    let text = String::from_utf8_lossy(prefix);
-    let mut lines = text.split('\n').take(2);
-    let first = lines.next()?;
-    if let Some(enc) = cookie_on_line(first) {
-        return Some(enc);
+    let mut rest = prefix;
+    for _ in 0..2 {
+        if rest.is_empty() {
+            break;
+        }
+        let (line, tail) = match rest.iter().position(|&b| b == b'\n') {
+            Some(pos) => (&rest[..pos], &rest[pos + 1..]),
+            None => (rest, &[][..]),
+        };
+        if let Some(enc) = cookie_on_bytes(line) {
+            return Some(enc);
+        }
+        rest = tail;
     }
-    let second = lines.next()?;
-    cookie_on_line(second)
+    None
+}
+
+fn cookie_on_bytes(line: &[u8]) -> Option<String> {
+    let mut start = 0;
+    while start < line.len() && matches!(line[start], b' ' | b'\t' | 0x0c) {
+        start += 1;
+    }
+    if line.get(start) != Some(&b'#') {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&line[start..]);
+    cookie_on_line(&text)
 }
 
 fn cookie_on_line(line: &str) -> Option<String> {

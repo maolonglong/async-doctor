@@ -15,7 +15,7 @@ pub use graph::{
 };
 pub use id::{FindingIdParts, finding_id, fix_group_id};
 pub use propagate::{
-    AsyncTwinHit, SinkHit, SinkTable, TwinConfidence, analyze, analyze_with_options,
+    AsyncTwinHit, SinkHit, SinkTable, TwinConfidence, analyze, analyze_owned, analyze_with_options,
 };
 pub use report::{
     Advice, AdviceCategory, Candidate, ChainStep, EXIT_ERROR, EXIT_FINDINGS, EXIT_OK, Entry,

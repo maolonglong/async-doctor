@@ -4,9 +4,42 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::graph::{
     CallEdge, CalleeRef, ConditionTag, DecoratorRef, FunctionId, LiteralArg, ParamGuard,
-    ProjectFacts,
+    ProjectFacts, is_non_production_entry_path,
 };
+use crate::id::{FindingIdParts, finding_id};
 use crate::report::{ChainStep, EntryLabel, Finding};
+
+/// Compute a collision-free finding/candidate/advice ID for a concrete site.
+///
+/// Re-visits of the exact same `(entry, file, line)` site return `None`
+/// (deduplicated). Distinct sites whose raw `occurrence` collided because two
+/// callees normalized to one canonical sink increment `occurrence` instead of
+/// panicking or dropping the second site.
+pub(super) fn unique_site_finding_id(
+    mut parts: FindingIdParts<'_>,
+    entry_id: FunctionId,
+    site: (&str, u32),
+    emitted_sites: &mut HashMap<String, (FunctionId, String, u32)>,
+    emitted: &mut HashSet<String>,
+) -> Option<String> {
+    loop {
+        let id = finding_id(parts);
+        if let Some((prev_entry, prev_file, prev_line)) = emitted_sites.get(&id) {
+            if *prev_entry == entry_id && prev_file == site.0 && *prev_line == site.1 {
+                return None;
+            }
+            parts.occurrence = parts.occurrence.saturating_add(1);
+            continue;
+        }
+        if emitted.contains(&id) {
+            parts.occurrence = parts.occurrence.saturating_add(1);
+            continue;
+        }
+        emitted_sites.insert(id.clone(), (entry_id, site.0.to_string(), site.1));
+        emitted.insert(id.clone());
+        return Some(id);
+    }
+}
 
 pub(super) fn label_rank(label: EntryLabel) -> u8 {
     match label {
@@ -153,9 +186,18 @@ pub(super) fn evaluate_param_guards(
             any_unknown = true;
             continue;
         };
+        let arg_idx = if edge.is_bound_call {
+            guard.index.checked_sub(1)
+        } else {
+            Some(guard.index)
+        };
+        let Some(arg_idx) = arg_idx else {
+            any_unknown = true;
+            continue;
+        };
         let lit = edge
             .positional_literals
-            .get(guard.index as usize)
+            .get(arg_idx as usize)
             .copied()
             .flatten();
         match (lit, guard.inverted) {
@@ -432,33 +474,44 @@ pub(super) struct PathToEntry {
     pub(super) edges: Vec<usize>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum RequiredPred {
+    Any,
+    Edge(usize),
+    Caller(FunctionId),
+}
+
 pub(super) fn shortest_paths_to_async_entries(
     facts: &ProjectFacts,
     reverse: &[Vec<usize>],
     seed_caller: FunctionId,
 ) -> Vec<PathToEntry> {
+    let mut entries = Vec::new();
     let seed_fn = facts.function(seed_caller);
     // Third-party async helpers (site-packages / dist-packages) are never entries.
     if seed_fn.is_async && !seed_fn.is_sync_route && !seed_fn.is_third_party {
-        return vec![PathToEntry {
+        entries.push(PathToEntry {
             entry: seed_caller,
             edges: vec![],
-        }];
+        });
+        // Production async defs stop here; non-production async helpers keep
+        // walking upward so production routes awaiting them still surface.
+        if !is_non_production_entry_path(&seed_fn.file) {
+            return entries;
+        }
     }
 
-    // State is (node, required predecessor caller for the next hop).
-    // `required` comes from higher-order `context_from_caller` so kwargs/partial
-    // bindings do not leak across call sites of the same apply() helper.
-    type State = (FunctionId, Option<FunctionId>);
+    // State is (node, required predecessor edge/caller for the next hop).
+    // `required` comes from higher-order `context_from_edge` / `context_from_caller`
+    // so callbacks bind to the exact call site that passed them.
+    type State = (FunctionId, RequiredPred);
     // via[parent_state] = (child_state_toward_seed, edge_idx)
     let mut via: HashMap<State, (State, usize)> = HashMap::new();
     let mut visited: HashSet<State> = HashSet::new();
     let mut queue: VecDeque<State> = VecDeque::new();
-    let seed_state: State = (seed_caller, None);
+    let seed_state: State = (seed_caller, RequiredPred::Any);
     queue.push_back(seed_state);
     visited.insert(seed_state);
-
-    let mut entries = Vec::new();
 
     while let Some((node, required)) = queue.pop_front() {
         let Some(preds) = reverse.get(node.index()) else {
@@ -466,13 +519,25 @@ pub(super) fn shortest_paths_to_async_entries(
         };
         for &edge_idx in preds {
             let edge = &facts.edges[edge_idx];
-            if let Some(req) = required
-                && edge.caller != req
-            {
-                continue;
+            match required {
+                RequiredPred::Any => {}
+                RequiredPred::Edge(req_ei) => {
+                    if edge_idx != req_ei {
+                        continue;
+                    }
+                }
+                RequiredPred::Caller(req_caller) => {
+                    if edge.caller != req_caller {
+                        continue;
+                    }
+                }
             }
             let pred = edge.caller;
-            let next_req = edge.context_from_caller;
+            let next_req = edge
+                .context_from_edge
+                .map(RequiredPred::Edge)
+                .or_else(|| edge.context_from_caller.map(RequiredPred::Caller))
+                .unwrap_or(RequiredPred::Any);
             let pred_state: State = (pred, next_req);
             if !visited.insert(pred_state) {
                 continue;
@@ -497,6 +562,9 @@ pub(super) fn shortest_paths_to_async_entries(
                     cur = child;
                 }
                 entries.push(PathToEntry { entry: pred, edges });
+                if is_non_production_entry_path(&pred_fn.file) {
+                    queue.push_back(pred_state);
+                }
             } else {
                 queue.push_back(pred_state);
             }

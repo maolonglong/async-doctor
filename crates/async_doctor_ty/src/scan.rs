@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::time::Instant;
 
-use async_doctor_core::{AnalyzeOptions, Report, analyze_with_options};
+use async_doctor_core::{AnalyzeOptions, Report, analyze_owned};
 use async_doctor_rules::BuiltinSinkTable;
 
 use crate::cache::effective_cache_root;
@@ -105,19 +105,23 @@ fn scan_path_with_options_cache_budget_inner(
 
     let t_disc = Instant::now();
     let abs = absolute_utf8(path)?;
-    let (fingerprint_root, fingerprint_files) = if abs.as_std_path().is_file() {
-        let parent = abs
-            .parent()
-            .map(|p| p.as_std_path().to_path_buf())
-            .unwrap_or_else(|| Path::new(".").to_path_buf());
-        (parent, vec![abs.as_std_path().to_path_buf()])
-    } else {
-        let root = abs.as_std_path().to_path_buf();
-        // Fingerprint .py and .pyi in a single walk (same ignore rules).
-        // Extract still walks only .py; stubs affect ty resolution via the filesystem.
-        let files = discover_python_and_stub_files(&root)?;
-        (root, files)
-    };
+    if abs.as_std_path().is_file() {
+        clear_ignore_candidate_files();
+        timing.span("discovery", t_disc);
+        let t_extract = Instant::now();
+        let facts = extract_path_with_cache_budget(path, cache_dir, follow_budget)?;
+        timing.span("extract", t_extract);
+        let t_analyze = Instant::now();
+        let report = analyze_owned(facts, &BuiltinSinkTable::new(), options);
+        timing.span("analyze", t_analyze);
+        timing.finish("scan_cache=bypass_single_file");
+        return Ok(report);
+    }
+
+    let fingerprint_root = abs.as_std_path().to_path_buf();
+    // Fingerprint .py and .pyi in a single walk (same ignore rules).
+    // Extract still walks only .py; stubs affect ty resolution via the filesystem.
+    let fingerprint_files = discover_python_and_stub_files(&fingerprint_root)?;
     timing.span("discovery", t_disc);
 
     let t_fp = Instant::now();
@@ -127,9 +131,6 @@ fn scan_path_with_options_cache_budget_inner(
         options,
         follow_budget,
     );
-    if abs.as_std_path().is_file() {
-        clear_ignore_candidate_files();
-    }
     timing.span("fingerprint", t_fp);
 
     let t_load = Instant::now();
@@ -145,24 +146,22 @@ fn scan_path_with_options_cache_budget_inner(
     timing.span("scan_cache_miss", t_load);
 
     let t_extract = Instant::now();
-    let facts = if abs.as_std_path().is_file() {
-        extract_path_with_cache_budget(path, cache_dir, follow_budget)?
-    } else {
-        let py_files: Vec<std::path::PathBuf> = fingerprint_files
-            .into_iter()
-            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("py"))
-            .collect();
-        extract_discovered_files(&abs, py_files, cache_dir, follow_budget)?
-    };
+    let py_files: Vec<std::path::PathBuf> = fingerprint_files
+        .into_iter()
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("py"))
+        .collect();
+    let facts = extract_discovered_files(&abs, py_files, cache_dir, follow_budget)?;
     timing.span("extract", t_extract);
 
     let t_analyze = Instant::now();
-    let report = analyze_with_options(&facts, &BuiltinSinkTable::new(), options);
+    let report = analyze_owned(facts, &BuiltinSinkTable::new(), options);
     timing.span("analyze", t_analyze);
 
-    let t_save = Instant::now();
-    let _ = save_scan_report(&cache_root, &fingerprint, &report);
-    timing.span("scan_cache_save", t_save);
+    if report.complete {
+        let t_save = Instant::now();
+        let _ = save_scan_report(&cache_root, &fingerprint, &report);
+        timing.span("scan_cache_save", t_save);
+    }
     timing.finish("scan_cache=miss");
     Ok(report)
 }

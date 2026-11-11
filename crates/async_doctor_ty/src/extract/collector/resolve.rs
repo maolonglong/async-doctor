@@ -34,12 +34,34 @@ fn is_get_event_loop_qual(qualname: &str) -> bool {
         || qualname.ends_with(".get_event_loop")
 }
 
+fn is_nested_event_loop_qual_ty(qualname: &str) -> bool {
+    matches!(
+        qualname,
+        "asyncio.run"
+            | "asyncio.runners.run"
+            | "asyncio.events.AbstractEventLoop.run_until_complete"
+            | "asyncio.events.AbstractEventLoop.run_forever"
+            | "asyncio.base_events.BaseEventLoop.run_until_complete"
+            | "asyncio.base_events.BaseEventLoop.run_forever"
+            | "asyncio.Runner.run"
+            | "asyncio.runners.Runner.run"
+            | "anyio.run"
+            | "trio.run"
+    ) || qualname.ends_with(".run_until_complete")
+        || qualname.ends_with(".run_forever")
+        || (qualname.starts_with("asyncio.") && qualname.ends_with(".Runner.run"))
+}
+
 /// Occurrence counter key for an external callee.
 ///
 /// Finding IDs hash the *canonical sink* qualname (after family aliases), not the
 /// original callee. Count occurrence on that same key so `boto3.client` and
-/// `boto3.Session.client` (both → sink `boto3.client`) get distinct ordinals.
+/// `boto3.Session.client` (both → sink `boto3.client`) or `asyncio.run` +
+/// `anyio.run` (both → `nested-event-loop`) get distinct ordinals.
 fn external_occurrence_key(qualname: &str) -> String {
+    if is_nested_event_loop_qual_ty(qualname) {
+        return "Enested-event-loop".to_string();
+    }
     static SINKS: OnceLock<BuiltinSinkTable> = OnceLock::new();
     let sinks = SINKS.get_or_init(BuiltinSinkTable::new);
     let key = sinks
@@ -120,10 +142,81 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             is_awaited: self.pending_is_awaited,
             callee_is_coroutine,
             is_eager_offload_arg: self.in_eager_offload_arg,
+            is_bound_call: self.pending_is_bound_call,
             context_from_caller: None,
+            context_from_edge: None,
             constructed_receiver: self.pending_constructed_receiver.take(),
         });
         self.pending_is_awaited = false;
+        self.pending_is_bound_call = false;
+    }
+
+    /// True when `func` binds parameter 0 (`self` or `cls`) implicitly at the call site.
+    pub(crate) fn expr_is_bound_method_call(&self, func: &Expr, fid: FunctionId) -> bool {
+        if let Some(ty) = func.inferred_type(self.model) {
+            if matches!(ty, Type::BoundMethod(_) | Type::BoundSuper(_)) {
+                return true;
+            }
+            if matches!(ty, Type::FunctionLiteral(_)) {
+                return false;
+            }
+        }
+        let Expr::Attribute(attr) = func else {
+            return false;
+        };
+        if self.expr_is_super_call(&attr.value) {
+            return matches!(
+                self.function(fid).param_names.first().map(String::as_str),
+                Some("self" | "cls")
+            );
+        }
+        if let Some(ty) = attr.value.inferred_type(self.model) {
+            if matches!(ty, Type::ClassLiteral(_)) {
+                return self.function(fid).param_names.first().map(String::as_str) == Some("cls");
+            }
+            let env = self.model.program_environment();
+            if matches!(
+                ty.definition(self.model.db(), &env),
+                Some(TypeDefinition::Module(_))
+            ) {
+                return false;
+            }
+        }
+        matches!(
+            self.function(fid).param_names.first().map(String::as_str),
+            Some("self" | "cls")
+        )
+    }
+
+    /// True when a non-project call expression binds parameter 0 (`self`/`cls`) implicitly.
+    pub(crate) fn expr_is_external_bound_call(&self, func: &Expr) -> bool {
+        if let Some(ty) = func.inferred_type(self.model) {
+            if matches!(ty, Type::BoundMethod(_) | Type::BoundSuper(_)) {
+                return true;
+            }
+            if matches!(ty, Type::FunctionLiteral(_)) {
+                return false;
+            }
+        }
+        let Expr::Attribute(attr) = func else {
+            return false;
+        };
+        if self.expr_is_super_call(&attr.value) {
+            return true;
+        }
+        if let Some(ty) = attr.value.inferred_type(self.model) {
+            if matches!(ty, Type::ClassLiteral(_)) {
+                return false;
+            }
+            let env = self.model.program_environment();
+            if matches!(
+                ty.definition(self.model.db(), &env),
+                Some(TypeDefinition::Module(_))
+            ) {
+                return false;
+            }
+        }
+        true
     }
 
     /// Resolve whether `func` is an `async def` via ty definitions (MRO / `super`
@@ -299,8 +392,22 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             if names.len() == 1 {
                 return Some(names.into_iter().next().unwrap());
             }
-            // Homogeneous non-redis union: pick the first stable name.
-            return names.into_iter().next();
+            // Only collapse a multi-arm non-redis union when every arm comes
+            // from the same root package and agrees on async-ness (e.g.
+            // `PosixPath | WindowsPath` or `Redis | RedisCluster`). Mixed
+            // sync/async or cross-package unions (`Client | AsyncClient`) must
+            // not guess a sync arm.
+            let is_async_arm =
+                |s: &str| s.contains("Async") || s.contains("aio") || s.contains("asyncio");
+            let first_root = names[0].split('.').next().unwrap_or("");
+            let first_async = is_async_arm(&names[0]);
+            let homogeneous = names.iter().all(|n| {
+                n.split('.').next().unwrap_or("") == first_root && is_async_arm(n) == first_async
+            });
+            if homogeneous {
+                return names.into_iter().next();
+            }
+            return None;
         }
 
         let def = ty.definition(self.model.db(), env)?;
@@ -377,10 +484,17 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             Expr::Attribute(attr) => definitions_for_attribute(self.model, attr),
             _ => Vec::new(),
         };
-        for r in &resolved {
-            let Some(def) = r.definition() else {
-                continue;
-            };
+        let mut defs: Vec<ty_python_core::definition::Definition<'db>> =
+            resolved.iter().filter_map(|r| r.definition()).collect();
+        if defs.is_empty()
+            && let Some(ty) = func.inferred_type(self.model)
+        {
+            let env = self.model.program_environment();
+            if let Some(TypeDefinition::Function(def)) = ty.definition(self.model.db(), &env) {
+                defs.push(def);
+            }
+        }
+        for def in defs {
             let file = def.file(self.model.db());
             let FilePath::System(sys) = file.path(self.model.db()) else {
                 continue;
@@ -433,12 +547,45 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             }
         };
 
+        let mut fids: Vec<FunctionId> = Vec::new();
         for r in &resolved {
             if let Some(def) = r.definition()
                 && let Some(fid) = self.def_from_definition(def)
+                && !fids.contains(&fid)
             {
+                fids.push(fid);
+            }
+        }
+        if let Expr::Attribute(attr) = func
+            && let Expr::Name(n) = attr.value.as_ref()
+            && let Some(crate::extract::helpers::NarrowFact::IsInstance(narrowed)) =
+                self.narrowed_locals.get(n.id.as_str())
+        {
+            let expected = format!("{narrowed}.{}", attr.attr.as_str());
+            let short = narrowed.rsplit('.').next().unwrap_or(narrowed.as_str());
+            let expected_short = format!("{short}.{}", attr.attr.as_str());
+            for &fid in &fids {
+                let f = self.function(fid);
+                let full_dot = if f.module.is_empty() {
+                    f.qualname.clone()
+                } else {
+                    format!("{}.{}", f.module, f.qualname)
+                };
+                if full_dot == expected || f.qualname == expected_short {
+                    return Some(fid);
+                }
+            }
+            if let Some(fid) = self.qual_get(&(self.ctx.module.clone(), expected_short)) {
                 return Some(fid);
             }
+        }
+        if fids.len() == 1 {
+            return Some(fids[0]);
+        }
+        if fids.len() > 1 {
+            // Multiple distinct project targets on an unnarrowed union
+            // (e.g. `SyncClient | AsyncClient`): do not guess one arm.
+            return None;
         }
 
         if let Expr::Attribute(attr) = func
@@ -491,6 +638,19 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             if let Expr::Name(n) = attr.value.as_ref()
                 && let Some(recv) = self.async_with_receivers.get(n.id.as_str())
             {
+                return Some(format!("{recv}.{}", attr.attr.as_str()));
+            }
+            // Explicit `isinstance(x, Cls)` branch narrowing overrides wider
+            // union inference on `x`.
+            if let Expr::Name(n) = attr.value.as_ref()
+                && let Some(crate::extract::helpers::NarrowFact::IsInstance(recv)) =
+                    self.narrowed_locals.get(n.id.as_str()).cloned()
+            {
+                let recv = if is_asyncio_redis_type(&recv) {
+                    normalize_asyncio_redis_type(&recv)
+                } else {
+                    recv
+                };
                 return Some(format!("{recv}.{}", attr.attr.as_str()));
             }
             // Union receivers (Pipeline | ClusterPipeline, Redis | RedisCluster).

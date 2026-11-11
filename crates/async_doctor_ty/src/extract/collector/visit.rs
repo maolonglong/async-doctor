@@ -26,6 +26,8 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 let prev_idle_locals = std::mem::take(&mut self.idle_loop_locals);
                 let prev_running_loop = std::mem::take(&mut self.running_loop_locals);
                 let prev_event_loop = std::mem::take(&mut self.event_loop_locals);
+                let prev_async_with = std::mem::take(&mut self.async_with_receivers);
+                let prev_narrowed = std::mem::take(&mut self.narrowed_locals);
                 // Module-level unbounded queues remain visible inside functions;
                 // clone so local rebinds do not leak to sibling defs.
                 let prev_queues = self.unbounded_queues.clone();
@@ -74,6 +76,8 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 self.idle_loop_locals = prev_idle_locals;
                 self.running_loop_locals = prev_running_loop;
                 self.event_loop_locals = prev_event_loop;
+                self.async_with_receivers = prev_async_with;
+                self.narrowed_locals = prev_narrowed;
                 self.unbounded_queues = prev_queues;
                 self.boto_receivers = prev_boto;
                 self.boto_session_receivers = prev_boto_session;
@@ -86,7 +90,9 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 // earlier methods in the same class body.
                 collect_idle_loop_helpers(&class.body, &mut self.idle_loop_helpers);
                 self.class_stack.push(class.name.as_str().to_string());
+                self.class_def_stack.push(class);
                 self.visit_body_seq(&class.body);
+                self.class_def_stack.pop();
                 self.class_stack.pop();
             }
             Stmt::Assign(assign) => {

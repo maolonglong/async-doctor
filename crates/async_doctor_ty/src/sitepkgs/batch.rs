@@ -238,28 +238,32 @@ impl PackageCacheBatch {
 
     /// Atomically write every dirty package cache once.
     ///
-    /// Only persist follow_targets for callees that were actually analyzed this
-    /// run (present in some package's `functions`). Otherwise warm reinjection
-    /// would follow budget-skipped targets that cold never extracted → extra
-    /// site-packages candidates and cold≠warm.
-    ///
-    /// `analyzed` spans every loaded package (read or write) so cross-package
-    /// follow_targets stay valid when the callee was only materialized.
+    /// Persist `follow_targets` referenced by any outgoing external/third-party
+    /// edge in `to_save.functions`. Retaining by `to_save`'s own edges (rather
+    /// than only packages loaded in `self.caches` during this scan) preserves
+    /// cross-package follow targets when another project updates `to_save`
+    /// without touching its sibling dependencies, and lets snapshot consistency
+    /// fall back to `ty` extraction when a prior tiny-budget run left a callee's
+    /// package uncached.
     pub fn flush(&self) {
         if self.dirty.is_empty() {
             return;
         }
-        let analyzed: BTreeSet<String> = self
-            .caches
-            .values()
-            .flat_map(|c| c.functions.keys().cloned())
-            .collect();
         for key in &self.dirty {
             let Some(cache) = self.caches.get(key) else {
                 continue;
             };
             let mut to_save = cache.clone();
-            to_save.follow_targets.retain(|q, _| analyzed.contains(q));
+            let referenced: BTreeSet<&str> = to_save
+                .functions
+                .values()
+                .flat_map(|f| f.edges.iter())
+                .filter(|e| matches!(e.callee_kind.as_str(), "external" | "third_party"))
+                .map(|e| e.callee_qualname.as_str())
+                .collect();
+            to_save
+                .follow_targets
+                .retain(|q, _| referenced.contains(q.as_str()));
             let _ = save_package_cache(&self.root, &to_save, &key.2);
             race_gap_after_package_write();
         }
@@ -335,13 +339,16 @@ fn edge_to_cached(e: &CallEdge, id_to_external_key: &HashMap<FunctionId, String>
         positional_literals,
         keyword_true: e.keyword_true.clone(),
         positional_callable_quals,
+        positional_externals: e.positional_externals.clone(),
+        positional_constructed_receivers: e.positional_constructed_receivers.clone(),
         keyword_callable_quals,
         param_guard_index: e.param_guard.map(|g| g.index),
         param_guard_inverted: e.param_guard.map(|g| g.inverted),
         is_awaited: e.is_awaited,
         callee_is_coroutine: e.callee_is_coroutine,
-        // Eager offload is a first-party call-site property; third-party cache
-        // never records it (serde default false on read).
+        is_eager_offload_arg: e.is_eager_offload_arg,
+        is_bound_call: e.is_bound_call,
+        constructed_receiver: e.constructed_receiver.clone(),
     }
 }
 
@@ -419,26 +426,30 @@ pub(crate) fn materialize_cached_functions(
 
     // Probe cross-package follow_target caches (misses are retried — a peer may
     // have written them since an earlier probe in this scan).
-    let cross_probes: Vec<(String, String, String, String)> = {
+    let (cross_probes, has_unprobed_missing_target): (Vec<(String, String, String, String)>, bool) = {
         let cache = cache_batch
             .get(package, version, fingerprint)
             .expect("has() true");
-        cache
-            .follow_targets
-            .iter()
-            .filter_map(|(q, t)| {
-                if cache.functions.contains_key(q) {
-                    return None;
+        let mut probes = Vec::new();
+        let mut missing_no_meta = false;
+        for (q, t) in &cache.follow_targets {
+            if cache.functions.contains_key(q) {
+                continue;
+            }
+            match (&t.package_name, &t.package_version, &t.package_fingerprint) {
+                (Some(pn), Some(pv), Some(pfp)) => {
+                    probes.push((pn.clone(), pv.clone(), pfp.clone(), q.clone()));
                 }
-                match (&t.package_name, &t.package_version, &t.package_fingerprint) {
-                    (Some(pn), Some(pv), Some(pfp)) => {
-                        Some((pn.clone(), pv.clone(), pfp.clone(), q.clone()))
-                    }
-                    _ => None,
+                _ => {
+                    missing_no_meta = true;
                 }
-            })
-            .collect()
+            }
+        }
+        (probes, missing_no_meta)
     };
+    if cache_batch.is_from_disk(package, version, fingerprint) && has_unprobed_missing_target {
+        return Vec::new();
+    }
     for (pn, pv, pfp, _) in &cross_probes {
         cache_batch.ensure_loaded(pn, pv, pfp);
     }
@@ -638,17 +649,17 @@ pub(crate) fn materialize_cached_functions(
                 positional_literals,
                 keyword_true: edge.keyword_true.clone(),
                 positional_callables,
-                // First-party offload externals are not stored in the package
-                // cache; third-party offload targets are rare for advice.
-                positional_externals: vec![],
-                positional_constructed_receivers: vec![],
+                positional_externals: edge.positional_externals.clone(),
+                positional_constructed_receivers: edge.positional_constructed_receivers.clone(),
                 keyword_callables,
                 param_guard,
                 is_awaited: edge.is_awaited,
                 callee_is_coroutine: edge.callee_is_coroutine,
-                is_eager_offload_arg: false,
+                is_eager_offload_arg: edge.is_eager_offload_arg,
+                is_bound_call: edge.is_bound_call,
                 context_from_caller: None,
-                constructed_receiver: None,
+                context_from_edge: None,
+                constructed_receiver: edge.constructed_receiver.clone(),
             });
         }
     }

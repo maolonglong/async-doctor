@@ -57,7 +57,11 @@ use serde::{Deserialize, Serialize};
 /// third-party follow candidates.
 /// v19: edges record keyword args passed a literal `True` (`cheap-path-op`).
 /// v20: named function bodies do not inherit definition-site execution guards.
-pub const CACHE_SCHEMA_VERSION: u32 = 20;
+/// v21: `CachedEdge` persists `is_bound_call`, `is_eager_offload_arg`,
+/// `constructed_receiver`, `positional_externals`, and
+/// `positional_constructed_receivers`; `follow_targets` preserved across partial
+/// package updates; namespace & single-file package metadata indexed via `RECORD`.
+pub const CACHE_SCHEMA_VERSION: u32 = 21;
 
 /// Tool version embedded in the cache path (from this crate's Cargo.toml).
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -83,18 +87,72 @@ pub fn build_id() -> &'static str {
 }
 
 fn hash_file_streaming(path: &Path) -> std::io::Result<u64> {
-    use std::io::Read;
+    let f = fs::File::open(path)?;
+    hash_reader_streaming(f)
+}
+
+fn hash_reader_streaming(mut reader: impl std::io::Read) -> std::io::Result<u64> {
     const PRIME: u64 = 0x100000001b3;
-    let mut f = fs::File::open(path)?;
+    let mut h0: u64 = 0xcbf29ce484222325;
+    let mut h1: u64 = 0x84222325cbf29ce4;
+    let mut h2: u64 = 0x4b95f51d84222325;
+    let mut h3: u64 = 0x9e3779b97f4a7c15;
+    let mut total_len: u64 = 0;
+    let mut tail = [0u8; 32];
+    let mut tail_len = 0usize;
     let mut buf = [0u8; 64 * 1024];
-    let mut h: u64 = 0xcbf29ce484222325;
+
+    let mix_block = |chunk: &[u8], h0: &mut u64, h1: &mut u64, h2: &mut u64, h3: &mut u64| {
+        let w0 = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
+        let w1 = u64::from_le_bytes(chunk[8..16].try_into().unwrap());
+        let w2 = u64::from_le_bytes(chunk[16..24].try_into().unwrap());
+        let w3 = u64::from_le_bytes(chunk[24..32].try_into().unwrap());
+        *h0 = (*h0 ^ w0).wrapping_mul(PRIME);
+        *h1 = (*h1 ^ w1).wrapping_mul(PRIME);
+        *h2 = (*h2 ^ w2).wrapping_mul(PRIME);
+        *h3 = (*h3 ^ w3).wrapping_mul(PRIME);
+    };
+
     loop {
-        let n = f.read(&mut buf)?;
+        let n = reader.read(&mut buf)?;
         if n == 0 {
             break;
         }
-        h = (h ^ fnv1a64_bytes(&buf[..n])).wrapping_mul(PRIME);
+        total_len += n as u64;
+        let mut slice = &buf[..n];
+        if tail_len > 0 {
+            let need = (32 - tail_len).min(slice.len());
+            tail[tail_len..tail_len + need].copy_from_slice(&slice[..need]);
+            tail_len += need;
+            slice = &slice[need..];
+            if tail_len == 32 {
+                mix_block(&tail, &mut h0, &mut h1, &mut h2, &mut h3);
+                tail_len = 0;
+            }
+        }
+        let mut chunks = slice.chunks_exact(32);
+        for chunk in &mut chunks {
+            mix_block(chunk, &mut h0, &mut h1, &mut h2, &mut h3);
+        }
+        let rem = chunks.remainder();
+        if !rem.is_empty() {
+            tail[..rem.len()].copy_from_slice(rem);
+            tail_len = rem.len();
+        }
     }
+
+    let mut h = (h0 ^ total_len)
+        .rotate_left(13)
+        .wrapping_add(h1.rotate_left(27))
+        .wrapping_add(h2.rotate_left(41))
+        .wrapping_add(h3.rotate_left(53));
+    for &b in &tail[..tail_len] {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(PRIME);
+    }
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xff51afd7ed558ccd);
+    h ^= h >> 33;
     Ok(h)
 }
 
@@ -157,6 +215,12 @@ pub struct CachedEdge {
     pub keyword_true: Vec<String>,
     /// Positional callable External/full quals when known.
     pub positional_callable_quals: Vec<Option<String>>,
+    /// Positional external qualnames for offload / advice calls when known.
+    #[serde(default)]
+    pub positional_externals: Vec<Option<String>>,
+    /// Positional constructed client roots when known.
+    #[serde(default)]
+    pub positional_constructed_receivers: Vec<Option<String>>,
     /// Keyword callable External/full quals when known (`name`, qual).
     #[serde(default)]
     pub keyword_callable_quals: Vec<(String, String)>,
@@ -168,6 +232,15 @@ pub struct CachedEdge {
     /// Resolved `async def` callee when known (`None` = unresolved / legacy cache).
     #[serde(default)]
     pub callee_is_coroutine: Option<bool>,
+    /// Call evaluated eagerly inside an offload argument (`to_thread(f())`).
+    #[serde(default)]
+    pub is_eager_offload_arg: bool,
+    /// Bound method / `@classmethod` call where parameter 0 (`self`/`cls`) is implicit.
+    #[serde(default)]
+    pub is_bound_call: bool,
+    /// Constructed client root on the callee chain when known.
+    #[serde(default)]
+    pub constructed_receiver: Option<String>,
 }
 
 /// Per-function summary stored in the package cache.
@@ -332,21 +405,49 @@ pub fn package_content_fingerprint(dist_info_or_pkg_dir: &Path) -> String {
         }
     }
 
-    // No dist-info: shallow .py fingerprint only.
-    let base = if dist_info_or_pkg_dir.is_file() {
-        dist_info_or_pkg_dir
-            .parent()
-            .unwrap_or(dist_info_or_pkg_dir)
-    } else {
-        dist_info_or_pkg_dir
-    };
+    // No dist-info: single-file module or shallow/bounded .py fingerprint.
+    if dist_info_or_pkg_dir.is_file() {
+        if let Ok(meta) = fs::metadata(dist_info_or_pkg_dir) {
+            let len = meta.len();
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let name = dist_info_or_pkg_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            return short_hash(format!("PYFILE:{name}:{len}:{mtime}").as_bytes());
+        }
+        return short_hash(b"PYFILE:missing");
+    }
+
     let mut entries: Vec<(String, u64, u64)> = Vec::new();
-    if let Ok(walker) = fs::read_dir(base) {
-        for ent in walker.flatten() {
-            let p = ent.path();
-            if p.extension().and_then(|e| e.to_str()) != Some("py") {
-                continue;
-            }
+    collect_py_entries_bounded(dist_info_or_pkg_dir, "", 0, 2, &mut entries);
+    entries.sort();
+    short_hash(format!("PY:{entries:?}").as_bytes())
+}
+
+fn collect_py_entries_bounded(
+    dir: &Path,
+    prefix: &str,
+    depth: usize,
+    max_depth: usize,
+    entries: &mut Vec<(String, u64, u64)>,
+) {
+    let Ok(walker) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut subdirs = Vec::new();
+    for ent in walker.flatten() {
+        let p = ent.path();
+        let fname = ent.file_name();
+        let Some(name) = fname.to_str() else {
+            continue;
+        };
+        if p.extension().and_then(|e| e.to_str()) == Some("py") {
             if let Ok(meta) = ent.metadata() {
                 let len = meta.len();
                 let mtime = meta
@@ -355,19 +456,39 @@ pub fn package_content_fingerprint(dist_info_or_pkg_dir: &Path) -> String {
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
-                entries.push((
-                    p.file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    len,
-                    mtime,
-                ));
+                let rel = if prefix.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{prefix}/{name}")
+                };
+                entries.push((rel, len, mtime));
             }
+        } else if depth < max_depth
+            && name != "__pycache__"
+            && ent.file_type().is_ok_and(|ft| ft.is_dir())
+        {
+            subdirs.push((p, name.to_string()));
         }
     }
-    entries.sort();
-    short_hash(format!("PY:{entries:?}").as_bytes())
+    // Only descend into subdirectories when no top-level `.py` files exist (e.g. PEP 420 namespace root).
+    if entries.is_empty() {
+        subdirs.sort_by(|a, b| a.1.cmp(&b.1));
+        for (sub_path, sub_name) in subdirs {
+            let next_prefix = if prefix.is_empty() {
+                sub_name
+            } else {
+                format!("{prefix}/{sub_name}")
+            };
+            collect_py_entries_bounded(&sub_path, &next_prefix, depth + 1, max_depth, entries);
+        }
+    }
+}
+
+pub(crate) fn unique_tmp_path(path: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    path.with_extension(format!("json.tmp.{}.{seq}", std::process::id()))
 }
 
 pub(crate) fn short_hash(bytes: &[u8]) -> String {
@@ -408,9 +529,11 @@ pub fn save_package_cache(
     }
     let data = serde_json::to_string(cache)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
-    fs::write(&tmp, &data)?;
-    fs::rename(&tmp, &path)?;
+    let tmp = unique_tmp_path(&path);
+    if let Err(err) = fs::write(&tmp, &data).and_then(|()| fs::rename(&tmp, &path)) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
+    }
     Ok(())
 }
 
@@ -492,11 +615,16 @@ mod tests {
                     positional_literals: vec![],
                     keyword_true: vec![],
                     positional_callable_quals: vec![],
+                    positional_externals: vec![],
+                    positional_constructed_receivers: vec![],
                     keyword_callable_quals: vec![],
                     param_guard_index: None,
                     param_guard_inverted: None,
                     is_awaited: false,
                     callee_is_coroutine: None,
+                    is_eager_offload_arg: false,
+                    is_bound_call: false,
+                    constructed_receiver: None,
                 }],
             },
         );
@@ -570,5 +698,36 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn streaming_hash_is_chunk_boundary_independent() {
+        struct ChunkedReader<'a> {
+            data: &'a [u8],
+            step: usize,
+        }
+        impl std::io::Read for ChunkedReader<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.data.is_empty() {
+                    return Ok(0);
+                }
+                let n = self.step.min(buf.len()).min(self.data.len());
+                buf[..n].copy_from_slice(&self.data[..n]);
+                self.data = &self.data[n..];
+                Ok(n)
+            }
+        }
+        let payload: Vec<u8> = (0..10_007u32)
+            .map(|i| (i.wrapping_mul(31) & 0xff) as u8)
+            .collect();
+        let whole = hash_reader_streaming(std::io::Cursor::new(&payload)).unwrap();
+        for step in [1usize, 7, 31, 32, 33, 64, 1023, 4096] {
+            let chunked = hash_reader_streaming(ChunkedReader {
+                data: &payload,
+                step,
+            })
+            .unwrap();
+            assert_eq!(whole, chunked, "mismatch for read step={step}");
+        }
     }
 }

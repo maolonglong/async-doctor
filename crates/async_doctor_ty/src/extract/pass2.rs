@@ -34,9 +34,10 @@ use super::panic_util::panic_message;
 /// no wall-time gain.
 const DEFAULT_MAX_PASS_THREADS: usize = 8;
 
-/// Clear `ParsedModule` ASTs across all read files every N files per worker so
-/// third-party `site-packages` ASTs loaded by `semantic_index` do not accumulate.
-const PASS2_AST_CLEAR_INTERVAL: usize = 25;
+/// Clear `ParsedModule` ASTs across read files every N files per wave so
+/// third-party `site-packages` ASTs loaded by `semantic_index` do not accumulate,
+/// without racing cross-worker clears every few files.
+const PASS2_WAVE_AST_CLEAR_INTERVAL: usize = 200;
 
 /// Maximum first-party files processed per shared `Arc<Zalsa>` wave in Pass 2.
 /// Below this threshold (normal repos and the 400-file `db_resets` guardrail),
@@ -153,8 +154,9 @@ pub(crate) struct Pass2Shared<'a> {
     pub functions: &'a [FunctionFact],
     pub def_map: &'a HashMap<DefKey, FunctionId>,
     pub qual_map: &'a HashMap<(String, String), FunctionId>,
-    pub property_defs: &'a HashSet<DefKey>,
+    pub property_defs: &'a HashSet<FunctionId>,
     pub followable_extra_roots: &'a [PathBuf],
+    pub package_meta: &'a PackageMetaMemo,
 }
 
 pub(crate) struct Pass2FileSpec {
@@ -224,15 +226,16 @@ pub(crate) fn run_pass2_parallel(
         let all_indices: Vec<usize> = (0..files.len()).collect();
         for chunk in all_indices.chunks(PASS2_WAVE_FILES) {
             let queue = Mutex::new(chunk.iter().copied().collect::<VecDeque<_>>());
+            let wave_count = std::sync::atomic::AtomicUsize::new(0);
             let wave_db_ref = &*base_db;
             std::thread::scope(|scope| {
                 let mut handles = Vec::with_capacity(nthreads.min(chunk.len()));
                 let queue_ref = &queue;
+                let wave_count_ref = &wave_count;
                 for _ in 0..nthreads.min(chunk.len()) {
                     let mut worker_db = wave_db_ref.clone();
                     handles.push(scope.spawn(move || {
                         let mut out = Vec::new();
-                        let mut count = 0usize;
                         loop {
                             let Some(i) = queue_ref.lock().unwrap().pop_front() else {
                                 break;
@@ -250,12 +253,13 @@ pub(crate) fn run_pass2_parallel(
                                 }
                             };
                             out.push((i, result));
-                            count += 1;
-                            if count.is_multiple_of(PASS2_AST_CLEAR_INTERVAL) {
-                                worker_db.clear_all_parsed_modules();
+                            let done = wave_count_ref
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                                + 1;
+                            if done.is_multiple_of(PASS2_WAVE_AST_CLEAR_INTERVAL) {
+                                worker_db.clear_parsed_modules_only();
                             }
                         }
-                        worker_db.clear_all_parsed_modules();
                         drop(worker_db);
                         out
                     }));
@@ -264,6 +268,7 @@ pub(crate) fn run_pass2_parallel(
                     indexed.extend(h.join().expect("pass2 wave worker"));
                 }
             });
+            base_db.clear_parsed_modules_only();
             let next_db = base_db.fresh_empty();
             *base_db = next_db;
             release_freed_memory();
@@ -292,16 +297,17 @@ pub(crate) fn run_pass2_parallel(
         }
     }
     let queues: Vec<Mutex<VecDeque<usize>>> = worker_deques.into_iter().map(Mutex::new).collect();
+    let wave_count = std::sync::atomic::AtomicUsize::new(0);
     let mut indexed: Vec<(usize, Pass2FileResult)> = Vec::with_capacity(files.len());
 
     std::thread::scope(|scope| {
         let mut handles = Vec::with_capacity(nthreads);
         let queues_ref = &queues;
+        let wave_count_ref = &wave_count;
         for (t, worker) in workers.into_iter().enumerate() {
             let mut worker_db = worker.db;
             handles.push(scope.spawn(move || {
                 let mut out = Vec::new();
-                let mut count = 0usize;
                 loop {
                     let mut next_idx = queues_ref[t].lock().unwrap().pop_front();
                     if next_idx.is_none() {
@@ -328,12 +334,12 @@ pub(crate) fn run_pass2_parallel(
                         }
                     };
                     out.push((i, result));
-                    count += 1;
-                    if count.is_multiple_of(PASS2_AST_CLEAR_INTERVAL) {
-                        worker_db.clear_all_parsed_modules();
+                    let done =
+                        wave_count_ref.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    if done.is_multiple_of(PASS2_WAVE_AST_CLEAR_INTERVAL) {
+                        worker_db.clear_parsed_modules_only();
                     }
                 }
-                worker_db.clear_all_parsed_modules();
                 drop(worker_db);
                 out
             }));
@@ -343,6 +349,7 @@ pub(crate) fn run_pass2_parallel(
             indexed.extend(out);
         }
     });
+    base_db.clear_parsed_modules_only();
     let next_db = base_db.fresh_empty();
     *base_db = next_db;
     release_freed_memory();
@@ -431,7 +438,7 @@ pub(crate) fn extract_one_file(
     let mut qual_map: HashMap<(String, String), FunctionId> = HashMap::new();
     let mut follow_targets: HashMap<String, FollowTarget> = HashMap::new();
     let mut task_targets = TaskTargets::default();
-    let mut package_meta = PackageMetaMemo::new();
+    let mut package_meta = shared.package_meta.fork();
 
     let model = SemanticModel::new(db, program_file);
     let ctx = FileCtx {
@@ -710,7 +717,7 @@ pub(crate) fn visit_one_file_shared(
     facts: &mut ProjectFacts,
     def_map: &mut HashMap<DefKey, FunctionId>,
     qual_map: &mut HashMap<(String, String), FunctionId>,
-    property_defs: &HashSet<DefKey>,
+    property_defs: &HashSet<FunctionId>,
     task_targets: &mut TaskTargets,
     follow_targets: &mut HashMap<String, FollowTarget>,
     package_meta: &mut PackageMetaMemo,

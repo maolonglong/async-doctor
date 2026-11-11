@@ -4,26 +4,43 @@ use std::borrow::Cow;
 
 use crate::graph::{CalleeRef, ProjectFacts};
 
+fn needs_higher_order_materialization(facts: &ProjectFacts) -> bool {
+    let has_offload_wrapper_fn = facts.functions.iter().any(|f| f.is_offload_wrapper);
+    let has_offload_decorator_ref = facts.decorator_refs.values().flatten().any(|r| match r {
+        crate::graph::DecoratorRef::External(q) => offload_decorator_qual(q).is_some(),
+        crate::graph::DecoratorRef::Function(_) => false,
+    });
+    has_offload_decorator_ref
+        || !facts.offload_wrapper_refs.is_empty()
+        || has_offload_wrapper_fn
+        || facts
+            .edges
+            .iter()
+            .any(|edge| matches!(edge.callee, CalleeRef::ParamInvoke { .. }))
+}
+
 /// Link higher-order `ParamInvoke` edges using caller argument bindings, and
 /// promote inferred offload wrappers onto call sites.
 pub(super) fn materialize_higher_order(facts: &ProjectFacts) -> Cow<'_, ProjectFacts> {
-    use crate::graph::{CallEdge, OffloadKind};
-
-    let needs_materialization = !facts.decorator_refs.is_empty()
-        || !facts.offload_wrapper_refs.is_empty()
-        || facts.edges.iter().any(|edge| match edge.callee {
-            CalleeRef::Project(fid) => facts
-                .functions
-                .get(fid.index())
-                .is_some_and(|f| f.is_offload_wrapper),
-            CalleeRef::ParamInvoke { .. } => true,
-            _ => false,
-        });
-    if !needs_materialization {
+    if !needs_higher_order_materialization(facts) {
         return Cow::Borrowed(facts);
     }
-
     let mut out = facts.clone();
+    materialize_higher_order_in_place(&mut out);
+    Cow::Owned(out)
+}
+
+/// In-place variant of [`materialize_higher_order`] so owned callers avoid
+/// cloning [`ProjectFacts`] even when higher-order materialization is active.
+pub(super) fn materialize_higher_order_owned(mut facts: ProjectFacts) -> ProjectFacts {
+    if needs_higher_order_materialization(&facts) {
+        materialize_higher_order_in_place(&mut facts);
+    }
+    facts
+}
+
+fn materialize_higher_order_in_place(out: &mut ProjectFacts) {
+    use crate::graph::{CallEdge, OffloadKind};
 
     // `module.qualname` → id index for resolving `DecoratorRef::External`
     // quals to followed / project functions.
@@ -31,15 +48,13 @@ pub(super) fn materialize_higher_order(facts: &ProjectFacts) -> Cow<'_, ProjectF
         out.functions.iter().map(|f| (ref_key(f), f.id)).collect();
     let ref_is_offload_wrapper =
         |r: &crate::graph::DecoratorRef,
-         out: &ProjectFacts,
+         funcs: &[crate::graph::FunctionFact],
          idx: &std::collections::HashMap<String, crate::graph::FunctionId>| {
             match r {
-                crate::graph::DecoratorRef::Function(id) => {
-                    out.functions[id.index()].is_offload_wrapper
-                }
+                crate::graph::DecoratorRef::Function(id) => funcs[id.index()].is_offload_wrapper,
                 crate::graph::DecoratorRef::External(q) => idx
                     .get(q.as_str())
-                    .is_some_and(|id| out.functions[id.index()].is_offload_wrapper),
+                    .is_some_and(|id| funcs[id.index()].is_offload_wrapper),
             }
         };
 
@@ -47,37 +62,45 @@ pub(super) fn materialize_higher_order(facts: &ProjectFacts) -> Cow<'_, ProjectF
     // enclosing param to a callee that turned out to be an offload wrapper.
     // Iterate to a fixpoint so wrapper chains settle (bounded — marks only grow).
     loop {
-        let mut changed = false;
-        for (fid, refs) in &out.offload_wrapper_refs.clone() {
+        let mut to_mark = Vec::new();
+        for (&fid, refs) in &out.offload_wrapper_refs {
             if out.functions[fid.index()].is_offload_wrapper {
                 continue;
             }
             if refs
                 .iter()
-                .any(|r| ref_is_offload_wrapper(r, &out, &qual_index))
+                .any(|r| ref_is_offload_wrapper(r, &out.functions, &qual_index))
             {
-                out.functions[fid.index()].is_offload_wrapper = true;
-                changed = true;
+                to_mark.push(fid);
             }
         }
-        if !changed {
+        if to_mark.is_empty() {
             break;
+        }
+        for fid in to_mark {
+            out.functions[fid.index()].is_offload_wrapper = true;
         }
     }
 
     // Classify decorator refs once wrapper marks are final.
-    for (fid, refs) in &out.decorator_refs.clone() {
+    let mut resolved_decorators = Vec::new();
+    for (&fid, refs) in &out.decorator_refs {
         let kind = refs.iter().find_map(|r| match r {
             crate::graph::DecoratorRef::External(q) => offload_decorator_qual(q).or_else(|| {
-                ref_is_offload_wrapper(r, &out, &qual_index).then_some(OffloadKind::AsyncioToThread)
+                ref_is_offload_wrapper(r, &out.functions, &qual_index)
+                    .then_some(OffloadKind::AsyncioToThread)
             }),
             crate::graph::DecoratorRef::Function(_) => {
-                ref_is_offload_wrapper(r, &out, &qual_index).then_some(OffloadKind::AsyncioToThread)
+                ref_is_offload_wrapper(r, &out.functions, &qual_index)
+                    .then_some(OffloadKind::AsyncioToThread)
             }
         });
         if let Some(kind) = kind {
-            out.functions[fid.index()].offload_decorator = Some(kind);
+            resolved_decorators.push((fid, kind));
         }
+    }
+    for (fid, kind) in resolved_decorators {
+        out.functions[fid.index()].offload_decorator = Some(kind);
     }
 
     // Index edges by caller once — avoid O(E²) scans.
@@ -106,7 +129,7 @@ pub(super) fn materialize_higher_order(facts: &ProjectFacts) -> Cow<'_, ProjectF
                 edge.callee_is_coroutine = Some(f.is_async);
                 edge.positional_literals.clear();
                 edge.keyword_true.clear();
-                edge.positional_callables.clear();
+                edge.positional_callables = vec![Some(fid)];
                 edge.positional_externals.clear();
                 edge.positional_constructed_receivers.clear();
                 edge.keyword_callables.clear();
@@ -118,6 +141,10 @@ pub(super) fn materialize_higher_order(facts: &ProjectFacts) -> Cow<'_, ProjectF
             }
             edge.is_offload_wrapper = true;
             edge.callee = CalleeRef::Offload(OffloadKind::AsyncioToThread);
+            let arg_idx = usize::from(edge.is_bound_call);
+            if arg_idx > 0 && edge.positional_callables.len() > arg_idx {
+                edge.positional_callables.drain(0..arg_idx);
+            }
             // The wrapper itself is often `async def`; coroutine-ness for
             // `offload-coroutine` must refer to the *callable argument*, not
             // the wrapper. Recompute from positional callables (index 0).
@@ -147,11 +174,19 @@ pub(super) fn materialize_higher_order(facts: &ProjectFacts) -> Cow<'_, ProjectF
             let CalleeRef::ParamInvoke { index } = out.edges[pei].callee else {
                 continue;
             };
-            let fid = out.edges[ei]
-                .positional_callables
-                .get(index as usize)
-                .copied()
-                .flatten()
+            let arg_idx = if out.edges[ei].is_bound_call {
+                index.checked_sub(1)
+            } else {
+                Some(index)
+            };
+            let fid = arg_idx
+                .and_then(|ai| {
+                    out.edges[ei]
+                        .positional_callables
+                        .get(ai as usize)
+                        .copied()
+                        .flatten()
+                })
                 .or_else(|| {
                     let name = out.functions[callee_id.index()]
                         .param_names
@@ -197,14 +232,15 @@ pub(super) fn materialize_higher_order(facts: &ProjectFacts) -> Cow<'_, ProjectF
                 is_awaited: param_edge.is_awaited,
                 callee_is_coroutine: param_edge.callee_is_coroutine,
                 is_eager_offload_arg: param_edge.is_eager_offload_arg,
-                // Only valid when reverse-walk came from this call site.
+                is_bound_call: false,
+                // Only valid when reverse-walk came from this exact call site.
                 context_from_caller: Some(out.edges[ei].caller),
+                context_from_edge: Some(ei),
                 constructed_receiver: None,
             });
         }
     }
     out.edges.extend(extras);
-    Cow::Owned(out)
 }
 
 /// Lookup key for `DecoratorRef::External` quals — `module.qualname` (or bare

@@ -12,10 +12,12 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crate::graph::{
     CalleeRef, FunctionId, OffloadKind, ProjectFacts, is_non_production_entry_path,
 };
-use crate::id::{FindingIdParts, finding_id, fix_group_id};
+use crate::id::{FindingIdParts, fix_group_id};
 use crate::report::{Advice, AdviceCategory, ChainStep, Entry, Fix};
 
-use super::grade::{chain_step_for, resolution_for_edge, shortest_paths_to_async_entries};
+use super::grade::{
+    chain_step_for, resolution_for_edge, shortest_paths_to_async_entries, unique_site_finding_id,
+};
 use super::{AsyncTwinHit, SinkTable};
 
 pub(super) const RULE_OFFLOAD_HAS_ASYNC_TWIN: &str = "offload-has-async-twin";
@@ -35,6 +37,7 @@ pub(super) fn collect_offload_twin_advice(
 
     let mut advice = Vec::new();
     let mut emitted = HashSet::new();
+    let mut emitted_sites: HashMap<String, (FunctionId, String, u32)> = HashMap::new();
 
     for (edge_idx, edge) in facts.edges.iter().enumerate() {
         let CalleeRef::Offload(kind) = edge.callee else {
@@ -140,16 +143,21 @@ pub(super) fn collect_offload_twin_advice(
 
             let chain_refs: Vec<&str> = chain_qualnames.iter().map(String::as_str).collect();
             let sink_key = format!("twin:{primary_twin}");
-            let id = finding_id(FindingIdParts {
-                rule: RULE_OFFLOAD_HAS_ASYNC_TWIN,
-                entry_qualname: &entry.full_qualname(),
-                sink_qualname: &sink_key,
-                chain_qualnames: &chain_refs,
-                occurrence: edge.occurrence,
-            });
-            if !emitted.insert(id.clone()) {
+            let Some(id) = unique_site_finding_id(
+                FindingIdParts {
+                    rule: RULE_OFFLOAD_HAS_ASYNC_TWIN,
+                    entry_qualname: &entry.full_qualname(),
+                    sink_qualname: &sink_key,
+                    chain_qualnames: &chain_refs,
+                    occurrence: edge.occurrence,
+                },
+                entry_id,
+                (&edge.file, edge.line),
+                &mut emitted_sites,
+                &mut emitted,
+            ) else {
                 continue;
-            }
+            };
 
             let target_desc = match &target {
                 OffloadTarget::Project(fid) => facts.function(*fid).full_qualname(),
@@ -195,6 +203,7 @@ pub(super) fn collect_offload_twin_advice(
         reverse,
         include_non_production,
         &mut advice,
+        &mut emitted_sites,
         &mut emitted,
     );
 
@@ -218,6 +227,7 @@ fn collect_dangling_task_advice(
     reverse: &[Vec<usize>],
     include_non_production: bool,
     advice: &mut Vec<Advice>,
+    emitted_sites: &mut HashMap<String, (FunctionId, String, u32)>,
     emitted: &mut HashSet<String>,
 ) {
     for edge in &facts.edges {
@@ -264,16 +274,21 @@ fn collect_dangling_task_advice(
             ));
             chain_qualnames.push(RULE_DANGLING_TASK.to_string());
             let chain_refs: Vec<&str> = chain_qualnames.iter().map(String::as_str).collect();
-            let id = finding_id(FindingIdParts {
-                rule: RULE_DANGLING_TASK,
-                entry_qualname: &entry.full_qualname(),
-                sink_qualname: RULE_DANGLING_TASK,
-                chain_qualnames: &chain_refs,
-                occurrence: edge.occurrence,
-            });
-            if !emitted.insert(id.clone()) {
+            let Some(id) = unique_site_finding_id(
+                FindingIdParts {
+                    rule: RULE_DANGLING_TASK,
+                    entry_qualname: &entry.full_qualname(),
+                    sink_qualname: RULE_DANGLING_TASK,
+                    chain_qualnames: &chain_refs,
+                    occurrence: edge.occurrence,
+                },
+                entry_id,
+                (&edge.file, edge.line),
+                emitted_sites,
+                emitted,
+            ) else {
                 continue;
-            }
+            };
             advice.push(Advice {
                 id,
                 rule: RULE_DANGLING_TASK.to_string(),

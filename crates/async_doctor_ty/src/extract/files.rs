@@ -90,14 +90,14 @@ pub(crate) fn extract_files(
     }
     catalog.sort_by(|a, b| a.rel.cmp(&b.rel));
 
-    let mut package_meta = PackageMetaMemo::new();
     let mut def_map: HashMap<DefKey, FunctionId> = HashMap::new();
     let mut qual_map: HashMap<(String, String), FunctionId> = HashMap::new();
-    let mut property_defs: HashSet<DefKey> = HashSet::new();
+    let mut property_defs: HashSet<FunctionId> = HashSet::new();
     let mut class_methods: HashMap<(String, String), Vec<String>> = HashMap::new();
 
     let mut db = AsyncDoctorDb::open(project_root, None)?;
     facts.environment = db.scan_environment().clone();
+    let mut package_meta = PackageMetaMemo::for_site_packages(&facts.environment.site_packages);
     let followable_extra_roots: Vec<PathBuf> = db
         .followable_extra_roots()
         .iter()
@@ -163,6 +163,7 @@ pub(crate) fn extract_files(
                     qual_map: &qual_map,
                     property_defs: &property_defs,
                     followable_extra_roots: &followable_extra_roots,
+                    package_meta: &package_meta,
                 };
                 run_pass2_parallel(&mut db, workers, &kept_specs, &catalog_to_kept, &shared)
             };
@@ -263,11 +264,15 @@ pub(crate) fn extract_files(
         cache_dir,
         follow_budget,
     );
-    std::thread::spawn(move || drop(db));
+    let drop_db = std::thread::spawn(move || {
+        drop(db);
+        crate::db::release_freed_memory();
+    });
 
     facts.resolved_symbols =
         crate::twin_resolve::collect_resolved_twin_symbols(project_root.as_std_path());
     stabilize_facts(&mut facts);
+    let _ = drop_db.join();
     Ok(facts)
 }
 
@@ -279,7 +284,7 @@ fn run_pass2_batched(
     facts: &mut ProjectFacts,
     def_map: &mut HashMap<DefKey, FunctionId>,
     qual_map: &mut HashMap<(String, String), FunctionId>,
-    property_defs: &HashSet<DefKey>,
+    property_defs: &HashSet<FunctionId>,
     task_targets: &mut TaskTargets,
     follow_targets: &mut HashMap<String, FollowTarget>,
     package_meta: &mut PackageMetaMemo,

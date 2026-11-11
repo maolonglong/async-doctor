@@ -38,18 +38,16 @@ save test-profile artifacts. Concurrent cold-cache detail:
 
 | Area | Grade | Why | Updated |
 |---|---|---|---|
-| `async_doctor` CLI / reporters | B | Solid CLI tests; SARIF/text paths less exercised than JSON | 2026-11-01 |
-| `async_doctor_ty` extract / scan / cache | B | Broad fixtures; pass-2 and cache modules over the 500-line target | 2026-11-01 |
-| `async_doctor_core` propagate / report | B | Prove-only core works; `propagate/mod.rs` oversized | 2026-11-01 |
-| `async_doctor_rules` sinks / twins | B | Good family coverage across stdlib and third-party sinks | 2026-11-01 |
-| Docs / agent map | B | Bootstrapped 2026-11-01; gardening is on-demand via audit, not scheduled | 2026-11-01 |
+| `async_doctor` CLI / reporters | A- | Dedicated regression coverage across whole-file suppressions, single-file scope, `--changed`/`--diff`, `--fail-on`, `why --format json`, Markdown, and SARIF 2.1.0 schema validation | 2026-11-11 |
+| `async_doctor_ty` extract / scan / cache | A- | Pre-indexed site-packages metadata, cross-package follow-target retention, hardened whole-scan fingerprint (`scan-cache-v5`), and 100-trial concurrent cold-cache parity | 2026-11-11 |
+| `async_doctor_core` propagate / report | A- | Bound-method param indexing, multi-hop param guards, edge-precise higher-order callback binding, and zero-clone `analyze_owned` propagation | 2026-11-11 |
+| `async_doctor_rules` sinks / twins | A- | Aligned `blocking-http` vs `blocking-db` rule docs with tightened `pymysql` / `pymongo` / `grpc` non-IO exclusions | 2026-11-11 |
+| Docs / agent map | B+ | Synced CLI, JSON contract, rules, architecture, and benchmark tables; `check_docs.py` enforced | 2026-11-11 |
 
 ## Debt tracker
 
 | Debt | Where | Cost of leaving it | Added |
 |---|---|---|---|
-| `propagate/mod.rs` ~634 lines (over 500 target) | `crates/async_doctor_core/src/propagate/mod.rs` | Harder reviews; split-by-responsibility risk | 2026-11-01 |
-| `cache.rs` ~515 lines (over 500 target) | `crates/async_doctor_ty/src/cache.rs` | Same | 2026-11-01 |
-| `stdlib/sinks.rs` ~615 lines (over 500 target) | `crates/async_doctor_rules/src/stdlib/sinks.rs` | Harder reviews; split by section (sleep/socket/file/locks/…) when next editing | 2026-11-01 |
+| Several core modules sit in the 700–779 line band (`pass2.rs`, `resolve.rs`, `suppress.rs`, `families.rs`, `cache.rs`, `propagate/mod.rs`) | `crates/` | Under the 800-line ceiling, but split by responsibility before adding new features to those files | 2026-11-11 |
 | GBK / legacy-encoded sources skipped with a warning | `encoding.rs` | Those files invisible to analysis | 2026-11-01 |
 | Serial pass-2 panic rollback does not undo changes to existing functions / `follow_targets` (deliberate) | `pass2.rs` | Partial facts after panic; documented behavior | 2026-11-01 |

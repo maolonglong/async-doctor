@@ -154,7 +154,7 @@ pub(crate) fn merge_pass1_file_data(
     def_map: &mut HashMap<DefKey, FunctionId>,
     qual_map: &mut HashMap<(String, String), FunctionId>,
     class_methods: &mut HashMap<(String, String), Vec<String>>,
-    property_defs: &mut HashSet<DefKey>,
+    property_defs: &mut HashSet<FunctionId>,
 ) {
     for (class, method) in data.class_methods {
         class_methods
@@ -162,14 +162,12 @@ pub(crate) fn merge_pass1_file_data(
             .or_default()
             .push(method);
     }
-    for name_start in data.property_name_starts {
-        property_defs.insert(DefKey {
-            file: rel.to_string(),
-            name_start,
-        });
-    }
+    let prop_starts: HashSet<u32> = data.property_name_starts.into_iter().collect();
     for f in data.functions {
         let id = FunctionId(facts.functions.len() as u32);
+        if prop_starts.contains(&f.name_start) {
+            property_defs.insert(id);
+        }
         let key = DefKey {
             file: rel.to_string(),
             name_start: f.name_start,

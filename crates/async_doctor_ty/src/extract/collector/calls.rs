@@ -1,6 +1,6 @@
 //! Call / await / property / lambda / task edge recording.
 
-use async_doctor_core::{CallKind, CalleeRef, EntryLabel, FunctionFact, FunctionId};
+use async_doctor_core::{CallKind, CalleeRef, FunctionId, OffloadKind};
 use ruff_db::files::FilePath;
 use ruff_python_ast::visitor::Visitor;
 use ruff_python_ast::{self as ast, Expr};
@@ -9,7 +9,6 @@ use ty_python_semantic::{ImportAliasResolution, definitions_for_attribute, defin
 
 use super::CallCollector;
 use crate::extract::constants::{is_generator_consumer, keyword_true_names, literal_arg};
-use crate::extract::ctx::DefKey;
 use crate::extract::helpers::{
     is_asyncio_redis_type, is_callable_ref, is_getattr_call, is_partial_call,
     is_path_or_file_open_qual, is_task_spawn_callee, normalize_asyncio_redis_type,
@@ -20,30 +19,42 @@ impl<'a, 'db> CallCollector<'a, 'db> {
     pub(crate) fn walk_call_children(
         &mut self,
         call: &'a ast::ExprCall,
-        offload_known: Option<bool>,
+        offload_known: Option<Option<OffloadKind>>,
     ) {
-        let is_offload =
-            offload_known.unwrap_or_else(|| self.is_offload_callee(&call.func).is_some());
+        let offload_kind = match offload_known {
+            Some(k) => k,
+            None => self.is_offload_callee(&call.func),
+        };
         let consumer = is_generator_consumer(&call.func);
-        if is_offload {
+        self.in_callee_position = true;
+        self.visit_expr(&call.func);
+        self.in_callee_position = false;
+
+        if let Some(kind) = offload_kind {
+            let callable_idx = kind.callable_arg_index();
             for (i, arg) in call.arguments.args.iter().enumerate() {
-                if i == 0 && is_callable_ref(arg) {
-                    continue;
+                if i == callable_idx {
+                    if let Expr::Call(inner) = arg
+                        && is_partial_call(inner)
+                    {
+                        self.visit_partial_eager_args(inner, consumer);
+                        continue;
+                    }
+                    if is_callable_ref(arg) {
+                        continue;
+                    }
                 }
-                // Non-callable (or non-first) args of an offload are evaluated on
+                // Non-callable (or non-target) args of an offload are evaluated on
                 // the event loop before the offload runs — mark eager.
-                let prev_eager = self.in_eager_offload_arg;
-                self.in_eager_offload_arg = true;
-                if consumer {
-                    self.consuming_generator = true;
-                }
-                self.visit_expr(arg);
-                if consumer {
-                    self.consuming_generator = false;
-                }
-                self.in_eager_offload_arg = prev_eager;
+                self.visit_eager_offload_expr(arg, consumer);
             }
             for kw in &call.arguments.keywords {
+                if let Expr::Call(inner) = &kw.value
+                    && is_partial_call(inner)
+                {
+                    self.visit_partial_eager_args(inner, consumer);
+                    continue;
+                }
                 let prev_eager = self.in_eager_offload_arg;
                 if !is_callable_ref(&kw.value) {
                     self.in_eager_offload_arg = true;
@@ -52,9 +63,6 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 self.in_eager_offload_arg = prev_eager;
             }
         } else if consumer {
-            self.in_callee_position = true;
-            self.visit_expr(&call.func);
-            self.in_callee_position = false;
             self.consuming_generator = true;
             for arg in &call.arguments.args {
                 self.visit_expr(arg);
@@ -64,15 +72,36 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             }
             self.consuming_generator = false;
         } else {
-            self.in_callee_position = true;
-            self.visit_expr(&call.func);
-            self.in_callee_position = false;
             for arg in &call.arguments.args {
                 self.visit_expr(arg);
             }
             for kw in &call.arguments.keywords {
                 self.visit_expr(&kw.value);
             }
+        }
+    }
+
+    fn visit_eager_offload_expr(&mut self, expr: &'a Expr, consumer: bool) {
+        let prev_eager = self.in_eager_offload_arg;
+        self.in_eager_offload_arg = true;
+        if consumer {
+            self.consuming_generator = true;
+        }
+        self.visit_expr(expr);
+        if consumer {
+            self.consuming_generator = false;
+        }
+        self.in_eager_offload_arg = prev_eager;
+    }
+
+    /// `functools.partial(fn, a, k=b)` passed to an offload defers `fn` (arg 0)
+    /// while evaluating `a` and `b` eagerly on the event loop.
+    fn visit_partial_eager_args(&mut self, inner: &'a ast::ExprCall, consumer: bool) {
+        for eager_arg in inner.arguments.args.iter().skip(1) {
+            self.visit_eager_offload_expr(eager_arg, consumer);
+        }
+        for kw in &inner.arguments.keywords {
+            self.visit_eager_offload_expr(&kw.value, consumer);
         }
     }
 
@@ -204,13 +233,13 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         false
     }
 
-    /// Handle a call expression and return whether it resolved as an offload callee
+    /// Handle a call expression and return the resolved offload kind if any
     /// (`None` if skipped before callee classification).
     pub(crate) fn handle_call(
         &mut self,
         call: &'a ast::ExprCall,
         is_awaited: bool,
-    ) -> Option<bool> {
+    ) -> Option<Option<OffloadKind>> {
         self.pending_is_awaited = is_awaited;
         // Module-level and function-level: task spawns + imperative routes.
         self.note_task_spawn(call);
@@ -232,7 +261,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         if self.call_is_done_guarded_future_result(call) {
             self.clear_pending_call_args();
             self.pending_is_awaited = false;
-            return Some(false);
+            return Some(None);
         }
 
         self.pending_literals = call.arguments.args.iter().map(literal_arg).collect();
@@ -258,6 +287,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 CallKind::Call
             };
             let is_coro = Some(self.function(fid).is_async);
+            self.pending_is_bound_call = self.expr_is_bound_method_call(&call.func, fid);
             self.push_edge(
                 caller,
                 CalleeRef::Project(fid),
@@ -267,7 +297,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 is_coro,
             );
             self.clear_pending_call_args();
-            return Some(false);
+            return Some(None);
         }
 
         // Project class constructor (`Worker(...)`, `cls(...)`, inherited `__init__`,
@@ -291,6 +321,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                     self.pending_keyword_callables = saved_kw_callables.clone();
                 }
                 let is_coro = Some(self.function(fid).is_async);
+                self.pending_is_bound_call = true;
                 self.push_edge(
                     caller,
                     CalleeRef::Project(fid),
@@ -301,7 +332,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 );
             }
             self.clear_pending_call_args();
-            return Some(false);
+            return Some(None);
         }
 
         let func_ext_qual = self.external_qualname(&call.func);
@@ -314,14 +345,14 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         {
             self.clear_pending_call_args();
             self.pending_is_awaited = false;
-            return Some(false);
+            return Some(None);
         }
 
         // zipfile/tarfile on BytesIO/StringIO (ctor or subsequent receiver ops).
         if self.call_is_in_memory_archive(call, func_ext_qual.as_deref()) {
             self.clear_pending_call_args();
             self.pending_is_awaited = false;
-            return Some(false);
+            return Some(None);
         }
 
         // Non-blocking lock/queue variants (`acquire(False)`, `join(timeout=0)`,
@@ -331,7 +362,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         {
             self.clear_pending_call_args();
             self.pending_is_awaited = false;
-            return Some(false);
+            return Some(None);
         }
 
         if let Some(kind) = func_ext_qual
@@ -374,7 +405,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 target_coro,
             );
             self.clear_pending_call_args();
-            return Some(true);
+            return Some(Some(kind));
         }
 
         // getattr / setattr dynamic dispatch → unresolved candidate
@@ -390,7 +421,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 None,
             );
             self.clear_pending_call_args();
-            return Some(false);
+            return Some(None);
         }
 
         if let Some(callee) = self.resolve_non_project_callee(&call.func, func_ext_qual) {
@@ -417,10 +448,13 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 CallKind::Call
             };
             let is_coro = self.resolve_callee_is_coroutine(&call.func);
+            if matches!(&callee, CalleeRef::External { .. }) {
+                self.pending_is_bound_call = self.expr_is_external_bound_call(&call.func);
+            }
             self.push_edge(caller, callee, call.range(), kind, false, is_coro);
         }
         self.clear_pending_call_args();
-        Some(false)
+        Some(None)
     }
 
     pub(crate) fn clear_pending_call_args(&mut self) {
@@ -431,6 +465,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         self.pending_constructed_receivers.clear();
         self.pending_constructed_receiver = None;
         self.pending_keyword_callables.clear();
+        self.pending_is_bound_call = false;
     }
 
     pub(crate) fn resolve_keyword_callables(
@@ -464,99 +499,6 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         out
     }
 
-    pub(crate) fn note_local_assign(&mut self, assign: &'a ast::StmtAssign) {
-        if assign.targets.len() != 1 {
-            return;
-        }
-        let Expr::Name(n) = &assign.targets[0] else {
-            return;
-        };
-        self.note_local_binding(n.id.as_str(), &assign.value);
-    }
-
-    pub(crate) fn note_local_binding(&mut self, name: &str, value: &'a Expr) {
-        // Rebind invalidates `.done()` proofs for this name / `name.*` paths.
-        self.invalidate_future_done_receiver(name);
-        match value {
-            Expr::Lambda(lam) => {
-                self.local_lambdas.insert(name.to_string(), lam);
-                self.idle_loop_locals.remove(name);
-                self.unbounded_queues.remove(name);
-                self.boto_receivers.remove(name);
-                self.boto_session_receivers.remove(name);
-                self.aio_boto_receivers.remove(name);
-                self.running_loop_locals.remove(name);
-                self.event_loop_locals.remove(name);
-                self.buffer_locals.remove(name);
-                self.in_memory_archive_receivers.remove(name);
-            }
-            Expr::Generator(gexpr) => {
-                self.local_genexprs
-                    .entry(name.to_string())
-                    .or_default()
-                    .push(gexpr);
-                self.idle_loop_locals.remove(name);
-                self.unbounded_queues.remove(name);
-                self.boto_receivers.remove(name);
-                self.boto_session_receivers.remove(name);
-                self.aio_boto_receivers.remove(name);
-                self.running_loop_locals.remove(name);
-                self.event_loop_locals.remove(name);
-                self.buffer_locals.remove(name);
-                self.in_memory_archive_receivers.remove(name);
-            }
-            other => {
-                self.local_lambdas.remove(name);
-                self.local_genexprs.remove(name);
-                if super::loop_guards::value_is_idle_loop_binding(other, &self.idle_loop_helpers) {
-                    self.idle_loop_locals.insert(name.to_string());
-                } else {
-                    self.idle_loop_locals.remove(name);
-                }
-                self.note_queue_binding(name, other);
-                self.note_boto_binding(name, other);
-                self.note_loop_handle_binding(name, other);
-                self.note_buffer_binding(name, other);
-                self.note_archive_binding(name, other);
-            }
-        }
-    }
-
-    fn invalidate_future_done_receiver(&mut self, name: &str) {
-        let prefix = format!("{name}.");
-        self.future_done_receivers
-            .retain(|p| p != name && !p.starts_with(&prefix));
-    }
-
-    fn note_loop_handle_binding(&mut self, name: &str, value: &Expr) {
-        use super::loop_guards::{expr_is_get_event_loop, expr_is_get_running_loop};
-        if expr_is_get_running_loop(value) {
-            self.running_loop_locals.insert(name.to_string());
-            self.event_loop_locals.remove(name);
-            return;
-        }
-        if expr_is_get_event_loop(value) {
-            self.event_loop_locals.insert(name.to_string());
-            self.running_loop_locals.remove(name);
-            return;
-        }
-        // `except RuntimeError: loop = None` keeps get_running_loop provenance.
-        if matches!(value, Expr::NoneLiteral(_)) {
-            return;
-        }
-        self.running_loop_locals.remove(name);
-        self.event_loop_locals.remove(name);
-    }
-
-    pub(crate) fn analyze_lambda_body(&mut self, lambda: &'a ast::ExprLambda) {
-        let prev_in = self.in_lambda;
-        let depths = self.take_enclosing_depths();
-        self.in_lambda = false;
-        self.visit_expr(&lambda.body);
-        self.in_lambda = prev_in;
-        self.restore_enclosing_depths(depths);
-    }
-
     pub(crate) fn maybe_property_get(&mut self, attr: &ast::ExprAttribute) {
         let Some(caller) = self.current_fn else {
             return;
@@ -577,14 +519,11 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         let Some(fid) = fid else {
             return;
         };
-        let is_prop = self
-            .property_defs
-            .iter()
-            .any(|k| self.def_get(k) == Some(fid));
-        if !is_prop {
+        if !self.property_defs.contains(&fid) {
             return;
         }
         self.clear_pending_call_args();
+        self.pending_is_bound_call = true;
         self.push_edge(
             caller,
             CalleeRef::Project(fid),
@@ -704,93 +643,5 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
         let ty = self.type_instance_qualname(cur)?;
         twin_relevant_client_root(&ty)
-    }
-
-    pub(crate) fn ensure_lambda_fact(&mut self, lam: &'a ast::ExprLambda) -> FunctionId {
-        let key = DefKey {
-            file: self.ctx.rel.clone(),
-            name_start: u32::from(lam.range.start()),
-        };
-        if let Some(id) = self.def_get(&key) {
-            return id;
-        }
-        let id = self.next_function_id();
-        let qualname = format!("<lambda@{}>", self.ctx.line_of(lam.range.start()));
-        let param_names: Vec<String> = lam
-            .parameters
-            .as_ref()
-            .map(|p| {
-                p.iter_non_variadic_params()
-                    .map(|a| a.parameter.name.as_str().to_string())
-                    .collect()
-            })
-            .unwrap_or_default();
-        self.def_map.insert(key, id);
-        self.qual_map
-            .insert((self.ctx.module.clone(), qualname.clone()), id);
-        self.facts.functions.push(FunctionFact {
-            id,
-            file: self.ctx.rel.clone(),
-            line: self.ctx.line_of(lam.range.start()),
-            module: self.ctx.module.clone(),
-            qualname,
-            is_async: false,
-            is_generator: false,
-            label: EntryLabel::Other,
-            is_sync_route: false,
-            async_twins: Vec::new(),
-            param_names,
-            is_third_party: false,
-            package_name: None,
-            package_version: None,
-            invokes_params: Vec::new(),
-            is_offload_wrapper: false,
-            offload_decorator: None,
-        });
-        // Analyze lambda body as edges from the synthetic function.
-        // Judge body edges relative to the lambda itself — enclosing try/if/loop
-        // tags on the offload site must not make lambda sinks look conditional.
-        let prev = self.current_fn;
-        let prev_params = std::mem::take(&mut self.current_param_names);
-        let prev_in = self.in_lambda;
-        let depths = self.take_enclosing_depths();
-        self.current_fn = Some(id);
-        self.current_param_names = self.function(id).param_names.clone();
-        self.in_lambda = false;
-        self.visit_expr(&lam.body);
-        self.in_lambda = prev_in;
-        self.current_fn = prev;
-        self.current_param_names = prev_params;
-        self.restore_enclosing_depths(depths);
-        id
-    }
-
-    /// Snapshot + clear branch/loop depths so nested callable bodies are graded
-    /// relative to themselves (not the enclosing offload site's try/if/loop).
-    pub(super) fn take_enclosing_depths(&mut self) -> (u32, u32, u32, u32, u32, u32) {
-        let depths = (
-            self.dead_depth,
-            self.loop_depth,
-            self.branch_depth,
-            self.cache_miss_depth,
-            self.no_running_loop_depth,
-            self.off_loop_thread_depth,
-        );
-        self.dead_depth = 0;
-        self.loop_depth = 0;
-        self.branch_depth = 0;
-        self.cache_miss_depth = 0;
-        self.no_running_loop_depth = 0;
-        self.off_loop_thread_depth = 0;
-        depths
-    }
-
-    pub(super) fn restore_enclosing_depths(&mut self, depths: (u32, u32, u32, u32, u32, u32)) {
-        self.dead_depth = depths.0;
-        self.loop_depth = depths.1;
-        self.branch_depth = depths.2;
-        self.cache_miss_depth = depths.3;
-        self.no_running_loop_depth = depths.4;
-        self.off_loop_thread_depth = depths.5;
     }
 }

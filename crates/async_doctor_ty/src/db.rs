@@ -202,12 +202,10 @@ impl AsyncDoctorDb {
             .collect()
     }
 
-    /// Clear `ParsedModule` ASTs for all system files read so far on this DB.
-    ///
-    /// Salsa's `parsed_module` LRU only evicts across revisions, not within a
-    /// single scan revision. `ParsedModule::clear` drops the `IndexedModule`
-    /// behind its `ArcSwapOption` without invalidating `AstNodeRef` indices.
-    pub(crate) fn clear_all_parsed_modules(&self) {
+    /// Clear `ParsedModule` ASTs for all system files read so far on this DB,
+    /// without invoking platform allocator pressure-relief walks (safe inside
+    /// multi-threaded worker loops).
+    pub(crate) fn clear_parsed_modules_only(&self) {
         let paths = self.system.snapshot_read_paths();
         let py_ver = self.program_settings.python_version.version;
         for p in paths {
@@ -216,7 +214,6 @@ impl AsyncDoctorDb {
                 ruff_db::parsed::parsed_module(self, pf).clear();
             }
         }
-        release_freed_memory();
     }
 }
 

@@ -35,11 +35,13 @@ Exit codes and JSON field meanings live in [`docs/json-contract.md`](docs/json-c
 
 ### `crates/async_doctor`
 
-Binary crate: clap args (`args.rs`), path resolution, inline
-`# async-doctor: ignore[…]` suppressions, git `--changed` / baseline filters,
-text / Markdown / JSON / SARIF reporters (`text/`, `markdown.rs`, `sarif.rs`), `explain` / `why`
-(`help_cmd.rs`), and `install-skill` (`skill_cmd.rs`). Depends on `async_doctor_ty` for scanning and
-`async_doctor_core` for report types. Non-MSVC builds use jemalloc.
+Binary crate: clap args (`args.rs` — including `--changed` / `--diff`, `--fail-on`,
+and `why --format json`), path resolution, whole-file inline
+`# async-doctor: ignore[…]` suppressions (`suppress.rs`), git `--changed` /
+baseline filters (`changed.rs`, `baseline.rs`), text / Markdown / JSON / SARIF
+reporters (`text/`, `markdown.rs`, `sarif.rs`), `explain` / `why` (`help_cmd.rs`),
+and `install-skill` (`skill_cmd.rs`). Depends on `async_doctor_ty` for scanning
+and `async_doctor_core` for report types. Non-MSVC builds use jemalloc.
 
 **API boundary:** the published CLI surface. Exit codes: see
 [`docs/json-contract.md`](docs/json-contract.md).
@@ -54,11 +56,12 @@ reports (`env_info.rs`), and twin resolution against the scanned venv
 
 `extract/`: path discovery (`files.rs`, `path.rs`), pass-1 function collection
 (`functions.rs`), pass-2 typed edges (`pass2.rs` — default parallel path caps
-workers at 8, clears `ParsedModule` ASTs after per-file visits and every 25
-files per worker, and runs in coordinated 2,500-file waves where all workers
-share one `Storage` per wave and drop it to refcount 0 between waves, with a
-shared read-only pass-1 function slice overlay), per-file `CallCollector`
-(`extract/collector/`), and third-party follow with budget (`follow.rs`).
+workers at 8, clears `ParsedModule` ASTs after per-file visits and at wave-level
+200-file intervals without cross-worker eviction, and runs in coordinated
+2,500-file waves where all workers share one `Storage` per wave and drop it to
+refcount 0 between waves, with a shared read-only pass-1 function slice and
+pre-indexed `SiteRootIndex`), per-file `CallCollector` (`extract/collector/`),
+and third-party follow with budget (`follow.rs`).
 Package cache: `cache.rs`. Whole-scan report cache: `scan_cache.rs`.
 Site-packages helpers: `sitepkgs/`. See
 [docs/notes/2026-11-salsa-fresh-empty-rss.md](docs/notes/2026-11-salsa-fresh-empty-rss.md).
@@ -92,20 +95,22 @@ under parallel tests — pass an explicit cache dir instead.
   note. Third-party sinks under parameter/branch guards (e.g. PIL
   `if is_path(fp):`) demote to candidates.
 
-**Whole-scan cache key** (`scan_cache.rs` / `scan_input_fingerprint`): schema
-version, tool version, build id, analyze options (`include_non_production`,
-`show_unresolved`), follow budget, scan-root path, every first-party `.py` /
-`.pyi` content hash, discovery config file contents
-(`pyproject.toml` / pyright / ruff), active venv identity, and each installed
-dist-info content fingerprint. Package-cache fingerprints are coarse
-(RECORD/METADATA/one-level `.py`); identical RECORD + unchanged dist-info mtime
-can reuse a package entry even if an unpacked `.py` was patched in place
-(editable installs that refresh dist-info mtime invalidate correctly).
-Package-cache schema is `CACHE_SCHEMA_VERSION` 20: it invalidates edges carrying
-definition-site guards into named function bodies, and persists decorator
-qualnames per function and keyword args passed a literal `True` per edge so warm runs restore decorator-offload semantics, and a
-whole-scan cache hit preserves `environment.followBudgetSkipped` while the rest
-of `environment` is re-detected.
+**Whole-scan cache key** (`scan_cache.rs` / `scan_input_fingerprint`): bypassed
+on single-file targets (`path.is_file()`) and never saved when `!report.complete`.
+On directory scans, hashes schema version (`scan-cache-v5`), tool version, build
+id, analyze options (`include_non_production`, `show_unresolved`), follow budget,
+scan-root path, every first-party `.py` / `.pyi` content hash, ancestor and
+project discovery config files (`pyproject.toml` / pyright / ruff), active
+`VIRTUAL_ENV` / `CONDA_PREFIX` / ancestor `.venv` identity, `.pth` / editable
+finder / loose site-packages `.py` inputs, outside-root `extraPaths` / editable
+`.py`/`.pyi` content hashes, and each installed dist-info content fingerprint.
+Package-cache schema is `CACHE_SCHEMA_VERSION` 21: it persists cross-package
+`follow_targets` referenced by analyzed edges alongside `is_bound_call`,
+`is_eager_offload_arg`, `constructed_receiver`, `positional_externals`,
+`positional_constructed_receivers`, decorator qualnames, and literal-`True`
+keyword args so warm runs match cold runs bit-for-bit; a whole-scan cache hit
+preserves `environment.followBudgetSkipped` while re-detecting the rest of
+`environment`.
 
 ### `crates/async_doctor_core`
 
@@ -122,8 +127,10 @@ non-blocking advice (`advice.rs`: offload-has-async-twin, dangling-task).
 
 **Architecture invariant:** this crate must not depend on ty or ruff.
 
-**API boundary:** `analyze` / `analyze_with_options` plus the public report and
-graph types. Propagation is reachability, not taint.
+**API boundary:** `analyze` / `analyze_with_options` / `analyze_owned` plus the
+public report and graph types. Propagation is reachability, not taint. Reverse
+BFS continues past first-party `async def` functions in non-production paths so
+production entries awaiting non-production helpers still report findings.
 
 ### `crates/async_doctor_rules`
 

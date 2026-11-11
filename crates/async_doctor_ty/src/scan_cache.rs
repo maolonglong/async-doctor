@@ -16,8 +16,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::cache::{
     CACHE_SCHEMA_VERSION, TOOL_VERSION, build_id, package_content_fingerprint, sanitize_component,
-    short_hash,
+    short_hash, unique_tmp_path,
 };
+use crate::extract::discover_python_and_stub_files;
+use crate::search_paths::discover_extra_paths;
 
 static LAST_SCAN_IGNORE_CANDIDATES: Mutex<Option<(PathBuf, Vec<PathBuf>)>> = Mutex::new(None);
 
@@ -96,15 +98,18 @@ pub fn save_scan_report(root: &Path, fingerprint: &str, report: &Report) -> std:
         input_fingerprint: fingerprint,
         report,
     };
-    let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
-    {
+    let tmp = unique_tmp_path(&path);
+    let write_res = (|| -> std::io::Result<()> {
         let f = fs::File::create(&tmp)?;
         let mut writer = std::io::BufWriter::with_capacity(64 * 1024, f);
         serde_json::to_writer(&mut writer, &cached)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        writer.flush()?;
+        writer.flush()
+    })();
+    if let Err(err) = write_res.and_then(|()| fs::rename(&tmp, &path)) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
     }
-    fs::rename(&tmp, &path)?;
     Ok(())
 }
 
@@ -124,7 +129,7 @@ pub fn scan_input_fingerprint(
     follow_budget: usize,
 ) -> String {
     let mut blob = String::with_capacity(64 * 1024);
-    blob.push_str("scan-cache-v4\n");
+    blob.push_str("scan-cache-v5\n");
     blob.push_str(&format!(
         "schema:{CACHE_SCHEMA_VERSION}\ntool:{TOOL_VERSION}\nbuild:{}\n",
         build_id()
@@ -200,32 +205,79 @@ pub fn scan_input_fingerprint(
     }
 
     // Config files that affect search-path discovery (extraPaths / editables).
-    for name in [
-        "pyproject.toml",
-        "pyrightconfig.json",
-        "pyrightconfig.toml",
-        "ruff.toml",
-        ".ruff.toml",
-    ] {
-        push_file_content(&mut blob, "cfg", &root_canon.join(name));
-        if let Some(parent) = root_canon.parent() {
-            push_file_content(&mut blob, "cfg", &parent.join(name));
+    for (depth, anc) in root_canon.ancestors().take(6).enumerate() {
+        for name in [
+            "pyproject.toml",
+            "pyrightconfig.json",
+            "pyrightconfig.toml",
+            "ruff.toml",
+            ".ruff.toml",
+        ] {
+            push_file_content(&mut blob, &format!("cfg{depth}"), &anc.join(name));
         }
     }
 
     let venv = resolve_venv_prefix(&root_canon);
-    match &venv {
+    let site_roots = match &venv {
         Some(prefix) => {
             let canon = prefix.canonicalize().unwrap_or_else(|_| prefix.clone());
             blob.push_str(&format!("venv:{}\n", canon.display()));
-            let mut pkgs = fingerprint_site_packages(&canon);
+            let roots = site_packages_roots_for_prefix(&canon);
+            let mut pkgs = fingerprint_site_packages(&roots);
             pkgs.sort();
             for line in pkgs {
                 blob.push_str(&line);
                 blob.push('\n');
             }
+            roots
         }
-        None => blob.push_str("venv:\n"),
+        None => {
+            blob.push_str("venv:\n");
+            Vec::new()
+        }
+    };
+
+    // Fingerprint outside-scan-root extraPaths / editable finder targets.
+    if let Ok(sys_root) = ruff_db::system::SystemPathBuf::from_path_buf(root_canon.clone()) {
+        let mut existing = vec![sys_root.clone()];
+        let src_dir = sys_root.join("src");
+        if src_dir.as_std_path().is_dir() {
+            existing.push(src_dir);
+        }
+        let sys_sites: Vec<ruff_db::system::SystemPathBuf> = site_roots
+            .iter()
+            .filter_map(|p| ruff_db::system::SystemPathBuf::from_path_buf(p.clone()).ok())
+            .collect();
+        let extra_roots = discover_extra_paths(&sys_root, &sys_sites, &existing);
+        for (extra_idx, extra_sys) in extra_roots.iter().enumerate() {
+            let extra_path = extra_sys.as_std_path();
+            let extra_canon = extra_path
+                .canonicalize()
+                .unwrap_or_else(|_| extra_path.to_path_buf());
+            if extra_canon.starts_with(&root_canon) {
+                continue;
+            }
+            blob.push_str(&format!(
+                "extra_root:{extra_idx}:{}\n",
+                extra_canon.display()
+            ));
+            if let Ok(extra_files) = discover_python_and_stub_files(&extra_canon) {
+                let mut extra_hashes = Vec::with_capacity(extra_files.len());
+                for p in extra_files {
+                    let rel = p
+                        .strip_prefix(&extra_canon)
+                        .unwrap_or(&p)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    let fp = content_fingerprint(&p).unwrap_or_else(|| "0".to_string());
+                    extra_hashes.push((rel, fp));
+                }
+                extra_hashes.sort();
+                for (rel, fp) in extra_hashes {
+                    blob.push_str(&format!("extra_py:{extra_idx}:{rel}:{fp}\n"));
+                }
+            }
+        }
     }
 
     short_hash(blob.as_bytes())
@@ -260,7 +312,8 @@ pub fn venv_fingerprint(scan_root: &Path) -> String {
         Some(prefix) => {
             let canon = prefix.canonicalize().unwrap_or_else(|_| prefix.clone());
             blob.push_str(&format!("venv:{}\n", canon.display()));
-            let mut pkgs = fingerprint_site_packages(&canon);
+            let roots = site_packages_roots_for_prefix(&canon);
+            let mut pkgs = fingerprint_site_packages(&roots);
             pkgs.sort();
             for line in pkgs {
                 blob.push_str(&line);
@@ -272,7 +325,7 @@ pub fn venv_fingerprint(scan_root: &Path) -> String {
     short_hash(blob.as_bytes())
 }
 
-/// Prefer `VIRTUAL_ENV`, then in-project / parent `.venv`/`venv`.
+/// Prefer `VIRTUAL_ENV`, then ancestor `.venv`/`venv`, then `CONDA_PREFIX`.
 pub(crate) fn resolve_venv_prefix(scan_root: &Path) -> Option<PathBuf> {
     if let Ok(v) = std::env::var("VIRTUAL_ENV")
         && !v.is_empty()
@@ -282,12 +335,24 @@ pub(crate) fn resolve_venv_prefix(scan_root: &Path) -> Option<PathBuf> {
             return Some(p);
         }
     }
-    for base in [scan_root, scan_root.parent().unwrap_or(scan_root)] {
+    for base in scan_root.ancestors() {
         for name in [".venv", "venv"] {
             let p = base.join(name);
-            if p.is_dir() {
+            if p.is_dir()
+                && (p.join("pyvenv.cfg").is_file()
+                    || p.join("lib").is_dir()
+                    || p.join("Lib").is_dir())
+            {
                 return Some(p);
             }
+        }
+    }
+    if let Ok(c) = std::env::var("CONDA_PREFIX")
+        && !c.is_empty()
+    {
+        let p = PathBuf::from(c);
+        if p.is_dir() {
+            return Some(p);
         }
     }
     None
@@ -296,15 +361,17 @@ pub(crate) fn resolve_venv_prefix(scan_root: &Path) -> Option<PathBuf> {
 /// Enumerate sorted, deduplicated `site-packages` directories under `venv_prefix`.
 pub(crate) fn site_packages_roots_for_prefix(venv_prefix: &Path) -> Vec<PathBuf> {
     let mut site_roots = Vec::new();
-    let lib = venv_prefix.join("lib");
-    if let Ok(entries) = fs::read_dir(&lib) {
-        for ent in entries.flatten() {
-            let name = ent.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with("python") {
-                let sp = ent.path().join("site-packages");
-                if sp.is_dir() {
-                    site_roots.push(sp);
+    for lib_dir in ["lib", "lib64"] {
+        let lib = venv_prefix.join(lib_dir);
+        if let Ok(entries) = fs::read_dir(&lib) {
+            for ent in entries.flatten() {
+                let name = ent.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with("python") {
+                    let sp = ent.path().join("site-packages");
+                    if sp.is_dir() {
+                        site_roots.push(sp);
+                    }
                 }
             }
         }
@@ -319,21 +386,38 @@ pub(crate) fn site_packages_roots_for_prefix(venv_prefix: &Path) -> Vec<PathBuf>
     site_roots
 }
 
-fn fingerprint_site_packages(venv_prefix: &Path) -> Vec<String> {
+fn fingerprint_site_packages(site_roots: &[PathBuf]) -> Vec<String> {
     let mut out = Vec::new();
-    for site in site_packages_roots_for_prefix(venv_prefix) {
-        let Ok(entries) = fs::read_dir(&site) else {
+    for site in site_roots {
+        let Ok(entries) = fs::read_dir(site) else {
             continue;
         };
-        let mut dists: Vec<PathBuf> = entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.ends_with(".dist-info"))
-            })
-            .collect();
+        let mut dists: Vec<PathBuf> = Vec::new();
+        let mut pths_and_finders: Vec<PathBuf> = Vec::new();
+        let mut loose_py: Vec<(String, u64, u64)> = Vec::new();
+        for ent in entries.flatten() {
+            let p = ent.path();
+            let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if name.ends_with(".dist-info") {
+                dists.push(p);
+            } else if name.ends_with(".pth")
+                || (name.starts_with("__editable__") && name.ends_with("_finder.py"))
+            {
+                pths_and_finders.push(p);
+            } else if name.ends_with(".py")
+                && let Ok(meta) = ent.metadata()
+            {
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                loose_py.push((name.to_string(), meta.len(), mtime));
+            }
+        }
         dists.sort();
         for dist in dists {
             let name = dist
@@ -343,6 +427,16 @@ fn fingerprint_site_packages(venv_prefix: &Path) -> Vec<String> {
                 .to_string();
             let fp = package_content_fingerprint(&dist);
             out.push(format!("pkg:{name}:{fp}"));
+        }
+        pths_and_finders.sort();
+        for pth in pths_and_finders {
+            let name = pth.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+            let fp = content_fingerprint(&pth).unwrap_or_else(|| "0".to_string());
+            out.push(format!("pth:{name}:{fp}"));
+        }
+        loose_py.sort();
+        for (name, len, mtime) in loose_py {
+            out.push(format!("loose_py:{name}:{len}:{mtime}"));
         }
     }
     out

@@ -8,10 +8,11 @@ pub(crate) use batch::materialize_cached_functions;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ruff_db::system::SystemPathBuf;
 
-use crate::cache::{package_content_fingerprint, path_str_is_third_party_python};
+use crate::cache::{package_content_fingerprint, path_str_is_third_party_python, short_hash};
 
 /// A third-party `.py` definition we may extract on demand.
 #[derive(Debug, Clone)]
@@ -25,61 +26,307 @@ pub struct FollowTarget {
     pub package_fingerprint: Option<String>,
 }
 
-/// `(site-/dist-packages root, top-level import name)`.
-type PackageMetaKey = (String, String);
-/// Cached `(name, version, fingerprint)` (or absence).
-type PackageMetaValue = Option<(String, String, String)>;
+type PackageMetaTriple = (String, String, String);
 
-/// Per-scan memo for package meta lookups.
+#[derive(Debug, Clone)]
+struct SiteRootIndex {
+    dists: Vec<PackageMetaTriple>,
+    /// Exact relative file path (e.g. `six.py`, `google/cloud/storage/client.py`) -> dist index.
+    by_file: HashMap<String, usize>,
+    /// Relative directory prefix -> `Some(dist_idx)` when unique, `None` when shared (PEP 420 namespace).
+    by_dir: HashMap<String, Option<usize>>,
+    /// Normalized distribution name -> dist index (fallback when RECORD omits files).
+    by_norm_dist: HashMap<String, usize>,
+}
+
+impl SiteRootIndex {
+    fn build(root: &Path) -> Self {
+        let mut index = Self {
+            dists: Vec::new(),
+            by_file: HashMap::new(),
+            by_dir: HashMap::new(),
+            by_norm_dist: HashMap::new(),
+        };
+        let Ok(entries) = fs::read_dir(root) else {
+            return index;
+        };
+        let mut dist_dirs: Vec<PathBuf> = entries
+            .flatten()
+            .filter_map(|e| {
+                let fname = e.file_name();
+                fname
+                    .to_str()
+                    .is_some_and(|s| s.ends_with(".dist-info"))
+                    .then(|| e.path())
+            })
+            .collect();
+        dist_dirs.sort();
+
+        for dist_info in dist_dirs {
+            let Ok(meta_text) = fs::read_to_string(dist_info.join("METADATA")) else {
+                continue;
+            };
+            let Some((name, ver)) = parse_dist_info_metadata(&meta_text) else {
+                continue;
+            };
+            let record_bytes = fs::read(dist_info.join("RECORD")).ok();
+            let fp = if let Some(bytes) = &record_bytes {
+                fingerprint_from_record_bytes(&dist_info, bytes)
+            } else {
+                package_content_fingerprint(&dist_info)
+            };
+            let dist_idx = index.dists.len();
+            index
+                .by_norm_dist
+                .entry(normalize_dist_name(&name))
+                .or_insert(dist_idx);
+            if let Some(fname) = dist_info.file_name().and_then(|n| n.to_str()) {
+                let stem = fname.trim_end_matches(".dist-info");
+                let dist_stem = stem.split('-').next().unwrap_or(stem);
+                index
+                    .by_norm_dist
+                    .entry(normalize_dist_name(dist_stem))
+                    .or_insert(dist_idx);
+            }
+            index.dists.push((name, ver, fp));
+
+            if let Some(bytes) = &record_bytes
+                && let Ok(record_text) = std::str::from_utf8(bytes)
+            {
+                for raw_line in record_text.lines() {
+                    let rel = raw_line.split(',').next().unwrap_or("").trim();
+                    let rel = rel.trim_matches('"');
+                    if rel.is_empty()
+                        || rel.starts_with("..")
+                        || rel.contains(".dist-info/")
+                        || rel.ends_with(".pyc")
+                    {
+                        continue;
+                    }
+                    let rel_norm = if rel.contains('\\') {
+                        rel.replace('\\', "/")
+                    } else {
+                        rel.to_string()
+                    };
+                    if rel_norm.ends_with(".py") {
+                        index.by_file.entry(rel_norm.clone()).or_insert(dist_idx);
+                    }
+                    let mut cur = rel_norm.as_str();
+                    while let Some((parent, _)) = cur.rsplit_once('/') {
+                        if parent.is_empty() {
+                            break;
+                        }
+                        index.record_dir(parent, dist_idx);
+                        cur = parent;
+                    }
+                }
+            }
+
+            if let Ok(top_text) = fs::read_to_string(dist_info.join("top_level.txt")) {
+                for line in top_text.lines() {
+                    let top = line.trim().trim_matches('/');
+                    if top.is_empty() {
+                        continue;
+                    }
+                    index.record_dir(top, dist_idx);
+                    index.by_file.entry(format!("{top}.py")).or_insert(dist_idx);
+                }
+            }
+        }
+        index
+    }
+
+    fn record_dir(&mut self, dir: &str, dist_idx: usize) {
+        match self.by_dir.get_mut(dir) {
+            None => {
+                self.by_dir.insert(dir.to_string(), Some(dist_idx));
+            }
+            Some(slot @ Some(_)) => {
+                if *slot != Some(dist_idx) {
+                    *slot = None;
+                }
+            }
+            Some(None) => {}
+        }
+    }
+
+    fn lookup(&self, rest: &str) -> Option<&PackageMetaTriple> {
+        if let Some(&idx) = self.by_file.get(rest) {
+            return Some(&self.dists[idx]);
+        }
+        let mut cur = rest;
+        while let Some((parent, _)) = cur.rsplit_once('/') {
+            if parent.is_empty() {
+                break;
+            }
+            match self.by_dir.get(parent) {
+                Some(Some(idx)) => return Some(&self.dists[*idx]),
+                Some(None) => {
+                    // Ambiguous namespace directory (e.g. `google`): do not match by top-level stem.
+                    return None;
+                }
+                None => {}
+            }
+            cur = parent;
+        }
+        let stem = match rest.split_once('/') {
+            Some((top, _)) => top,
+            None => rest.strip_suffix(".py").unwrap_or(rest),
+        };
+        if matches!(self.by_dir.get(stem), Some(None)) {
+            return None;
+        }
+        let idx = *self.by_norm_dist.get(&normalize_dist_name(stem))?;
+        Some(&self.dists[idx])
+    }
+}
+
+fn fingerprint_from_record_bytes(dist_info: &Path, bytes: &[u8]) -> String {
+    let mut blob = Vec::with_capacity(bytes.len() + 32);
+    blob.extend_from_slice(b"RECORD:");
+    blob.extend_from_slice(bytes);
+    if let Ok(meta) = fs::metadata(dist_info) {
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        blob.extend_from_slice(format!("|DI:{mtime}").as_bytes());
+    }
+    short_hash(&blob)
+}
+
+/// Per-scan memo and pre-built site-packages index for package meta lookups.
 ///
-/// Without memoization, `meta_for_path` would re-`read_dir` and fingerprint on
-/// every call site, which dominates wall and sys time on a large venv. Owned by
-/// the scan context — never process-global — so concurrent scans cannot share
-/// or clobber state.
-#[derive(Debug, Default)]
+/// Pre-indexing active `site-packages` directories once per scan avoids
+/// repeated `read_dir` and `RECORD` reads across Pass-2 worker threads while
+/// accurately resolving PEP 420 namespace packages (`google.*`), renamed wheels
+/// (`PyYAML` -> `yaml`), and single-file modules (`six.py`). Owned per scan —
+/// never process-global — so concurrent scans cannot clobber state.
+#[derive(Debug, Default, Clone)]
 pub struct PackageMetaMemo {
-    map: HashMap<PackageMetaKey, PackageMetaValue>,
+    preindexed: Arc<HashMap<String, SiteRootIndex>>,
+    dynamic_roots: HashMap<String, SiteRootIndex>,
+    fallback_map: HashMap<(String, String), Option<PackageMetaTriple>>,
+    #[cfg(test)]
+    queried_keys: std::collections::HashSet<(String, String)>,
 }
 
 impl PackageMetaMemo {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Pre-index known `site-packages` / `dist-packages` roots once so Pass-2
+    /// workers can fork read-only snapshots via [`Self::fork`] with zero syscalls.
+    pub fn for_site_packages(roots: &[String]) -> Self {
+        let mut map = HashMap::with_capacity(roots.len());
+        for raw in roots {
+            let norm = raw.replace('\\', "/");
+            let trimmed = norm.trim_end_matches('/').to_string();
+            let path = Path::new(raw);
+            if path.is_dir() {
+                let idx = SiteRootIndex::build(path);
+                map.insert(trimmed, idx);
+            }
+        }
+        Self {
+            preindexed: Arc::new(map),
+            dynamic_roots: HashMap::new(),
+            fallback_map: HashMap::new(),
+            #[cfg(test)]
+            queried_keys: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Cheap worker-local handle sharing the pre-built `SiteRootIndex` map.
+    pub fn fork(&self) -> Self {
+        Self {
+            preindexed: Arc::clone(&self.preindexed),
+            dynamic_roots: HashMap::new(),
+            fallback_map: HashMap::new(),
+            #[cfg(test)]
+            queried_keys: std::collections::HashSet::new(),
+        }
+    }
+
     /// Locate neighboring `*.dist-info` for a file under site-/dist-packages.
     /// Returns `(name, version, content_fingerprint)`.
-    pub fn meta_for_path(&mut self, py_path: &Path) -> Option<(String, String, String)> {
+    pub fn meta_for_path(&mut self, py_path: &Path) -> Option<PackageMetaTriple> {
         let s = py_path.to_string_lossy().replace('\\', "/");
-        let (root, rest) = match (s.find("/site-packages/"), s.find("/dist-packages/")) {
+        let (root_str, rest) = match (s.rfind("/site-packages/"), s.rfind("/dist-packages/")) {
             (Some(idx), _) => (
-                PathBuf::from(&s[..idx + "/site-packages".len()]),
+                &s[..idx + "/site-packages".len()],
                 &s[idx + "/site-packages/".len()..],
             ),
             (None, Some(idx)) => (
-                PathBuf::from(&s[..idx + "/dist-packages".len()]),
+                &s[..idx + "/dist-packages".len()],
                 &s[idx + "/dist-packages/".len()..],
             ),
             (None, None) => return None,
         };
-        let top = rest.split('/').next()?.to_string();
-        if top.is_empty() {
+        if rest.is_empty() {
             return None;
         }
-
-        let key = (root.to_string_lossy().to_string(), top.clone());
-        if let Some(cached) = self.map.get(&key) {
-            return cached.clone();
+        #[cfg(test)]
+        {
+            let top_key = rest.split('/').next().unwrap_or(rest).to_string();
+            self.queried_keys.insert((root_str.to_string(), top_key));
         }
 
-        let computed = package_meta_uncached(&root, &top);
-        self.map.insert(key, computed.clone());
+        if let Some(idx) = self.preindexed.get(root_str) {
+            if let Some(hit) = idx.lookup(rest) {
+                return Some(hit.clone());
+            }
+            return self.fallback_unpackaged(Path::new(root_str), root_str, rest);
+        }
+
+        if !self.dynamic_roots.contains_key(root_str) {
+            let built = SiteRootIndex::build(Path::new(root_str));
+            self.dynamic_roots.insert(root_str.to_string(), built);
+        }
+        if let Some(hit) = self
+            .dynamic_roots
+            .get(root_str)
+            .and_then(|idx| idx.lookup(rest))
+        {
+            return Some(hit.clone());
+        }
+        self.fallback_unpackaged(Path::new(root_str), root_str, rest)
+    }
+
+    fn fallback_unpackaged(
+        &mut self,
+        root: &Path,
+        root_str: &str,
+        rest: &str,
+    ) -> Option<PackageMetaTriple> {
+        let (key_rel, pkg_name, target_path) = match rest.split_once('/') {
+            None => {
+                let stem = rest.strip_suffix(".py").unwrap_or(rest);
+                (rest.to_string(), stem.to_string(), root.join(rest))
+            }
+            Some((top, _)) => (top.to_string(), top.to_string(), root.join(top)),
+        };
+        if pkg_name.is_empty() {
+            return None;
+        }
+        let key = (root_str.to_string(), key_rel);
+        if let Some(cached) = self.fallback_map.get(&key) {
+            return cached.clone();
+        }
+        let fp = package_content_fingerprint(&target_path);
+        let computed = Some((pkg_name, "unknown".to_string(), fp));
+        self.fallback_map.insert(key, computed.clone());
         computed
     }
 
     /// Number of memoized package keys (test seam).
     #[cfg(test)]
     pub fn len(&self) -> usize {
-        self.map.len()
+        self.queried_keys.len()
     }
 }
 
@@ -104,34 +351,6 @@ pub fn parse_dist_info_metadata(text: &str) -> Option<(String, String)> {
         }
     }
     Some((name?, version?))
-}
-
-fn package_meta_uncached(root: &Path, top: &str) -> Option<(String, String, String)> {
-    let mut entries: Vec<_> = fs::read_dir(root).ok()?.flatten().collect();
-    entries.sort_by_key(|e| e.file_name());
-    let top_norm = normalize_dist_name(top);
-    for entry in entries {
-        let fname = entry.file_name();
-        let fname = fname.to_string_lossy();
-        if !fname.ends_with(".dist-info") {
-            continue;
-        }
-        let stem = fname.trim_end_matches(".dist-info");
-        let dist_name = stem.split('-').next().unwrap_or(stem);
-        if normalize_dist_name(dist_name) != top_norm {
-            continue;
-        }
-        let dist_info = entry.path();
-        let meta_path = dist_info.join("METADATA");
-        let text = fs::read_to_string(meta_path).ok()?;
-        if let Some((name, ver)) = parse_dist_info_metadata(&text) {
-            let fp = package_content_fingerprint(&dist_info);
-            return Some((name, ver, fp));
-        }
-    }
-    let pkg_dir = root.join(top);
-    let fp = package_content_fingerprint(&pkg_dir);
-    Some((top.to_string(), "unknown".to_string(), fp))
 }
 
 fn normalize_dist_name(name: &str) -> String {
