@@ -88,20 +88,45 @@ pub fn changed_files(repo_root: &Path, git_ref: Option<&str>) -> anyhow::Result<
 
     let mut files = ChangedFiles::new();
     // Committed vs base, unstaged, and staged differences — `-U0` gives
-    // precise hunk ranges; union them per file.
+    // precise hunk ranges; union them per file. Explicit prefix + no-ext-diff
+    // protect hunk parsing from user `diff.mnemonicPrefix` / `diff.noprefix` /
+    // `diff.external` gitconfig settings.
     collect_diff_ranges(
         &repo_root,
-        &["diff", "-U0", "--diff-filter=ACMR", &base],
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            "-U0",
+            "--diff-filter=ACMR",
+            &base,
+        ],
         &mut files,
     )?;
     collect_diff_ranges(
         &repo_root,
-        &["diff", "-U0", "--diff-filter=ACMR"],
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            "-U0",
+            "--diff-filter=ACMR",
+        ],
         &mut files,
     )?;
     collect_diff_ranges(
         &repo_root,
-        &["diff", "-U0", "--diff-filter=ACMR", "--cached"],
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            "-U0",
+            "--diff-filter=ACMR",
+            "--cached",
+        ],
         &mut files,
     )?;
     let untracked = git_stdout(&repo_root, &["ls-files", "--others", "--exclude-standard"])?;
@@ -207,7 +232,7 @@ fn parse_hunk_new_side(header: &str) -> Option<(u32, u32)> {
     Some((start, count))
 }
 
-/// Keep findings/candidates whose entry or chain touches a changed file.
+/// Keep findings/candidates/advice/unused-suppressions that touch a changed line.
 ///
 /// `scan_root` is the directory that finding paths are relative to.
 /// `changed` / `repo_root` use repo-root-relative paths.
@@ -217,15 +242,29 @@ pub fn filter_report(
     scan_root: &Path,
     repo_root: &Path,
 ) -> Report {
+    let canon_repo = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.to_path_buf());
+    let mut rel_cache: HashMap<String, Option<String>> = HashMap::new();
     report
         .findings
-        .retain(|f| finding_touches(f, changed, scan_root, repo_root));
+        .retain(|f| finding_touches(f, changed, scan_root, &canon_repo, &mut rel_cache));
     report
         .candidates
-        .retain(|c| candidate_touches(c, changed, scan_root, repo_root));
+        .retain(|c| candidate_touches(c, changed, scan_root, &canon_repo, &mut rel_cache));
     report
         .advice
-        .retain(|a| advice_touches(a, changed, scan_root, repo_root));
+        .retain(|a| advice_touches(a, changed, scan_root, &canon_repo, &mut rel_cache));
+    report.unused_suppressions.retain(|u| {
+        loc_in_changed(
+            &u.file,
+            u.line,
+            changed,
+            scan_root,
+            &canon_repo,
+            &mut rel_cache,
+        )
+    });
     report
 }
 
@@ -233,31 +272,60 @@ fn finding_touches(
     f: &Finding,
     changed: &ChangedFiles,
     scan_root: &Path,
-    repo_root: &Path,
+    canon_repo: &Path,
+    rel_cache: &mut HashMap<String, Option<String>>,
 ) -> bool {
-    loc_in_changed(&f.entry.file, f.entry.line, changed, scan_root, repo_root)
-        || f.chain
-            .iter()
-            .any(|s| loc_in_changed(&s.file, s.line, changed, scan_root, repo_root))
+    loc_in_changed(
+        &f.entry.file,
+        f.entry.line,
+        changed,
+        scan_root,
+        canon_repo,
+        rel_cache,
+    ) || f
+        .chain
+        .iter()
+        .any(|s| loc_in_changed(&s.file, s.line, changed, scan_root, canon_repo, rel_cache))
 }
 
 fn candidate_touches(
     c: &Candidate,
     changed: &ChangedFiles,
     scan_root: &Path,
-    repo_root: &Path,
+    canon_repo: &Path,
+    rel_cache: &mut HashMap<String, Option<String>>,
 ) -> bool {
-    loc_in_changed(&c.entry.file, c.entry.line, changed, scan_root, repo_root)
-        || c.chain
-            .iter()
-            .any(|s| loc_in_changed(&s.file, s.line, changed, scan_root, repo_root))
+    loc_in_changed(
+        &c.entry.file,
+        c.entry.line,
+        changed,
+        scan_root,
+        canon_repo,
+        rel_cache,
+    ) || c
+        .chain
+        .iter()
+        .any(|s| loc_in_changed(&s.file, s.line, changed, scan_root, canon_repo, rel_cache))
 }
 
-fn advice_touches(a: &Advice, changed: &ChangedFiles, scan_root: &Path, repo_root: &Path) -> bool {
-    loc_in_changed(&a.entry.file, a.entry.line, changed, scan_root, repo_root)
-        || a.chain
-            .iter()
-            .any(|s| loc_in_changed(&s.file, s.line, changed, scan_root, repo_root))
+fn advice_touches(
+    a: &Advice,
+    changed: &ChangedFiles,
+    scan_root: &Path,
+    canon_repo: &Path,
+    rel_cache: &mut HashMap<String, Option<String>>,
+) -> bool {
+    loc_in_changed(
+        &a.entry.file,
+        a.entry.line,
+        changed,
+        scan_root,
+        canon_repo,
+        rel_cache,
+    ) || a
+        .chain
+        .iter()
+        .any(|s| loc_in_changed(&s.file, s.line, changed, scan_root, canon_repo, rel_cache))
 }
 
 fn loc_in_changed(
@@ -265,27 +333,32 @@ fn loc_in_changed(
     line: u32,
     changed: &ChangedFiles,
     scan_root: &Path,
-    repo_root: &Path,
+    canon_repo: &Path,
+    rel_cache: &mut HashMap<String, Option<String>>,
 ) -> bool {
-    let Some(repo_rel) = to_repo_relative(path, scan_root, repo_root) else {
+    let repo_rel = if let Some(cached) = rel_cache.get(path) {
+        cached.as_deref()
+    } else {
+        let computed = to_repo_relative(path, scan_root, canon_repo);
+        rel_cache.insert(path.to_string(), computed);
+        rel_cache.get(path).and_then(|v| v.as_deref())
+    };
+    let Some(repo_rel) = repo_rel else {
         return false;
     };
     // Exact path equality after repo-root normalization, then range match.
-    changed.get(&repo_rel).is_some_and(|r| r.contains(line))
+    changed.get(repo_rel).is_some_and(|r| r.contains(line))
 }
 
 /// Convert a finding path (relative to `scan_root`) into a repo-root-relative path.
-fn to_repo_relative(path: &str, scan_root: &Path, repo_root: &Path) -> Option<String> {
+fn to_repo_relative(path: &str, scan_root: &Path, canon_repo: &Path) -> Option<String> {
     let abs = if Path::new(path).is_absolute() {
         PathBuf::from(path)
     } else {
         scan_root.join(path)
     };
     let abs = abs.canonicalize().unwrap_or(abs);
-    let repo_root = repo_root
-        .canonicalize()
-        .unwrap_or_else(|_| repo_root.to_path_buf());
-    let rel = abs.strip_prefix(&repo_root).ok()?;
+    let rel = abs.strip_prefix(canon_repo).ok()?;
     Some(normalize_path(&rel.to_string_lossy()))
 }
 
@@ -426,6 +499,7 @@ fn candidate_base_refs(repo_root: &Path) -> Vec<String> {
 
 fn git_stdout(repo_root: &Path, args: &[&str]) -> anyhow::Result<String> {
     let output = Command::new("git")
+        .args(["-c", "core.quotepath=false"])
         .args(args)
         .current_dir(repo_root)
         .output()

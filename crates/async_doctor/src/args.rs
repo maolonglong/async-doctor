@@ -14,6 +14,22 @@ pub enum Format {
     Markdown,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq, Default)]
+pub enum FailOn {
+    /// Exit 1 when findings or unused suppressions remain (default).
+    #[default]
+    Findings,
+    /// Exit 0 even when findings remain (tool errors still exit 2).
+    None,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq, Default)]
+pub enum WhyFormat {
+    #[default]
+    Text,
+    Json,
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "async-doctor",
@@ -71,12 +87,17 @@ pub struct Cli {
     /// PR base) — prints a note and falls back to the full report.
     #[arg(
         long,
+        visible_alias = "diff",
         num_args = 0..=1,
         default_missing_value = "AUTO",
         require_equals = true,
         value_name = "GIT_REF"
     )]
     pub changed: Option<String>,
+
+    /// Exit-code policy when findings or unused suppressions remain.
+    #[arg(long, value_enum, default_value_t = FailOn::Findings, value_name = "LEVEL")]
+    pub fail_on: FailOn,
 
     /// Suppress findings whose stable ids appear in this baseline file.
     /// Exit 1 only for findings not in the baseline (new findings).
@@ -110,6 +131,9 @@ pub enum Command {
         /// Project directory or `.py` file to scan (default: current directory).
         #[arg(long, default_value = ".")]
         path: PathBuf,
+        /// Output format (`text` or `json`).
+        #[arg(long, value_enum, default_value_t = WhyFormat::Text)]
+        format: WhyFormat,
         /// Include non-production entries while locating the site.
         #[arg(long)]
         include_non_production: bool,

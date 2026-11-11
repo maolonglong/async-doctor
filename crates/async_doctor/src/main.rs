@@ -24,7 +24,7 @@ use anyhow::{Context, bail};
 use async_doctor_core::{AnalyzeOptions, EXIT_ERROR, EXIT_OK, Report};
 use clap::Parser;
 
-use args::{Cli, Command, Format};
+use args::{Cli, Command, FailOn, Format};
 use changed::ChangedSet;
 use paths::{cli_path_arg, resolve_cli_path};
 
@@ -45,9 +45,16 @@ fn run() -> anyhow::Result<ExitCode> {
         Some(Command::Why {
             location,
             path,
+            format,
             include_non_production,
             show_unresolved,
-        }) => help_cmd::run_why(&location, &path, include_non_production, show_unresolved),
+        }) => help_cmd::run_why(
+            &location,
+            &path,
+            format,
+            include_non_production,
+            show_unresolved,
+        ),
         Some(Command::InstallSkill { path, force }) => skill_cmd::run_install_skill(&path, force),
         None => run_scan(cli),
     }
@@ -56,7 +63,7 @@ fn run() -> anyhow::Result<ExitCode> {
 fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
     if cli.write_baseline.is_some() && cli.changed.is_some() {
         bail!(
-            "--write-baseline cannot be combined with --changed \
+            "--write-baseline cannot be combined with --changed / --diff \
              (would write an incomplete baseline); omit --changed, or write \
              the baseline from a full scan first"
         );
@@ -90,8 +97,9 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
         path.clone()
     };
     let scan_root = dunce::canonicalize(&scan_root).unwrap_or(scan_root);
+    let single_file = path.is_file().then_some(path.as_path());
 
-    let suppress_out = suppress::apply(report, &scan_root)?;
+    let suppress_out = suppress::apply_scoped(report, &scan_root, single_file)?;
     for m in &suppress_out.missing_reason {
         eprintln!(
             "warning: {}:{}: `# async-doctor: ignore[{}]` requires a reason \
@@ -209,25 +217,40 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
         }
     }
 
-    if writing_baseline {
+    if writing_baseline || matches!(cli.fail_on, FailOn::None) {
         return Ok(ExitCode::from(EXIT_OK as u8));
     }
 
     Ok(ExitCode::from(exit_code as u8))
 }
 
+pub(crate) fn extract_why_locator(why: &str) -> Option<&str> {
+    let rest = why.strip_prefix("async-doctor why ")?.trim();
+    let loc = rest
+        .split_once(" --path ")
+        .map(|(l, _)| l)
+        .unwrap_or(rest)
+        .trim();
+    let loc = loc
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .or_else(|| loc.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+        .unwrap_or(loc);
+    (!loc.is_empty() && loc.contains(':')).then_some(loc)
+}
+
 pub(crate) fn rewrite_why_commands(report: &mut Report, scan_path: &Path) {
     let path_arg = cli_path_arg(scan_path);
     let rewrite = |why: &mut String| {
-        let Some(rest) = why.strip_prefix("async-doctor why ") else {
+        let Some(loc) = extract_why_locator(why) else {
             return;
         };
-        let loc = rest.split_whitespace().next().unwrap_or(rest);
-        // Skip empty / non-locator why strings (location-less candidates omit why).
-        if why.is_empty() || !loc.contains(':') {
-            return;
-        }
-        *why = format!("async-doctor why {loc} --path {path_arg}");
+        let loc_arg = if loc.chars().any(|c| c.is_whitespace()) {
+            format!("\"{loc}\"")
+        } else {
+            loc.to_string()
+        };
+        *why = format!("async-doctor why {loc_arg} --path {path_arg}");
     };
     for f in &mut report.findings {
         rewrite(&mut f.why);

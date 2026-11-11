@@ -21,7 +21,7 @@ CLI flags: [cli.md](cli.md).
 | `chain[]` | shortest evidence chain (`file`, `line`, `text`) |
 | `conditions[]` | prove-only tags (see below) |
 | `fix` | hint + `fixGroupId` (shared across same root cause) |
-| `why` | runnable `async-doctor why file:line --path <cwd-relative>`; empty on location-less entries |
+| `why` | runnable `async-doctor why file:line --path <cwd-relative>` (locations with spaces are quoted); empty on location-less entries. Running `async-doctor why <file:line> --format json` emits `{ schemaVersion, location: { file, line }, findings, candidates, advice, rules }` after applying inline suppressions |
 
 ## Condition tags
 
@@ -46,14 +46,16 @@ Home for exit-code semantics (elsewhere link here):
 
 | Code | Meaning |
 | --- | --- |
-| `0` | No findings and no unused suppressions |
+| `0` | No findings and no unused suppressions (or `--fail-on none`) |
 | `1` | Findings present (even if analysis is incomplete) and/or unused suppressions |
 | `2` | Tool error only |
 
 Incomplete analysis sets `complete=false` plus `skipped` / a stderr warning —
-**not** exit 2. Candidates and advice never affect the exit code.
-`async-doctor why file:line` returns `1` when the location matches any finding
-(candidates/advice alone stay `0`), and `2` on tool errors.
+**not** exit 2. Candidates and advice never affect the exit code. `--fail-on none`
+forces exit `0` on findings/unused suppressions while keeping exit `2` for tool
+errors. `async-doctor why file:line` (both text and `--format json`) applies
+inline suppressions first, returns `1` when the location matches any active
+finding (candidates/advice alone stay `0`), and `2` on tool errors.
 
 **Environment note policy:** no project venv and zero unresolved third-party →
 silent. No project venv with unresolved third-party → activate/`VIRTUAL_ENV`

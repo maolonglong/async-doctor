@@ -6,6 +6,7 @@
 //! Third-party hops use the real absolute `file://` path of the resolved
 //! site-packages file (never `file://<scan-root>/site-packages/...` fakes).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use async_doctor_core::{ChainStep, Report};
@@ -28,79 +29,51 @@ pub fn report_to_sarif(report: &Report, scan_root: &Path, src_root: &Path) -> Va
         .canonicalize()
         .unwrap_or_else(|_| src_root.to_path_buf());
     let site_roots = discover_site_packages_roots(&scan_root);
+    let mut loc_cache: HashMap<(String, bool), Option<ArtifactUri>> = HashMap::new();
 
     let mut rules = Vec::new();
-    let mut seen_rules = std::collections::BTreeSet::new();
-    for f in &report.findings {
-        if seen_rules.insert(f.rule.clone()) {
-            let (name, short) = rule_display(&f.rule);
-            let help_uri = if f.docs_url.is_empty() {
-                format!(
-                    "https://github.com/maolonglong/async-doctor/blob/main/docs/rules.md{}",
-                    f.docs_anchor
-                )
-            } else {
-                f.docs_url.clone()
-            };
-            rules.push(json!({
-                "id": f.rule,
-                "name": name,
-                "shortDescription": { "text": short },
-                "fullDescription": {
-                    "text": f.fix.hint,
-                },
-                "helpUri": help_uri,
-                "help": {
-                    "text": format!(
-                        "{}\n\nExplain: async-doctor explain {}\n{}",
-                        f.fix.hint, f.rule, f.why
-                    )
-                },
-                "defaultConfiguration": { "level": "error" },
-            }));
+    let mut rule_indices: HashMap<String, usize> = HashMap::new();
+    let mut ensure_rule = |rule_id: &str, default_level: &str| -> usize {
+        if let Some(&idx) = rule_indices.get(rule_id) {
+            return idx;
         }
+        let idx = rules.len();
+        rule_indices.insert(rule_id.to_string(), idx);
+        rules.push(build_rule_descriptor(rule_id, default_level));
+        idx
+    };
+
+    for f in &report.findings {
+        ensure_rule(&f.rule, "error");
     }
     for a in &report.advice {
-        if seen_rules.insert(a.rule.clone()) {
-            let (name, short) = rule_display(&a.rule);
-            let help_uri = if a.docs_url.is_empty() {
-                format!(
-                    "https://github.com/maolonglong/async-doctor/blob/main/docs/rules.md{}",
-                    a.docs_anchor
-                )
-            } else {
-                a.docs_url.clone()
-            };
-            rules.push(json!({
-                "id": a.rule,
-                "name": name,
-                "shortDescription": { "text": short },
-                "fullDescription": {
-                    "text": a.fix.hint,
-                },
-                "helpUri": help_uri,
-                "help": {
-                    "text": format!(
-                        "{}\n\nExplain: async-doctor explain {}\n{}",
-                        a.fix.hint, a.rule, a.why
-                    )
-                },
-                "defaultConfiguration": { "level": "note" },
-            }));
-        }
+        ensure_rule(&a.rule, "note");
     }
 
     let mut results = Vec::new();
     for f in &report.findings {
-        let entry_loc = in_repo_location(&f.entry.file, false, &scan_root, &src_root, &site_roots);
+        let rule_idx = ensure_rule(&f.rule, "error");
+        let entry_loc = in_repo_location_cached(
+            &f.entry.file,
+            false,
+            &scan_root,
+            &src_root,
+            &site_roots,
+            &mut loc_cache,
+        );
         let (prim_file, prim_line, prim_third) = f
             .chain
             .first()
             .map(|s| (s.file.as_str(), s.line, s.third_party))
             .unwrap_or((f.entry.file.as_str(), f.entry.line, false));
-        let Some(prim_loc) =
-            in_repo_location(prim_file, prim_third, &scan_root, &src_root, &site_roots)
-        else {
+        let Some(prim_loc) = in_repo_location_cached(
+            prim_file,
+            prim_third,
+            &scan_root,
+            &src_root,
+            &site_roots,
+            &mut loc_cache,
+        ) else {
             // Should not happen for first-party primary locations.
             continue;
         };
@@ -120,7 +93,9 @@ pub fn report_to_sarif(report: &Report, scan_root: &Path, src_root: &Path) -> Va
             }));
         }
         for step in &f.chain {
-            if let Some(loc) = step_location(step, &scan_root, &src_root, &site_roots) {
+            if let Some(loc) =
+                step_location(step, &scan_root, &src_root, &site_roots, &mut loc_cache)
+            {
                 thread_locations.push(json!({
                     "location": physical_location(&loc, step.line, &step.text)
                 }));
@@ -129,6 +104,7 @@ pub fn report_to_sarif(report: &Report, scan_root: &Path, src_root: &Path) -> Va
 
         results.push(json!({
             "ruleId": f.rule,
+            "ruleIndex": rule_idx,
             "level": "error",
             "message": {
                 "text": format!(
@@ -151,15 +127,28 @@ pub fn report_to_sarif(report: &Report, scan_root: &Path, src_root: &Path) -> Va
     }
 
     for a in &report.advice {
-        let entry_loc = in_repo_location(&a.entry.file, false, &scan_root, &src_root, &site_roots);
+        let rule_idx = ensure_rule(&a.rule, "note");
+        let entry_loc = in_repo_location_cached(
+            &a.entry.file,
+            false,
+            &scan_root,
+            &src_root,
+            &site_roots,
+            &mut loc_cache,
+        );
         let (prim_file, prim_line, prim_third) = a
             .chain
             .first()
             .map(|s| (s.file.as_str(), s.line, s.third_party))
             .unwrap_or((a.entry.file.as_str(), a.entry.line, false));
-        let Some(prim_loc) =
-            in_repo_location(prim_file, prim_third, &scan_root, &src_root, &site_roots)
-        else {
+        let Some(prim_loc) = in_repo_location_cached(
+            prim_file,
+            prim_third,
+            &scan_root,
+            &src_root,
+            &site_roots,
+            &mut loc_cache,
+        ) else {
             continue;
         };
 
@@ -178,7 +167,9 @@ pub fn report_to_sarif(report: &Report, scan_root: &Path, src_root: &Path) -> Va
             }));
         }
         for step in &a.chain {
-            if let Some(loc) = step_location(step, &scan_root, &src_root, &site_roots) {
+            if let Some(loc) =
+                step_location(step, &scan_root, &src_root, &site_roots, &mut loc_cache)
+            {
                 thread_locations.push(json!({
                     "location": physical_location(&loc, step.line, &step.text)
                 }));
@@ -187,6 +178,7 @@ pub fn report_to_sarif(report: &Report, scan_root: &Path, src_root: &Path) -> Va
 
         results.push(json!({
             "ruleId": a.rule,
+            "ruleIndex": rule_idx,
             "level": "note",
             "message": {
                 "text": format!(
@@ -237,19 +229,40 @@ pub fn report_to_sarif(report: &Report, scan_root: &Path, src_root: &Path) -> Va
     })
 }
 
-fn rule_display(rule: &str) -> (String, String) {
-    if let Some(doc) = rule_doc(rule) {
-        (doc.title.to_string(), doc.summary.to_string())
+fn build_rule_descriptor(rule_id: &str, default_level: &str) -> Value {
+    if let Some(doc) = rule_doc(rule_id) {
+        json!({
+            "id": rule_id,
+            "name": doc.title,
+            "shortDescription": { "text": doc.summary },
+            "fullDescription": { "text": doc.body },
+            "helpUri": doc.docs_url(),
+            "help": {
+                "text": format!(
+                    "{}\n\nFix:\n{}\n\nExplain: async-doctor explain {}",
+                    doc.body, doc.fix, rule_id
+                )
+            },
+            "defaultConfiguration": { "level": default_level },
+        })
     } else {
-        (
-            format!("Blocking IO ({rule})"),
-            format!("Blocking IO: {rule}"),
-        )
+        json!({
+            "id": rule_id,
+            "name": format!("Blocking IO ({rule_id})"),
+            "shortDescription": { "text": format!("Blocking IO: {rule_id}") },
+            "fullDescription": { "text": format!("Blocking IO detected for rule `{rule_id}`.") },
+            "helpUri": format!("https://github.com/maolonglong/async-doctor/blob/main/docs/rules.md#{rule_id}"),
+            "help": {
+                "text": format!("Explain: async-doctor explain {rule_id}")
+            },
+            "defaultConfiguration": { "level": default_level },
+        })
     }
 }
 
+#[derive(Clone)]
 enum ArtifactUri {
-    /// Relative to `%SRCROOT%`.
+    /// Relative to `%SRCROOT%` (RFC 3986 percent-encoded path).
     RepoRelative(String),
     /// Absolute `file://` URI (third-party / outside the repo).
     AbsoluteFile(String),
@@ -260,14 +273,33 @@ fn step_location(
     scan_root: &Path,
     src_root: &Path,
     site_roots: &[PathBuf],
+    loc_cache: &mut HashMap<(String, bool), Option<ArtifactUri>>,
 ) -> Option<ArtifactUri> {
-    in_repo_location(
+    in_repo_location_cached(
         &step.file,
         step.third_party,
         scan_root,
         src_root,
         site_roots,
+        loc_cache,
     )
+}
+
+fn in_repo_location_cached(
+    path: &str,
+    third_party: bool,
+    scan_root: &Path,
+    src_root: &Path,
+    site_roots: &[PathBuf],
+    loc_cache: &mut HashMap<(String, bool), Option<ArtifactUri>>,
+) -> Option<ArtifactUri> {
+    let key = (path.to_string(), third_party);
+    if let Some(cached) = loc_cache.get(&key) {
+        return cached.clone();
+    }
+    let resolved = in_repo_location(path, third_party, scan_root, src_root, site_roots);
+    loc_cache.insert(key, resolved.clone());
+    resolved
 }
 
 fn in_repo_location(
@@ -295,7 +327,7 @@ fn in_repo_location(
             if rel.contains("site-packages/") || rel.contains("dist-packages/") {
                 Some(ArtifactUri::AbsoluteFile(file_uri_file(&abs)))
             } else {
-                Some(ArtifactUri::RepoRelative(rel))
+                Some(ArtifactUri::RepoRelative(percent_encode_uri_path(&rel)))
             }
         }
         Err(_) => Some(ArtifactUri::AbsoluteFile(file_uri_file(&abs))),
@@ -353,36 +385,44 @@ fn discover_site_packages_roots(scan_root: &Path) -> Vec<PathBuf> {
     push(scan_root.join("site-packages"));
     push(scan_root.join("dist-packages"));
 
-    if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
-        let venv = PathBuf::from(venv);
-        if let Ok(lib) = std::fs::read_dir(venv.join("lib")) {
-            for ent in lib.flatten() {
-                let name = ent.file_name();
-                let name = name.to_string_lossy();
-                if name.starts_with("python") {
-                    push(ent.path().join("site-packages"));
-                    push(ent.path().join("dist-packages"));
-                }
-            }
-        }
-    }
-
-    // Walk scan_root (and a few parents) for .venv/venv layouts.
-    let mut cursor = Some(scan_root.to_path_buf());
-    for _ in 0..4 {
-        let Some(dir) = cursor else { break };
-        for venv_name in [".venv", "venv"] {
-            let lib = dir.join(venv_name).join("lib");
-            if let Ok(rd) = std::fs::read_dir(&lib) {
-                for ent in rd.flatten() {
-                    let name = ent.file_name();
-                    let name = name.to_string_lossy();
-                    if name.starts_with("python") {
-                        push(ent.path().join("site-packages"));
-                        push(ent.path().join("dist-packages"));
+    for env_key in ["VIRTUAL_ENV", "CONDA_PREFIX"] {
+        if let Ok(venv) = std::env::var(env_key) {
+            let venv = PathBuf::from(venv);
+            for lib_dir in ["lib", "lib64"] {
+                if let Ok(lib) = std::fs::read_dir(venv.join(lib_dir)) {
+                    for ent in lib.flatten() {
+                        let name = ent.file_name();
+                        let name = name.to_string_lossy();
+                        if name.starts_with("python") {
+                            push(ent.path().join("site-packages"));
+                            push(ent.path().join("dist-packages"));
+                        }
                     }
                 }
             }
+            push(venv.join("Lib/site-packages"));
+        }
+    }
+
+    // Walk scan_root (and ancestors) for .venv/venv layouts.
+    let mut cursor = Some(scan_root.to_path_buf());
+    for _ in 0..8 {
+        let Some(dir) = cursor else { break };
+        for venv_name in [".venv", "venv"] {
+            for lib_dir in ["lib", "lib64"] {
+                let lib = dir.join(venv_name).join(lib_dir);
+                if let Ok(rd) = std::fs::read_dir(&lib) {
+                    for ent in rd.flatten() {
+                        let name = ent.file_name();
+                        let name = name.to_string_lossy();
+                        if name.starts_with("python") {
+                            push(ent.path().join("site-packages"));
+                            push(ent.path().join("dist-packages"));
+                        }
+                    }
+                }
+            }
+            push(dir.join(venv_name).join("Lib/site-packages"));
         }
         // Also a project-local site-packages (fixtures).
         push(dir.join("site-packages"));
@@ -390,6 +430,27 @@ fn discover_site_packages_roots(scan_root: &Path) -> Vec<PathBuf> {
         cursor = dir.parent().map(Path::to_path_buf);
     }
 
+    out
+}
+
+/// Percent-encode non-unreserved bytes in a `/` path per RFC 3986 while
+/// keeping `/` separators and Windows drive colons (`/C:/...`) intact.
+fn percent_encode_uri_path(path: &str) -> String {
+    let bytes = path.as_bytes();
+    let mut out = String::with_capacity(bytes.len());
+    for (idx, &b) in bytes.iter().enumerate() {
+        let is_windows_drive_colon = b == b':'
+            && ((idx == 1 && bytes[0].is_ascii_alphabetic())
+                || (idx == 2 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic()));
+        if b.is_ascii_alphanumeric()
+            || matches!(b, b'-' | b'.' | b'_' | b'~' | b'/')
+            || is_windows_drive_colon
+        {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
     out
 }
 
@@ -402,7 +463,7 @@ fn file_uri_dir(path: &Path) -> String {
     if !s.ends_with('/') {
         s.push('/');
     }
-    format!("file://{s}")
+    format!("file://{}", percent_encode_uri_path(&s))
 }
 
 fn file_uri_file(path: &Path) -> String {
@@ -411,7 +472,7 @@ fn file_uri_file(path: &Path) -> String {
     if !s.starts_with('/') {
         s = format!("/{s}");
     }
-    format!("file://{s}")
+    format!("file://{}", percent_encode_uri_path(&s))
 }
 
 fn physical_location(uri: &ArtifactUri, line: u32, message: &str) -> Value {

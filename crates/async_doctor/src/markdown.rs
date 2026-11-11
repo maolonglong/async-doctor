@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::time::Duration;
 
-use async_doctor_core::{EnvironmentKind, Finding, Report, summarize_sink_sites};
+use async_doctor_core::{EnvironmentKind, Finding, Report, SinkSiteSummary, summarize_sink_sites};
 
 use crate::paths::display_fs_path;
 use crate::text::{entry_headline, sink_label};
@@ -39,16 +39,18 @@ fn write_markdown_to(
         return Ok(());
     }
 
+    let total_findings = report.findings.len() + report.omitted_findings as usize;
+    let total_advice = report.advice.len() + report.omitted_advice as usize;
     writeln!(
         out,
         "| Metric | Value |\n| --- | --- |\n| **Score** | **{} / 100** ({}) |\n| **Findings** | {} |\n| **Advice** | {} |\n",
         report.score,
         report.score_label(),
-        report.findings.len(),
-        report.advice.len(),
+        total_findings,
+        total_advice,
     )?;
 
-    if report.findings.is_empty() {
+    if report.findings.is_empty() && report.omitted_findings == 0 {
         write!(out, "**No findings.**")?;
         let mut parts = Vec::new();
         if opts.suppressed_by_baseline > 0 {
@@ -68,7 +70,7 @@ fn write_markdown_to(
         }
         writeln!(out, "\n")?;
     } else {
-        write_findings_section(out, &report.findings)?;
+        write_findings_section(out, report)?;
     }
 
     if !report.advice.is_empty() {
@@ -152,32 +154,49 @@ fn write_env_line(out: &mut impl Write, report: &Report) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn write_findings_section(out: &mut impl Write, findings: &[Finding]) -> anyhow::Result<()> {
-    let sites = summarize_sink_sites(findings);
+fn write_findings_section(out: &mut impl Write, report: &Report) -> anyhow::Result<()> {
+    let findings = &report.findings;
+    let computed_sites;
+    let sites: &[SinkSiteSummary] = if !report.sink_sites.is_empty() {
+        &report.sink_sites
+    } else {
+        computed_sites = summarize_sink_sites(findings);
+        &computed_sites
+    };
     let mut groups: BTreeMap<&str, Vec<&Finding>> = BTreeMap::new();
+    let mut all_group_ids: BTreeSet<&str> = sites.iter().map(|s| s.fix_group_id.as_str()).collect();
     let mut entries: BTreeSet<(&str, &str)> = BTreeSet::new();
     for f in findings {
         groups
             .entry(f.fix.fix_group_id.as_str())
             .or_default()
             .push(f);
+        all_group_ids.insert(f.fix.fix_group_id.as_str());
         entries.insert((f.entry.file.as_str(), f.entry.name.as_str()));
     }
 
-    let entry_s = if entries.len() == 1 { "y" } else { "ies" };
+    let total_findings = findings.len() + report.omitted_findings as usize;
+    let max_site_entries = sites
+        .iter()
+        .map(|s| s.entry_count as usize)
+        .max()
+        .unwrap_or(0);
+    let total_entries = entries.len().max(max_site_entries);
+    let total_groups = all_group_ids.len();
+    let entry_s = if total_entries == 1 { "y" } else { "ies" };
     let site_s = if sites.len() == 1 { "" } else { "s" };
-    let finding_s = if findings.len() == 1 { "" } else { "s" };
-    let group_s = if groups.len() == 1 { "" } else { "s" };
+    let finding_s = if total_findings == 1 { "" } else { "s" };
+    let group_s = if total_groups == 1 { "" } else { "s" };
     writeln!(
         out,
         "Found **{}** sink site{} · **{}** finding{} · **{}** entr{} · **{}** fix group{}\n",
         sites.len(),
         site_s,
-        findings.len(),
+        total_findings,
         finding_s,
-        entries.len(),
+        total_entries,
         entry_s,
-        groups.len(),
+        total_groups,
         group_s
     )?;
 

@@ -65,7 +65,7 @@ pub fn write_report(report: &Report, opts: TextOptions) -> anyhow::Result<()> {
             write_finding_styled(&mut out, finding, &pal)?;
         }
     } else {
-        grouped::write_grouped(&mut out, &report.findings, &pal)?;
+        grouped::write_grouped(&mut out, report, &pal)?;
     }
 
     write_advice_section(&mut out, report, opts.expand)?;

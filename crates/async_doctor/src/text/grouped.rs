@@ -3,7 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
-use async_doctor_core::{Finding, SinkSiteSummary, group_choke_point, summarize_sink_sites};
+use async_doctor_core::{
+    Finding, Report, SinkSiteSummary, group_choke_point, summarize_sink_sites,
+};
 
 use super::style::Palette;
 use super::{sink_label, write_finding_indented};
@@ -12,11 +14,19 @@ const TOP_CLUSTERS_SHOWN: usize = 8;
 
 pub(super) fn write_grouped(
     out: &mut impl Write,
-    findings: &[Finding],
+    report: &Report,
     pal: &Palette,
 ) -> anyhow::Result<()> {
-    let sites = summarize_sink_sites(findings);
+    let findings = &report.findings;
+    let computed_sites;
+    let sites: &[SinkSiteSummary] = if !report.sink_sites.is_empty() {
+        &report.sink_sites
+    } else {
+        computed_sites = summarize_sink_sites(findings);
+        &computed_sites
+    };
     let mut groups: BTreeMap<&str, Vec<&Finding>> = BTreeMap::new();
+    let mut all_group_ids: BTreeSet<&str> = sites.iter().map(|s| s.fix_group_id.as_str()).collect();
     let mut entries: BTreeSet<(&str, &str)> = BTreeSet::new();
     let mut sink_labels: BTreeSet<&str> = BTreeSet::new();
     for f in findings {
@@ -24,6 +34,7 @@ pub(super) fn write_grouped(
             .entry(f.fix.fix_group_id.as_str())
             .or_default()
             .push(f);
+        all_group_ids.insert(f.fix.fix_group_id.as_str());
         entries.insert((f.entry.file.as_str(), f.entry.name.as_str()));
         if let Some(sink) = sink_label(f) {
             sink_labels.insert(sink);
@@ -31,24 +42,32 @@ pub(super) fn write_grouped(
     }
 
     let unique_sites = sites.len();
+    let total_findings = findings.len() + report.omitted_findings as usize;
+    let max_site_entries = sites
+        .iter()
+        .map(|s| s.entry_count as usize)
+        .max()
+        .unwrap_or(0);
+    let total_entries = entries.len().max(max_site_entries);
+    let total_groups = all_group_ids.len();
     let b = pal.bold;
     let dim = pal.dim;
     // Lead with distinct sink sites (the actionable unit), then findings
     // (entry × sink paths), so totals are not mistaken for site counts.
-    let entry_s = if entries.len() == 1 { "y" } else { "ies" };
+    let entry_s = if total_entries == 1 { "y" } else { "ies" };
     let site_s = if unique_sites == 1 { "" } else { "s" };
-    let finding_s = if findings.len() == 1 { "" } else { "s" };
-    let group_s = if groups.len() == 1 { "" } else { "s" };
+    let finding_s = if total_findings == 1 { "" } else { "s" };
+    let group_s = if total_groups == 1 { "" } else { "s" };
     writeln!(
         out,
         "{b}Found {} sink site{} · {} finding{} · {} entr{} · {} fix group{}{b:#}\n",
         unique_sites,
         site_s,
-        findings.len(),
+        total_findings,
         finding_s,
-        entries.len(),
+        total_entries,
         entry_s,
-        groups.len(),
+        total_groups,
         group_s
     )?;
     writeln!(
@@ -57,7 +76,7 @@ pub(super) fn write_grouped(
     )?;
 
     let mut sites_by_group: BTreeMap<&str, Vec<&SinkSiteSummary>> = BTreeMap::new();
-    for s in &sites {
+    for s in sites {
         sites_by_group
             .entry(s.fix_group_id.as_str())
             .or_default()

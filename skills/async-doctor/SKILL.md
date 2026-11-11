@@ -25,20 +25,20 @@ resolve — without it, findings silently drop because site-packages follow cann
 see project dependencies. Then run:
 
 ```bash
-uvx async-doctor --changed
+uvx async-doctor --changed        # or: uvx async-doctor --diff
 ```
 
 (`uvx` fetches the package from PyPI; an already-installed `async-doctor` on
-`PATH` works the same.) `--changed` reports only findings whose async entry or
-a chain hop line touches lines changed since the merge-base, including
+`PATH` works the same.) `--changed` (`--diff`) reports only findings whose async
+entry or a chain hop line touches lines changed since the merge-base, including
 uncommitted and untracked files — it is a regression check, not a full audit.
 
 Fix every **finding** before finishing. Candidates and advice do not fail the
-exit code; findings do.
+exit code; findings do (unless `--fail-on none` is passed for advisory runs).
 
 | Exit | Meaning |
 | ---- | ------- |
-| 0 | Clean (no findings / no new findings vs baseline) |
+| 0 | Clean (no findings / no new findings vs baseline, or `--fail-on none`) |
 | 1 | Findings (or unused suppressions) |
 | 2 | Tool error |
 
@@ -74,6 +74,7 @@ async-doctor explain offload-has-async-twin
 async-doctor explain nested-event-loop
 async-doctor explain offload-coroutine
 async-doctor why path/to/file.py:42 --path .
+async-doctor why path/to/file.py:42 --path . --format json
 ```
 
 ### Advice: `offload-has-async-twin` / `dangling-task`
