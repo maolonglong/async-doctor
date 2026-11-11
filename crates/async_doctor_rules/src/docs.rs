@@ -73,13 +73,15 @@ Use asyncio helpers / `aiosmtplib`, or run the sync call in a worker thread.",
     },
     RuleDoc {
         id: "blocking-http",
-        title: "Blocking HTTP client",
-        summary: "Sync HTTP (`urllib`, `requests`, sync `httpx`) blocks the loop.",
+        title: "Blocking HTTP / RPC / cloud client",
+        summary: "Sync HTTP, RPC, messaging, and cloud/AI SDKs (`urllib`, `requests`, sync `httpx`, `boto3`, `openai`, `anthropic`, `elasticsearch`, `kafka`, sync `grpc`) block the loop.",
         body: "\
-HTTP round-trips are often tens to hundreds of milliseconds. A sync client holds\n\
-the loop for the whole wait. Switch to an async client, or offload the call.",
+Network and service round-trips are often tens to hundreds of milliseconds. Sync\n\
+HTTP clients, RPC stubs, and cloud/AI/search/messaging SDKs hold the event loop\n\
+for the whole wait. Switch to the async client twin, or offload the call.",
         fix: "\
-- Use `httpx.AsyncClient`, `aiohttp`, or another async HTTP API.\n\
+- Use `httpx.AsyncClient`, `aiohttp`, `AsyncOpenAI`, `AsyncAnthropic`,\n\
+  `AsyncElasticsearch`, `aioboto3`, `aiokafka`, or `grpc.aio`.\n\
 - Or `await asyncio.to_thread(requests.get, url)`.",
     },
     RuleDoc {
@@ -122,14 +124,15 @@ task. Prefer asyncio primitives, or confine blocking waits to worker threads.",
     },
     RuleDoc {
         id: "blocking-db",
-        title: "Blocking database / client SDK",
-        summary: "Sync DB drivers and cloud/AI SDKs block on network round-trips.",
+        title: "Blocking database / cache driver",
+        summary: "Sync SQL, document, and KV database drivers (`sqlite3`, `psycopg`, `pymysql`, `pymongo`, sync `redis`, sync `sqlalchemy`) block on queries.",
         body: "\
-Sync SQL/Redis/HTTP-based SDKs perform IO on the calling thread. From `async def`,\n\
-that blocks the loop for every query. Prefer async drivers/clients, or offload.",
+Sync SQL, MongoDB, and Redis drivers perform wire or disk IO on the calling\n\
+thread. From `async def`, that blocks the event loop for every query or command.\n\
+Prefer async drivers/sessions, or offload.",
         fix: "\
-- Switch to the async client twin when one exists (`AsyncSession`, `redis.asyncio`,\n\
-  `AsyncOpenAI`, …).\n\
+- Switch to an async driver (`AsyncSession`, `psycopg.AsyncConnection`, `asyncpg`,\n\
+  `aiomysql`, `motor`, `redis.asyncio`).\n\
 - Or wrap sync calls: `await asyncio.to_thread(session.execute, ...)`.",
     },
     RuleDoc {

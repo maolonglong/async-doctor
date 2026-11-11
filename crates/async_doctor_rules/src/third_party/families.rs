@@ -204,12 +204,13 @@ pub(super) fn match_family(q: &str) -> Option<SinkHit> {
             "Use `psycopg` async (`AsyncConnection`) / `asyncpg`, or offload.",
         )));
     }
-    // pymysql — exception constructors, constants and pure converters are
-    // not IO; only the driver surface below stays a sink.
+    // pymysql — exception constructors, constants, converters, and pure string/type
+    // helpers are not IO; only the driver surface stays a sink.
     if q.starts_with("pymysql.")
         && !q.starts_with("pymysql.err.")
         && !q.starts_with("pymysql.constants.")
         && !q.starts_with("pymysql.converters.")
+        && !is_pymysql_non_io_helper(q)
     {
         return Some(hit(&BuiltinSink::finding(
             "pymysql.connect",
@@ -217,16 +218,21 @@ pub(super) fn match_family(q: &str) -> Option<SinkHit> {
             "Use `aiomysql` / `asyncmy`, or offload.",
         )));
     }
-    // pymongo sync
+    // pymongo sync — exclude pure handle getters (`get_database`, `get_collection`,
+    // `with_options`) that construct client-side wrappers without network IO.
     if q.starts_with("pymongo.")
         && !q.starts_with("pymongo.asynchronous.")
+        && !q.starts_with("pymongo.errors.")
+        && !q.starts_with("pymongo.uri_parser.")
+        && !q.starts_with("pymongo.client_options.")
+        && !is_pymongo_non_io_helper(q)
         && (q.contains("find")
             || q.contains("insert")
             || q.contains("update")
             || q.contains("delete")
             || q.contains("aggregate")
             || q.ends_with(".MongoClient")
-            || q.contains("MongoClient"))
+            || is_pymongo_client_blocking_op(q))
     {
         return Some(hit(&BuiltinSink::finding(
             "pymongo.collection.Collection.find",
@@ -363,13 +369,15 @@ pub(super) fn match_family(q: &str) -> Option<SinkHit> {
             "Use `elasticsearch.AsyncElasticsearch` instead of sync client.",
         )));
     }
-    // grpc sync stubs
+    // grpc sync stubs — exclude credentials, enums, and `.future(...)` (which
+    // schedules an async RPC and returns a `grpc.Future` without blocking).
     if q.starts_with("grpc.")
         && !q.contains("aio")
-        && (q.contains("UnaryUnaryMultiCallable")
+        && !is_grpc_non_io_helper(q)
+        && (q.contains("MultiCallable")
             || q.ends_with(".__call__")
-            || q.contains(".future")
-            || q.contains("Channel")
+            || q.ends_with(".with_call")
+            || q.split('.').any(|seg| seg == "Channel")
             || q.contains("insecure_channel")
             || q.contains("secure_channel"))
     {
@@ -380,6 +388,85 @@ pub(super) fn match_family(q: &str) -> Option<SinkHit> {
         )));
     }
     None
+}
+
+fn is_pymysql_non_io_helper(q: &str) -> bool {
+    let tail = q.rsplit_once('.').map(|(_, m)| m).unwrap_or(q);
+    if matches!(
+        q,
+        "pymysql.Binary"
+            | "pymysql.Date"
+            | "pymysql.Time"
+            | "pymysql.Timestamp"
+            | "pymysql.DateFromTicks"
+            | "pymysql.TimeFromTicks"
+            | "pymysql.TimestampFromTicks"
+            | "pymysql.escape_string"
+            | "pymysql.escape_dict"
+            | "pymysql.escape_sequence"
+            | "pymysql.install_as_MySQLdb"
+            | "pymysql.get_client_info"
+            | "pymysql.version_info"
+    ) {
+        return true;
+    }
+    q.contains("Connection.")
+        && matches!(
+            tail,
+            "escape"
+                | "escape_string"
+                | "literal"
+                | "get_proto_info"
+                | "get_host_info"
+                | "get_server_info"
+                | "open"
+        )
+}
+
+fn is_pymongo_non_io_helper(q: &str) -> bool {
+    let tail = q.rsplit_once('.').map(|(_, m)| m).unwrap_or(q);
+    matches!(
+        tail,
+        "get_database"
+            | "get_default_database"
+            | "get_collection"
+            | "with_options"
+            | "codec_options"
+            | "read_preference"
+            | "write_concern"
+            | "read_concern"
+    )
+}
+
+fn is_pymongo_client_blocking_op(q: &str) -> bool {
+    if !q.contains("MongoClient.") {
+        return false;
+    }
+    let tail = q.rsplit_once('.').map(|(_, m)| m).unwrap_or("");
+    matches!(
+        tail,
+        "__init__"
+            | "__new__"
+            | "close"
+            | "server_info"
+            | "list_database_names"
+            | "list_databases"
+            | "drop_database"
+            | "start_session"
+            | "watch"
+            | "bulk_write"
+    )
+}
+
+fn is_grpc_non_io_helper(q: &str) -> bool {
+    let tail = q.rsplit_once('.').map(|(_, m)| m).unwrap_or(q);
+    tail == "future"
+        || q.contains("Credentials")
+        || q.contains("Connectivity")
+        || q.starts_with("grpc.StatusCode")
+        || q.starts_with("grpc.Compression")
+        || q.starts_with("grpc.RpcError")
+        || tail.ends_with("_credentials")
 }
 
 /// True when the External qualname is a method on a *sync* redis Pipeline receiver.

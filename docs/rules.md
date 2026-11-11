@@ -19,9 +19,13 @@ with `asyncio.to_thread`.
 
 ## blocking-http
 
-Sync HTTP clients (`urllib`, `requests`, sync `httpx` / `urllib3`).
+Sync HTTP, RPC, messaging, and cloud/AI SDKs (`urllib`, `requests`, sync
+`httpx` / `urllib3`, `boto3` / `botocore`, `openai`, `anthropic`,
+`elasticsearch`, `kafka`, sync `grpc`).
 
-**Fix:** `httpx.AsyncClient` / `aiohttp`, or `await asyncio.to_thread(...)`.
+**Fix:** `httpx.AsyncClient` / `aiohttp` / `AsyncOpenAI` / `AsyncAnthropic` /
+`AsyncElasticsearch` / `aioboto3` / `aiokafka` / `grpc.aio`, or
+`await asyncio.to_thread(...)`.
 
 **Notes:**
 
@@ -30,8 +34,16 @@ Sync HTTP clients (`urllib`, `requests`, sync `httpx` / `urllib3`).
   `requests.Session.mount` / `requests.Session.get_adapter` are
   adapter-registry lookups.
 - `openai` / `anthropic` `with_options` / `copy` return new clients — no
-  request. `pymysql.err.*` / `pymysql.constants.*` / `pymysql.converters.*`
-  (exception constructors, constants, converters) are not IO.
+  request. `grpc` credential constructors (`ssl_channel_credentials`, etc.) and
+  `.future(...)` calls are not blocking RPCs.
+- Sync `boto3` / `botocore` client and resource API calls (including dynamic
+  methods such as `get_object` / `get_item`) are reported under `blocking-http`
+  with an `aioboto3` / `aiobotocore` fix hint. Meta helpers (`get_paginator`,
+  `get_waiter`, `can_paginate`, `generate_presigned_url`, `meta`) are not IO and
+  stay clean. `aioboto3.*` / `aiobotocore.*` qualnames (including
+  `Session.client` / `Session.resource` and `async with` receivers) are
+  classified as async counterparts (never findings). Sync `boto3-stubs.*` /
+  `botocore-stubs.*` package roots normalize to `boto3` / `botocore`.
 - `kafka-python` consumer local-state mutators and metrics snapshots do no
   broker RPC: `pause`/`resume`/`seek`/`assignment`/`subscription`/`paused`/
   `metrics`/`bootstrap_connected` on `KafkaConsumer`, and `metrics` /
@@ -102,25 +114,22 @@ waits to workers.
 
 ## blocking-db
 
-Sync database drivers and sync cloud/AI SDKs (SQLAlchemy Session, redis, boto3, …).
+Sync SQL, document, and KV database drivers (`sqlite3`, `psycopg` / `psycopg2`,
+`pymysql`, `pymongo`, sync `redis`, sync `sqlalchemy`).
 
-**Fix:** async client twin when available, or `await asyncio.to_thread(...)`.
+**Fix:** async driver/session (`AsyncSession`, `psycopg.AsyncConnection`,
+`asyncpg`, `aiomysql`, `motor`, `redis.asyncio`), or
+`await asyncio.to_thread(...)`.
 
 **Notes:**
 
 - `AsyncSession.run_sync` runs sync work on a greenlet in the event-loop thread
   — it is **not** a thread offload and is not treated as one.
-- Sync `boto3` / `botocore` client and resource API calls (including dynamic
-  methods such as `get_object` / `get_item`) are reported with an `aioboto3` /
-  `aiobotocore` fix hint. Meta helpers (`get_paginator`, `get_waiter`,
-  `can_paginate`, `generate_presigned_url`, `meta`) are not IO and stay clean.
-  There is still no dedicated `aioboto3` sink/follow family; `aioboto3.*` /
-  `aiobotocore.*` qualnames (including `Session.client` / `Session.resource`
-  and `async with` receivers) are classified as async counterparts (never
-  findings), even when boto3 is also installed and types-aioboto3 /
-  `aioboto3-stubs` is present. Sync `boto3-stubs.*` / `botocore-stubs.*`
-  package roots normalize to `boto3` / `botocore` so typed Session factories
-  still report.
+- Pure helpers and handle getters do not report: `pymysql.err.*` /
+  `pymysql.constants.*` / `pymysql.converters.*` / `escape_string` / `Binary`,
+  and `pymongo` database/collection handle getters (`get_database`,
+  `get_collection`, `with_options`, `codec_options`, `read_preference`,
+  `write_concern`, `read_concern`) perform no wire IO.
 
 ## unresolved-call
 
