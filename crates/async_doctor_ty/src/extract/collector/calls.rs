@@ -271,6 +271,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         self.pending_constructed_receivers.clear();
         self.pending_constructed_receiver = None;
         self.pending_keyword_callables = self.resolve_keyword_callables(call);
+        self.maybe_record_local_client_close(caller, call);
 
         // Fast path for first-party project function calls: skips external qualname
         // and stdlib buffer/archive/lock/offload checks.
@@ -336,6 +337,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
 
         let func_ext_qual = self.external_qualname(&call.func);
+        self.maybe_record_gather_shared_session(caller, call, func_ext_qual.as_deref());
 
         // In-memory buffer args to open/Image.open: not blocking file IO — skip
         // the edge (and therefore follow into PIL internals that would open paths).
@@ -404,6 +406,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 true,
                 target_coro,
             );
+            self.maybe_record_eager_offload_call(caller, call, kind, call.range());
             self.clear_pending_call_args();
             return Some(Some(kind));
         }

@@ -146,13 +146,16 @@ An offload boundary (`asyncio.to_thread`, `run_in_executor`,
 wrappers) cuts a sync call that only
 reaches sinks with a high-confidence same-package async twin
 (`httpx.AsyncClient` including module-level `httpx.get`/`post`/…,
-`redis.asyncio`, `openai.AsyncOpenAI`, `openai.AsyncAzureOpenAI`,
-`anthropic.AsyncAnthropic`, `elasticsearch.AsyncElasticsearch` needing
-`aiohttp`, `psycopg.AsyncConnection`). The twin and its `needs` must resolve
-in the scanned venv. The offload site's own try/if/loop conditions do not
-suppress advice. Skipped when the offloaded function is also called from
-sync-only code, or when any reached sink is excluded (pymongo, requests,
-boto3, file IO, subprocess, CPU work).
+`redis.asyncio` including distributed locks, `openai.AsyncOpenAI`,
+`openai.AsyncAzureOpenAI`, `anthropic.AsyncAnthropic`,
+`elasticsearch.AsyncElasticsearch` needing `aiohttp`,
+`psycopg.AsyncConnection`, `grpc.aio`, and `sqlalchemy.ext.asyncio.AsyncSession` /
+`AsyncEngine` when `greenlet` plus an async SQL driver such as `asyncpg`,
+`psycopg`, `aiosqlite`, `aiomysql`, or `asyncmy` are installed). The twin and
+its `needs` / `any_needs` must resolve in the scanned venv. The offload site's
+own try/if/loop conditions do not suppress advice. Skipped when the offloaded
+function is also called from sync-only code, or when any reached sink is
+excluded (pymongo, requests, boto3, file IO, subprocess, CPU work).
 
 **Why:** the offload already avoids blocking the loop, but the async twin
 removes the thread hop and keeps cancellation/context on the event loop.
@@ -214,6 +217,42 @@ manager with sync `with` raises `TypeError` at runtime. Sync anyio timeouts
 
 **Fix:** replace `with ...:` with `async with ...:`.
 
+## sync-for-async-iterable
+
+A synchronous `for` loop or sync comprehension iterates over an async-only
+iterable (`async def` generator/coroutine call, known async stream such as
+`httpx.Response.aiter_*`, `redis.asyncio.Redis.scan_iter`,
+`redis.asyncio.PubSub.listen`, `aiohttp.StreamReader`, `asyncpg.Connection.cursor`,
+`AsyncResult`, or a base-free project class implementing `__aiter__` without
+`__iter__` or `__getitem__`). Sync iteration raises `TypeError` at runtime.
+
+**Fix:** replace `for x in ...:` with `async for x in ...:` (or `[x async for x in ...]`).
+
+## eager-offload-call
+
+An offload helper (`asyncio.to_thread`, `loop.run_in_executor`,
+`anyio.to_thread.run_sync`, `run_in_threadpool`, `sync_to_async`) receives a
+call expression `fn(...)` in its callable slot (excluding `functools.partial`)
+whose return value is provably not callable (`None`, literal/builtin scalar or
+collection, coroutine/generator, or non-callable project class). Python
+evaluates `fn(...)` eagerly on the event loop before the offload helper is
+entered and then raises `TypeError` on the worker thread. Deduplicated when the
+inner call already emits a `blocking-*` finding through the same offload site.
+
+**Fix:** pass the callable and its arguments separately (`await asyncio.to_thread(fn, arg)`),
+or wrap keyword arguments with `functools.partial(fn, key=val)`.
+
+## unawaited-coroutine
+
+A bare expression statement calls a proven coroutine-returning `async def`
+without `await`, discarding the coroutine object immediately so the body never
+executes (`RuntimeWarning: coroutine '...' was never awaited`). Excludes async
+generators (`yield`), `@asynccontextmanager`, and custom decorators that may
+alter call semantics.
+
+**Fix:** `await fn(...)`, or schedule explicitly with `asyncio.TaskGroup` / a
+referenced `asyncio.create_task(...)`.
+
 ## dangling-task
 
 **Advice (correctness)** — never fails the exit code.
@@ -227,3 +266,35 @@ exception goes unobserved. Assigned, awaited, returned, passed-as-argument, or
 
 **Fix:** await the task, use `asyncio.TaskGroup`, or keep a strong reference in
 a task set (`tasks.add(t); t.add_done_callback(tasks.discard)`).
+
+## ephemeral-async-client
+
+**Advice (performance)** — never fails the exit code.
+
+`httpx.AsyncClient(...)` or `aiohttp.ClientSession(...)` is constructed and
+closed (`async with` or local `.aclose()` / `.close()`) per `Route` invocation
+or inside a loop, discarding connection pools and repeating DNS + TLS handshakes
+on every call. Lifespan entries, one-shot non-route scripts without loops, lazy
+singletons, and custom `transport=` / `mounts=` / `app=` / `connector=` wrappers
+are excluded.
+
+**Fix:** create one shared client in your application lifespan (or outside the
+loop) and reuse it across requests.
+
+## shared-async-session
+
+**Advice (correctness)** — never fails the exit code.
+
+A single stateful async database session or connection
+(`sqlalchemy.ext.asyncio.AsyncSession` / `AsyncConnection`,
+`sqlmodel.ext.asyncio.session.AsyncSession`, `asyncpg.Connection`,
+`psycopg.AsyncConnection` / `AsyncCursor`) is shared across multiple concurrent
+tasks in `asyncio.gather(...)` or `asyncio.TaskGroup` /
+`anyio.create_task_group()`. Concurrent operations on one stateful session or
+connection are not safe and fail with `InvalidRequestError` or protocol errors.
+Concurrency-safe factories and pools (`AsyncEngine`, `async_sessionmaker`,
+`asyncpg.Pool`, `AsyncConnectionPool`) and distinct per-task sessions are not
+reported.
+
+**Fix:** open a separate session/connection per concurrent task (via
+`async_sessionmaker` or `pool.acquire()`), or `await` the operations sequentially.

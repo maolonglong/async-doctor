@@ -208,8 +208,31 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             self.branch_depth += 1;
         }
         for comp in generators {
+            if !comp.is_async
+                && self.dead_depth == 0
+                && !self.in_lambda
+                && self.off_loop_thread_depth == 0
+                && let Some(caller) = self.current_fn
+                && !self.function(caller).is_installed_third_party()
+                && self.is_sync_for_async_iterable(&comp.iter)
+            {
+                self.push_sync_for_async_iterable_edge(
+                    caller,
+                    &comp.iter,
+                    CallKind::GeneratorConsume,
+                );
+            }
             self.consuming_generator = true;
-            self.visit_expr(&comp.iter);
+            if comp.is_async {
+                if let Expr::Call(call) = &comp.iter {
+                    let is_offload = self.handle_call(call, true);
+                    self.walk_call_children(call, is_offload);
+                } else {
+                    self.visit_expr(&comp.iter);
+                }
+            } else {
+                self.visit_expr(&comp.iter);
+            }
             self.consuming_generator = false;
             self.visit_expr(&comp.target);
             for test in &comp.ifs {
@@ -520,16 +543,24 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             && self.dead_depth == 0
             && !for_stmt.is_async
         {
-            let dunder = "__iter__";
-            if let Some(callee) = self.resolve_dunder(&for_stmt.iter, dunder) {
-                self.push_edge(
-                    caller,
-                    callee,
-                    for_stmt.iter.range(),
-                    CallKind::ForIter,
-                    false,
-                    None,
-                );
+            if !self.in_lambda
+                && self.off_loop_thread_depth == 0
+                && !self.function(caller).is_installed_third_party()
+                && self.is_sync_for_async_iterable(&for_stmt.iter)
+            {
+                self.push_sync_for_async_iterable_edge(caller, &for_stmt.iter, CallKind::ForIter);
+            } else {
+                let dunder = "__iter__";
+                if let Some(callee) = self.resolve_dunder(&for_stmt.iter, dunder) {
+                    self.push_edge(
+                        caller,
+                        callee,
+                        for_stmt.iter.range(),
+                        CallKind::ForIter,
+                        false,
+                        None,
+                    );
+                }
             }
         }
         // `async for x in call(...)`: the iter Call is an async use of that one call.
@@ -598,6 +629,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         for item in &with_stmt.items {
             // `async with call(...) as x`: mark that one call awaited; bind asyncio receivers.
             if with_stmt.is_async {
+                if let Some(caller) = self.current_fn {
+                    self.maybe_record_async_with_ephemeral_client(caller, item);
+                }
                 if let Expr::Call(call) = &item.context_expr {
                     let is_offload = self.handle_call(call, true);
                     self.walk_call_children(call, is_offload);
@@ -605,6 +639,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                     self.visit_expr(&item.context_expr);
                 }
                 self.note_async_with_receiver(item);
+                self.note_async_with_stateful_session(item);
             } else if !matches!(item.context_expr, Expr::Call(_)) {
                 // Sync `with Call(...)` already recorded above as WithEnter.
                 self.visit_expr(&item.context_expr);
@@ -612,10 +647,20 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             // Bind `with ZipFile(buf) as zf` / buffer receivers for later method skips.
             if let Some(Expr::Name(n)) = item.optional_vars.as_deref() {
                 self.note_local_binding(n.id.as_str(), &item.context_expr);
+                if with_stmt.is_async {
+                    // `async with` ephemeral clients are already recorded above;
+                    // re-apply async-with receiver/session bindings after `note_local_binding`.
+                    self.local_ephemeral_clients.remove(n.id.as_str());
+                    self.note_async_with_receiver(item);
+                    self.note_async_with_stateful_session(item);
+                }
             }
             if let Some(opt) = &item.optional_vars {
                 self.visit_expr(opt);
             }
+        }
+        if let Some(caller) = self.current_fn {
+            self.maybe_record_taskgroup_shared_session(caller, with_stmt);
         }
         self.visit_body_seq(&with_stmt.body);
     }

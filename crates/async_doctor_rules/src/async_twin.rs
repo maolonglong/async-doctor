@@ -12,8 +12,10 @@ use async_doctor_core::{AsyncTwinHit, TwinConfidence};
 pub struct AsyncTwinEntry {
     /// Human/symbol form, e.g. `httpx.AsyncClient`.
     pub symbol: &'static str,
-    /// Extra modules that must resolve in the scanned venv (e.g. `aiohttp`).
+    /// Extra modules that must ALL resolve in the scanned venv (e.g. `aiohttp`).
     pub needs: &'static [&'static str],
+    /// Extra modules where AT LEAST ONE must resolve when non-empty (e.g. an async SQL driver).
+    pub any_needs: &'static [&'static str],
     pub confidence: TwinConfidence,
     /// Sink qualname prefixes / matchers that this twin covers.
     matchers: &'static [TwinMatcher],
@@ -27,14 +29,24 @@ enum TwinMatcher {
     Exact(&'static str),
 }
 
+const SQLALCHEMY_ASYNC_DRIVERS: &[&str] = &[
+    "asyncpg",
+    "aiosqlite",
+    "aiomysql",
+    "asyncmy",
+    "psycopg.AsyncConnection",
+];
+
 /// High-confidence same-package twins eligible for `offload-has-async-twin`.
 pub static ASYNC_TWINS: &[AsyncTwinEntry] = &[
     AsyncTwinEntry {
         symbol: "httpx.AsyncClient",
         needs: &[],
+        any_needs: &[],
         confidence: TwinConfidence::High,
         matchers: &[
             TwinMatcher::Prefix("httpx.Client."),
+            TwinMatcher::Prefix("httpx._client.Client."),
             TwinMatcher::Exact("httpx.get"),
             TwinMatcher::Exact("httpx.post"),
             TwinMatcher::Exact("httpx.put"),
@@ -49,6 +61,7 @@ pub static ASYNC_TWINS: &[AsyncTwinEntry] = &[
     AsyncTwinEntry {
         symbol: "redis.asyncio",
         needs: &[],
+        any_needs: &[],
         confidence: TwinConfidence::High,
         matchers: &[
             TwinMatcher::Prefix("redis.Redis."),
@@ -57,6 +70,8 @@ pub static ASYNC_TWINS: &[AsyncTwinEntry] = &[
             TwinMatcher::Prefix("redis.client.StrictRedis."),
             TwinMatcher::Prefix("redis.PubSub."),
             TwinMatcher::Prefix("redis.client.PubSub."),
+            TwinMatcher::Prefix("redis.Lock."),
+            TwinMatcher::Prefix("redis.lock.Lock."),
             TwinMatcher::Exact("redis.client.Pipeline.execute"),
             TwinMatcher::Prefix("redis.client.Pipeline.execute"),
         ],
@@ -65,6 +80,7 @@ pub static ASYNC_TWINS: &[AsyncTwinEntry] = &[
     AsyncTwinEntry {
         symbol: "openai.AsyncAzureOpenAI",
         needs: &[],
+        any_needs: &[],
         confidence: TwinConfidence::High,
         matchers: &[
             TwinMatcher::Prefix("openai.AzureOpenAI."),
@@ -76,6 +92,7 @@ pub static ASYNC_TWINS: &[AsyncTwinEntry] = &[
     AsyncTwinEntry {
         symbol: "openai.AsyncOpenAI",
         needs: &[],
+        any_needs: &[],
         confidence: TwinConfidence::High,
         matchers: &[
             TwinMatcher::Prefix("openai.OpenAI."),
@@ -86,6 +103,7 @@ pub static ASYNC_TWINS: &[AsyncTwinEntry] = &[
     AsyncTwinEntry {
         symbol: "anthropic.AsyncAnthropic",
         needs: &[],
+        any_needs: &[],
         confidence: TwinConfidence::High,
         matchers: &[
             TwinMatcher::Prefix("anthropic.Anthropic."),
@@ -96,6 +114,7 @@ pub static ASYNC_TWINS: &[AsyncTwinEntry] = &[
     AsyncTwinEntry {
         symbol: "elasticsearch.AsyncElasticsearch",
         needs: &["aiohttp"],
+        any_needs: &[],
         confidence: TwinConfidence::High,
         matchers: &[
             TwinMatcher::Prefix("elasticsearch.Elasticsearch."),
@@ -105,13 +124,52 @@ pub static ASYNC_TWINS: &[AsyncTwinEntry] = &[
     AsyncTwinEntry {
         symbol: "psycopg.AsyncConnection",
         needs: &[],
+        any_needs: &[],
         confidence: TwinConfidence::High,
         matchers: &[
+            TwinMatcher::Exact("psycopg.connect"),
             TwinMatcher::Prefix("psycopg.Connection."),
             TwinMatcher::Exact("psycopg.Connection"),
             TwinMatcher::Prefix("psycopg.connection.Connection."),
             TwinMatcher::Prefix("psycopg.Cursor."),
             TwinMatcher::Prefix("psycopg.cursor.Cursor."),
+        ],
+    },
+    AsyncTwinEntry {
+        symbol: "grpc.aio",
+        needs: &[],
+        any_needs: &[],
+        confidence: TwinConfidence::High,
+        matchers: &[
+            TwinMatcher::Exact("grpc.Channel"),
+            TwinMatcher::Prefix("grpc.Channel."),
+            TwinMatcher::Prefix("grpc._channel."),
+            TwinMatcher::Exact("grpc.insecure_channel"),
+            TwinMatcher::Exact("grpc.secure_channel"),
+        ],
+    },
+    AsyncTwinEntry {
+        symbol: "sqlalchemy.ext.asyncio.AsyncSession",
+        needs: &["greenlet"],
+        any_needs: SQLALCHEMY_ASYNC_DRIVERS,
+        confidence: TwinConfidence::High,
+        matchers: &[
+            TwinMatcher::Prefix("sqlalchemy.orm.Session."),
+            TwinMatcher::Prefix("sqlalchemy.orm.session.Session."),
+            TwinMatcher::Prefix("sqlalchemy.orm.Query."),
+            TwinMatcher::Prefix("sqlalchemy.orm.query.Query."),
+        ],
+    },
+    AsyncTwinEntry {
+        symbol: "sqlalchemy.ext.asyncio.AsyncEngine",
+        needs: &["greenlet"],
+        any_needs: SQLALCHEMY_ASYNC_DRIVERS,
+        confidence: TwinConfidence::High,
+        matchers: &[
+            TwinMatcher::Prefix("sqlalchemy.engine.Engine."),
+            TwinMatcher::Prefix("sqlalchemy.engine.base.Engine."),
+            TwinMatcher::Prefix("sqlalchemy.engine.Connection."),
+            TwinMatcher::Prefix("sqlalchemy.engine.base.Connection."),
         ],
     },
 ];
@@ -122,6 +180,7 @@ pub fn twin_resolution_symbols() -> Vec<&'static str> {
     for t in ASYNC_TWINS {
         out.push(t.symbol);
         out.extend(t.needs.iter().copied());
+        out.extend(t.any_needs.iter().copied());
     }
     out.sort_unstable();
     out.dedup();
@@ -149,6 +208,7 @@ pub fn async_twin_for_sink(qualname: &str) -> Option<AsyncTwinHit> {
                 symbol: twin.symbol,
                 same_package: true,
                 needs: twin.needs,
+                any_needs: twin.any_needs,
                 confidence: twin.confidence,
             });
         }
@@ -282,5 +342,30 @@ mod tests {
     #[test]
     fn redis_pipeline_execute_has_twin() {
         assert!(async_twin_for_sink("redis.client.Pipeline.execute").is_some());
+        assert!(async_twin_for_sink("redis.Lock.acquire").is_some());
+    }
+
+    #[test]
+    fn grpc_and_psycopg_connect_and_sqlalchemy_map_to_async_twins() {
+        let grpc = async_twin_for_sink("grpc.Channel").unwrap();
+        assert_eq!(grpc.symbol, "grpc.aio");
+        assert!(grpc.needs.is_empty());
+
+        let grpc_call =
+            async_twin_for_sink("grpc._channel._UnaryUnaryMultiCallable.__call__").unwrap();
+        assert_eq!(grpc_call.symbol, "grpc.aio");
+
+        let pg = async_twin_for_sink("psycopg.connect").unwrap();
+        assert_eq!(pg.symbol, "psycopg.AsyncConnection");
+
+        let sqla_sess = async_twin_for_sink("sqlalchemy.orm.Session.execute").unwrap();
+        assert_eq!(sqla_sess.symbol, "sqlalchemy.ext.asyncio.AsyncSession");
+        assert_eq!(sqla_sess.needs, &["greenlet"]);
+        assert!(sqla_sess.any_needs.contains(&"asyncpg"));
+        assert!(sqla_sess.any_needs.contains(&"aiosqlite"));
+
+        let sqla_eng = async_twin_for_sink("sqlalchemy.engine.Engine.connect").unwrap();
+        assert_eq!(sqla_eng.symbol, "sqlalchemy.ext.asyncio.AsyncEngine");
+        assert_eq!(sqla_eng.needs, &["greenlet"]);
     }
 }

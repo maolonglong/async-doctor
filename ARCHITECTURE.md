@@ -104,7 +104,7 @@ project discovery config files (`pyproject.toml` / pyright / ruff), active
 `VIRTUAL_ENV` / `CONDA_PREFIX` / ancestor `.venv` identity, `.pth` / editable
 finder / loose site-packages `.py` inputs, outside-root `extraPaths` / editable
 `.py`/`.pyi` content hashes, and each installed dist-info content fingerprint.
-Package-cache schema is `CACHE_SCHEMA_VERSION` 21: it persists cross-package
+Package-cache schema is `CACHE_SCHEMA_VERSION` 22: it persists cross-package
 `follow_targets` referenced by analyzed edges alongside `is_bound_call`,
 `is_eager_offload_arg`, `constructed_receiver`, `positional_externals`,
 `positional_constructed_receivers`, decorator qualnames, and literal-`True`
@@ -122,8 +122,11 @@ and `is_offload_wrapper` drive offload-edge materialization), stable finding ids
 
 `propagate/`: mark sinks, materialize higher-order bindings
 (`higher_order.rs`), reverse BFS + condition reconciliation (`grade.rs`),
-special findings (`special.rs`: nested event loop, offload-coroutine, sync-with-async-cm), and
-non-blocking advice (`advice.rs`: offload-has-async-twin, dangling-task).
+special findings (`special.rs`: nested event loop, offload-coroutine,
+sync-with-async-cm, sync-for-async-iterable, unawaited-coroutine,
+eager-offload-call), and non-blocking advice (`advice.rs`:
+offload-has-async-twin; `anti_pattern_advice.rs`: dangling-task,
+ephemeral-async-client, shared-async-session).
 
 **Architecture invariant:** this crate must not depend on ty or ruff.
 

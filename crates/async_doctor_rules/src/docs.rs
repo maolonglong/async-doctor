@@ -161,7 +161,8 @@ at cut offload sites so nothing is double-reported with blocking findings.",
         fix: "\
 - Replace the sync client with its async twin (`httpx.AsyncClient`,\n\
   `redis.asyncio`, `AsyncOpenAI`, `AsyncAnthropic`, `AsyncElasticsearch`,\n\
-  `psycopg.AsyncConnection`) and await it directly.\n\
+  `psycopg.AsyncConnection`, `grpc.aio`, `AsyncSession` / `AsyncEngine`)\n\
+  and await it directly.\n\
 - Keep the offload if the function must also run from sync-only callers.",
     },
     RuleDoc {
@@ -205,6 +206,44 @@ context protocol and raise `TypeError` at runtime when entered with `with`.",
 - Use `async with ...:` instead of `with ...:`.",
     },
     RuleDoc {
+        id: "sync-for-async-iterable",
+        title: "Sync iteration over an async-only iterable",
+        summary: "Sync `for` or comprehension iterates over an async-only iterable (`__aiter__` without `__iter__`).",
+        body: "\
+Async generators (`async def` with `yield`), async streams (`httpx.Response.aiter_*`,\n\
+`redis.asyncio.Redis.scan_iter`, `aiohttp.StreamReader`, `aiokafka.AIOKafkaConsumer`),\n\
+and classes implementing `__aiter__` without `__iter__` or `__getitem__` cannot be\n\
+iterated synchronously and raise `TypeError` at runtime.",
+        fix: "\
+- Use `async for ... in ...:` (or an async comprehension `[... async for ... in ...]`).",
+    },
+    RuleDoc {
+        id: "eager-offload-call",
+        title: "Eager call inside offload boundary",
+        summary: "Offload receives `fn(...)` instead of `fn`, running `fn` on the loop and passing a non-callable result.",
+        body: "\
+`asyncio.to_thread`, `loop.run_in_executor`, `anyio.to_thread.run_sync`,\n\
+`run_in_threadpool`, and `sync_to_async` evaluate their arguments before dispatching\n\
+to a worker thread. Writing `to_thread(fn(x))` runs `fn(x)` synchronously on the\n\
+event loop and then passes its non-callable return value to the worker, raising\n\
+`TypeError` at runtime.",
+        fix: "\
+- Pass the callable and its arguments separately: `await asyncio.to_thread(fn, x)`.\n\
+- For keyword arguments, use `functools.partial(fn, x, k=v)` or `lambda: fn(x, k=v)`.",
+    },
+    RuleDoc {
+        id: "unawaited-coroutine",
+        title: "Unawaited coroutine call",
+        summary: "Bare coroutine call discards the returned coroutine without awaiting or scheduling it.",
+        body: "\
+Calling an `async def` coroutine function as a standalone statement only constructs\n\
+a coroutine object and immediately drops it. The body never executes, and Python\n\
+emits `RuntimeWarning: coroutine '...' was never awaited` when garbage-collected.",
+        fix: "\
+- Prefix the call with `await`: `await coro(...)`.\n\
+- Or schedule it explicitly with `asyncio.TaskGroup` / `asyncio.create_task` (keeping a reference).",
+    },
+    RuleDoc {
         id: "dangling-task",
         title: "Fire-and-forget task without a stored reference (advice)",
         summary: "Bare `asyncio.create_task` / `ensure_future` discards the returned `Task`.",
@@ -217,6 +256,34 @@ go unobserved. This is correctness advice and never fails the exit code.",
 - Await the task or `asyncio.TaskGroup` when structured concurrency fits.\n\
 - For intentional background tasks, store the task in a set (`bg_tasks.add(t)`)\n\
   and register `t.add_done_callback(bg_tasks.discard)`.",
+    },
+    RuleDoc {
+        id: "ephemeral-async-client",
+        title: "Per-request or per-iteration async HTTP client (advice)",
+        summary: "`httpx.AsyncClient` / `aiohttp.ClientSession` is created and torn down per route call or loop turn.",
+        body: "\
+Opening and closing a fresh `httpx.AsyncClient` or `aiohttp.ClientSession` on every\n\
+route invocation or loop iteration discards connection pooling, keep-alive sockets,\n\
+and TLS session reuse — forcing a new TCP/TLS handshake each time and risking\n\
+ephemeral port exhaustion under load. This is performance advice and never fails\n\
+the exit code.",
+        fix: "\
+- Initialize a shared client once in application lifespan / startup and reuse it\n\
+  across requests or loop iterations, closing it on shutdown.",
+    },
+    RuleDoc {
+        id: "shared-async-session",
+        title: "Concurrent sharing of a stateful async DB session (advice)",
+        summary: "A single `AsyncSession` or async DB connection is passed to multiple concurrent tasks.",
+        body: "\
+`sqlalchemy.ext.asyncio.AsyncSession`, `AsyncConnection`, `asyncpg.Connection`, and\n\
+`psycopg.AsyncConnection` hold mutable transaction and protocol state on a single\n\
+connection and are not safe for concurrent use across `asyncio.gather` or\n\
+`TaskGroup` tasks (raising `InvalidRequestError` or corrupting protocol state at\n\
+runtime). This is correctness advice and never fails the exit code.",
+        fix: "\
+- Open a separate `AsyncSession` / connection per concurrent task from a shared\n\
+  `async_sessionmaker` / connection pool, or await the queries sequentially.",
     },
 ];
 
@@ -251,8 +318,10 @@ mod tests {
         use crate::{
             RULE_BLOCKING_DB, RULE_BLOCKING_FILE, RULE_BLOCKING_HTTP, RULE_BLOCKING_LOCK,
             RULE_BLOCKING_SLEEP, RULE_BLOCKING_SOCKET, RULE_BLOCKING_SUBPROCESS,
-            RULE_DANGLING_TASK, RULE_NESTED_EVENT_LOOP, RULE_OFFLOAD_COROUTINE,
-            RULE_OFFLOAD_HAS_ASYNC_TWIN, RULE_SYNC_WITH_ASYNC_CM,
+            RULE_DANGLING_TASK, RULE_EAGER_OFFLOAD_CALL, RULE_EPHEMERAL_ASYNC_CLIENT,
+            RULE_NESTED_EVENT_LOOP, RULE_OFFLOAD_COROUTINE, RULE_OFFLOAD_HAS_ASYNC_TWIN,
+            RULE_SHARED_ASYNC_SESSION, RULE_SYNC_FOR_ASYNC_ITERABLE, RULE_SYNC_WITH_ASYNC_CM,
+            RULE_UNAWAITED_COROUTINE,
         };
         for id in [
             RULE_BLOCKING_SLEEP,
@@ -266,7 +335,12 @@ mod tests {
             RULE_NESTED_EVENT_LOOP,
             RULE_OFFLOAD_COROUTINE,
             RULE_SYNC_WITH_ASYNC_CM,
+            RULE_SYNC_FOR_ASYNC_ITERABLE,
+            RULE_EAGER_OFFLOAD_CALL,
+            RULE_UNAWAITED_COROUTINE,
             RULE_DANGLING_TASK,
+            RULE_EPHEMERAL_ASYNC_CLIENT,
+            RULE_SHARED_ASYNC_SESSION,
         ] {
             assert!(rule_doc(id).is_some(), "missing RuleDoc for {id}");
         }

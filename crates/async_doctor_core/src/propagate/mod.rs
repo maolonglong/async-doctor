@@ -1,6 +1,7 @@
 //! Blocking propagation: mark sinks, BFS reverse call graph, grade findings.
 
 mod advice;
+mod anti_pattern_advice;
 mod grade;
 mod higher_order;
 mod special;
@@ -26,7 +27,9 @@ use grade::{
     unresolved_pattern,
 };
 use higher_order::{materialize_higher_order, materialize_higher_order_owned};
-use special::{collect_offload_coroutine_findings, nested_event_loop_hit};
+use special::{
+    collect_eager_offload_findings, collect_offload_coroutine_findings, special_finding_hit,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct SinkHit {
@@ -55,6 +58,7 @@ pub struct AsyncTwinHit {
     pub symbol: &'static str,
     pub same_package: bool,
     pub needs: &'static [&'static str],
+    pub any_needs: &'static [&'static str],
     pub confidence: TwinConfidence,
 }
 
@@ -199,10 +203,18 @@ fn analyze_materialized(
                 if edge.callee_is_coroutine == Some(true) {
                     continue;
                 }
-                // Nested event-loop APIs are correctness errors when reachable
-                // from async without an offload cut (reverse BFS already skips
-                // offload edges, so behind-offload sites stay silent).
-                if let Some(hit) = nested_event_loop_hit(qualname) {
+                // Nested event-loop APIs and first-party async anti-patterns are
+                // correctness errors when reachable from async without an offload cut.
+                let caller_is_installed_tp = facts.function(edge.caller).is_installed_third_party();
+                if let Some(hit) = special_finding_hit(qualname, caller_is_installed_tp) {
+                    if hit.with_only && !matches!(edge.kind, CallKind::WithEnter) {
+                        continue;
+                    }
+                    if hit.consume_only
+                        && !matches!(edge.kind, CallKind::GeneratorConsume | CallKind::ForIter)
+                    {
+                        continue;
+                    }
                     seeds.push(Seed {
                         edge_idx: idx,
                         kind: SeedKind::Sink(hit),
@@ -678,6 +690,15 @@ fn analyze_materialized(
         &mut emitted_sink_sites,
         &mut emitted,
     ));
+    let eager_offload_findings = collect_eager_offload_findings(
+        facts,
+        &reverse,
+        options.include_non_production,
+        &report.findings,
+        &mut emitted_sink_sites,
+        &mut emitted,
+    );
+    report.findings.extend(eager_offload_findings);
     // Empty entry.file/chain belong in locationLessCandidates, not candidates.
     let (located, location_less): (Vec<_>, Vec<_>) = raw_candidates
         .into_iter()

@@ -70,6 +70,10 @@ fn package_root(site_roots: &[PathBuf], name: &str) -> Option<PathBuf> {
         if py.is_file() {
             return Some(py);
         }
+        let pyi = root.join(format!("{name}.pyi"));
+        if pyi.is_file() {
+            return Some(pyi);
+        }
     }
     None
 }

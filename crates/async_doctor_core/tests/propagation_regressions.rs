@@ -42,6 +42,7 @@ impl SinkTable for RegSinks {
                 symbol: "httpx.AsyncClient",
                 same_package: true,
                 needs: &[],
+                any_needs: &[],
                 confidence: TwinConfidence::High,
             }),
             _ => None,

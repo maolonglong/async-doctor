@@ -5,6 +5,7 @@ use ruff_python_ast::visitor::{Visitor, walk_expr, walk_stmt};
 use ruff_python_ast::{self as ast, Expr, Stmt};
 
 use super::CallCollector;
+use super::concurrency_anti_patterns::nonlocal_or_global_names;
 use super::loop_guards::collect_idle_loop_helpers;
 use super::thread_guards::futures_proven_done_in_test;
 use crate::extract::ctx::scope_qualname;
@@ -28,6 +29,12 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 let prev_event_loop = std::mem::take(&mut self.event_loop_locals);
                 let prev_async_with = std::mem::take(&mut self.async_with_receivers);
                 let prev_narrowed = std::mem::take(&mut self.narrowed_locals);
+                let prev_ephemeral_clients = std::mem::take(&mut self.local_ephemeral_clients);
+                let prev_nonlocal_globals = std::mem::replace(
+                    &mut self.nonlocal_or_global_names,
+                    nonlocal_or_global_names(&func.body),
+                );
+                let prev_stateful_sessions = std::mem::take(&mut self.local_stateful_sessions);
                 // Module-level unbounded queues remain visible inside functions;
                 // clone so local rebinds do not leak to sibling defs.
                 let prev_queues = self.unbounded_queues.clone();
@@ -78,6 +85,9 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 self.event_loop_locals = prev_event_loop;
                 self.async_with_receivers = prev_async_with;
                 self.narrowed_locals = prev_narrowed;
+                self.local_ephemeral_clients = prev_ephemeral_clients;
+                self.nonlocal_or_global_names = prev_nonlocal_globals;
+                self.local_stateful_sessions = prev_stateful_sessions;
                 self.unbounded_queues = prev_queues;
                 self.boto_receivers = prev_boto;
                 self.boto_session_receivers = prev_boto_session;
@@ -126,6 +136,7 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
             Stmt::Expr(expr_stmt) => {
                 walk_stmt(self, stmt);
                 self.maybe_record_dangling_task(expr_stmt);
+                self.maybe_record_unawaited_coroutine(expr_stmt);
             }
             other => walk_stmt(self, other),
         }

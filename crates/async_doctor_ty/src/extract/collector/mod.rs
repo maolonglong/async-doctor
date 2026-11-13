@@ -4,8 +4,10 @@ mod async_anti_patterns;
 mod boto;
 mod buffers;
 mod calls;
+mod concurrency_anti_patterns;
 mod constructors;
 mod control_flow;
+mod eager_offload;
 mod imports;
 mod locals;
 pub(crate) mod loop_guards;
@@ -20,6 +22,7 @@ use std::path::PathBuf;
 
 use async_doctor_core::{FunctionId, LiteralArg, ParamGuard, ProjectFacts};
 use ruff_python_ast::{self as ast, Expr};
+use ruff_text_size::TextRange;
 use ty_python_semantic::SemanticModel;
 
 use crate::sitepkgs::{FollowTarget, PackageMetaMemo};
@@ -164,6 +167,13 @@ pub(crate) struct CallCollector<'a, 'db> {
     /// `fn_stack`): used to detect decorator factories `D(fn)` whose returned
     /// nested def forwards `fn` into an offload boundary.
     pub(super) fn_scopes: Vec<FnScope>,
+    /// Local HTTP clients (`httpx.AsyncClient` / `aiohttp.ClientSession`) bound
+    /// in the current function body: `name -> (client_kind, ctor_range, in_loop)`.
+    pub(super) local_ephemeral_clients: HashMap<String, (&'static str, TextRange, bool)>,
+    /// `global` / `nonlocal` names declared in the current function body.
+    pub(super) nonlocal_or_global_names: HashSet<String>,
+    /// Locals bound to stateful async DB sessions/connections in the current function.
+    pub(super) local_stateful_sessions: HashSet<String>,
 }
 
 /// One enclosing `def` scope for nested-def offload-wrapper detection.
@@ -273,6 +283,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             base_route_ids: HashSet::new(),
             base_sync_route_ids: HashSet::new(),
             fn_scopes: Vec::new(),
+            local_ephemeral_clients: HashMap::new(),
+            nonlocal_or_global_names: HashSet::new(),
+            local_stateful_sessions: HashSet::new(),
         }
     }
 

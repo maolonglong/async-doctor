@@ -22,7 +22,12 @@ pub const RULE_OFFLOAD_HAS_ASYNC_TWIN: &str = "offload-has-async-twin";
 pub const RULE_NESTED_EVENT_LOOP: &str = "nested-event-loop";
 pub const RULE_OFFLOAD_COROUTINE: &str = "offload-coroutine";
 pub const RULE_SYNC_WITH_ASYNC_CM: &str = "sync-with-async-cm";
+pub const RULE_SYNC_FOR_ASYNC_ITERABLE: &str = "sync-for-async-iterable";
+pub const RULE_EAGER_OFFLOAD_CALL: &str = "eager-offload-call";
+pub const RULE_UNAWAITED_COROUTINE: &str = "unawaited-coroutine";
 pub const RULE_DANGLING_TASK: &str = "dangling-task";
+pub const RULE_EPHEMERAL_ASYNC_CLIENT: &str = "ephemeral-async-client";
+pub const RULE_SHARED_ASYNC_SESSION: &str = "shared-async-session";
 
 use async_doctor_core::SinkHit;
 

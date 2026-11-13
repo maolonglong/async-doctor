@@ -317,7 +317,12 @@ fn default_score() -> u32 {
 
 fn rule_severity_weight(rule: &str) -> f64 {
     match rule {
-        "nested-event-loop" | "sync-with-async-cm" | "offload-coroutine" => 1.5,
+        "nested-event-loop"
+        | "sync-with-async-cm"
+        | "sync-for-async-iterable"
+        | "eager-offload-call"
+        | "unawaited-coroutine"
+        | "offload-coroutine" => 1.5,
         "blocking-sleep" | "blocking-subprocess" => 1.35,
         "blocking-http" | "blocking-db" | "blocking-socket" => 1.2,
         "blocking-lock" => 1.1,

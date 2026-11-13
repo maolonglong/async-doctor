@@ -62,6 +62,15 @@ fn external_occurrence_key(qualname: &str) -> String {
     if is_nested_event_loop_qual_ty(qualname) {
         return "Enested-event-loop".to_string();
     }
+    if qualname.starts_with("eager-offload-call:") {
+        return "Eeager-offload-call".to_string();
+    }
+    if qualname.starts_with("ephemeral-async-client:") {
+        return "Eephemeral-async-client".to_string();
+    }
+    if qualname.starts_with("shared-async-session:") {
+        return "Eshared-async-session".to_string();
+    }
     static SINKS: OnceLock<BuiltinSinkTable> = OnceLock::new();
     let sinks = SINKS.get_or_init(BuiltinSinkTable::new);
     let key = sinks

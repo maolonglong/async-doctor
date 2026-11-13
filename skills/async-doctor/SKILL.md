@@ -77,21 +77,26 @@ async-doctor why path/to/file.py:42 --path .
 async-doctor why path/to/file.py:42 --path . --format json
 ```
 
-### Advice: `offload-has-async-twin` / `dangling-task`
+### Advice: `offload-has-async-twin` / `dangling-task` / `ephemeral-async-client` / `shared-async-session`
 
 - **offload-has-async-twin** — fires only at offload cut sites (`to_thread`, `run_in_executor`, anyio/starlette
   threadpool, `asgiref.sync.sync_to_async`, inferred wrappers) when every
   unconditionally reached sink has a high-confidence same-package async twin
   installed in the scanned venv (`httpx.AsyncClient` including module `httpx.get`,
   `redis.asyncio`, `AsyncOpenAI` / `AsyncAzureOpenAI`, `AsyncAnthropic`,
-  `AsyncElasticsearch`+`aiohttp`, `psycopg.AsyncConnection`). Offload-site try/if/loop
+  `AsyncElasticsearch`+`aiohttp`, `psycopg.AsyncConnection`, `grpc.aio`,
+  `sqlalchemy.ext.asyncio.AsyncSession`/`AsyncEngine` with `greenlet` + async driver). Offload-site try/if/loop
   guards do not suppress advice. Sync-caller exemption when the offloaded fn is
   also called from sync-only code. Excludes pymongo / requests / boto3 / file IO /
   subprocess / CPU.
 - **dangling-task** — bare `asyncio.create_task` / `loop.create_task` / `asyncio.ensure_future`
   statement that discards the returned `Task` (weak loop reference can be GC'd mid-execution).
+- **ephemeral-async-client** — `httpx.AsyncClient` / `aiohttp.ClientSession` constructed and closed per
+  route request or loop iteration instead of reusing a shared pool.
+- **shared-async-session** — one stateful `AsyncSession` / `AsyncConnection` / `asyncpg.Connection` /
+  `psycopg.AsyncConnection` shared concurrently across tasks in `asyncio.gather` or `TaskGroup`.
 
-### Errors: `nested-event-loop` / `offload-coroutine` / `sync-with-async-cm`
+### Errors: `nested-event-loop` / `offload-coroutine` / `sync-with-async-cm` / `sync-for-async-iterable` / `eager-offload-call` / `unawaited-coroutine`
 
 - **nested-event-loop** — `asyncio.run` / `Runner.run` / `run_until_complete` /
   `run_forever` / `anyio.run` / `trio.run` reachable from async without an
@@ -100,6 +105,9 @@ async-doctor why path/to/file.py:42 --path . --format json
   sites stay findings.
 - **offload-coroutine** — offload target is `async def` (coroutine never awaited).
 - **sync-with-async-cm** — sync `with` enters an async-only context manager (`__aenter__` without `__enter__`).
+- **sync-for-async-iterable** — sync `for` or sync comprehension iterates an async-only iterable (`__aiter__` without `__iter__`/`__getitem__`).
+- **eager-offload-call** — offload callable slot is a call `to_thread(fn(...))` returning a non-callable value (runs on loop + `TypeError`).
+- **unawaited-coroutine** — bare `fn(...)` statement discards a proven coroutine without `await`.
 
 ## Suppressions (no config file)
 

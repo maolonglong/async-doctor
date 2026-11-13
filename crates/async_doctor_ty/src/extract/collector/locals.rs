@@ -36,6 +36,8 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 self.event_loop_locals.remove(name);
                 self.buffer_locals.remove(name);
                 self.in_memory_archive_receivers.remove(name);
+                self.local_ephemeral_clients.remove(name);
+                self.local_stateful_sessions.remove(name);
             }
             Expr::Generator(gexpr) => {
                 self.local_genexprs
@@ -51,6 +53,8 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 self.event_loop_locals.remove(name);
                 self.buffer_locals.remove(name);
                 self.in_memory_archive_receivers.remove(name);
+                self.local_ephemeral_clients.remove(name);
+                self.local_stateful_sessions.remove(name);
             }
             other => {
                 self.local_lambdas.remove(name);
@@ -65,6 +69,8 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 self.note_loop_handle_binding(name, other);
                 self.note_buffer_binding(name, other);
                 self.note_archive_binding(name, other);
+                self.note_ephemeral_client_binding(name, other);
+                self.note_stateful_session_binding(name, other);
             }
         }
     }

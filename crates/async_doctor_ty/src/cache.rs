@@ -61,7 +61,11 @@ use serde::{Deserialize, Serialize};
 /// `constructed_receiver`, `positional_externals`, and
 /// `positional_constructed_receivers`; `follow_targets` preserved across partial
 /// package updates; namespace & single-file package metadata indexed via `RECORD`.
-pub const CACHE_SCHEMA_VERSION: u32 = 21;
+/// v22: expanded async-twin `any_needs` symbol probing (`grpc.aio`, SQLAlchemy
+/// `AsyncSession` / `AsyncEngine`) and first-party async anti-pattern edges
+/// (`sync-for-async-iterable`, `eager-offload-call`, `unawaited-coroutine`,
+/// `ephemeral-async-client`, `shared-async-session`).
+pub const CACHE_SCHEMA_VERSION: u32 = 22;
 
 /// Tool version embedded in the cache path (from this crate's Cargo.toml).
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
