@@ -83,7 +83,9 @@ pub(crate) fn extract_discovered_files(
     follow_budget: usize,
 ) -> anyhow::Result<ProjectFacts> {
     if files.is_empty() {
-        let sys_python = python.map(absolute_utf8).transpose()?;
+        let sys_python = python
+            .map(crate::env_discovery::absolute_python_path)
+            .transpose()?;
         // Discover before returning so cold empty scans match warm cache hits
         // (which refresh `environment` via `discover_scan_environment_with_python`).
         let environment =

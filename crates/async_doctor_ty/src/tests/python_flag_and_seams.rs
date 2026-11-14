@@ -79,6 +79,84 @@ fn scan_options_python_threads_through_db_cache_and_twin_resolve() {
     let _ = fs::remove_dir_all(&cache);
 }
 
+#[cfg(unix)]
+#[test]
+fn interpreter_symlink_preserves_selected_venv_across_scan_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("project");
+    let venv = tmp.path().join("selected");
+    let base = tmp.path().join("base");
+    super::helpers::copy_dir(&advice_shared_venv(), &venv);
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir_all(venv.join("bin")).unwrap();
+    fs::create_dir_all(base.join("bin")).unwrap();
+    fs::create_dir_all(base.join("lib/python3.12/site-packages")).unwrap();
+    fs::write(base.join("bin/python"), "must never be executed\n").unwrap();
+    let python = venv.join("bin/python");
+    std::os::unix::fs::symlink(base.join("bin/python"), &python).unwrap();
+    fs::write(
+        project.join("app.py"),
+        "import asyncio\nimport httpx\nimport requests\n\n\
+         async def run():\n    \
+         requests.get('https://example.com')\n    \
+         await asyncio.to_thread(httpx.get, 'https://example.com')\n",
+    )
+    .unwrap();
+    let empty = tmp.path().join("empty");
+    fs::create_dir_all(&empty).unwrap();
+    let options = ScanOptions {
+        python: Some(python.clone()),
+        cache_dir: Some(tmp.path().join("cache")),
+        ..ScanOptions::default()
+    };
+    let expected_venv = dunce::canonicalize(&venv).unwrap();
+    let expected_python = expected_venv.join("bin/python");
+    for target in [&project, &project.join("app.py"), &empty] {
+        let cold = scan_path_with_scan_options(target, &options).unwrap();
+        let warm = scan_path_with_scan_options(target, &options).unwrap();
+        assert_eq!(cold.environment.origin, "--python");
+        assert_eq!(
+            cold.environment.prefix.as_deref(),
+            expected_venv.to_str(),
+            "selected interpreter lost its venv for {}",
+            target.display()
+        );
+        assert_eq!(
+            cold.environment.interpreter.as_deref(),
+            expected_python.to_str()
+        );
+        assert_eq!(
+            serde_json::to_value(&cold).unwrap(),
+            serde_json::to_value(&warm).unwrap()
+        );
+        if target != &empty {
+            assert_eq!(cold.findings.len(), 1);
+            assert_eq!(cold.findings[0].rule, "blocking-http");
+            assert_eq!(cold.environment.unresolved_third_party, 0);
+            assert!(
+                cold.advice
+                    .iter()
+                    .any(|a| a.rule == "offload-has-async-twin")
+            );
+        }
+    }
+
+    // An ordinary interpreter alias without pyvenv.cfg must still follow its target.
+    let alias = tmp.path().join("python-alias");
+    std::os::unix::fs::symlink(base.join("bin/python"), &alias).unwrap();
+    let options = ScanOptions {
+        python: Some(alias),
+        ..options
+    };
+    for _ in 0..2 {
+        let report = scan_path_with_scan_options(&empty, &options).unwrap();
+        assert_eq!(
+            report.environment.prefix.as_deref(),
+            dunce::canonicalize(&base).unwrap().to_str()
+        );
+    }
+}
+
 #[test]
 fn ignore_candidate_files_are_isolated_per_report_across_interleaved_scans() {
     let proj_a = temp_project(&[

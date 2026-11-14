@@ -98,7 +98,9 @@ pub(crate) fn extract_files(
     let mut qual_map: HashMap<(String, String), FunctionId> = HashMap::new();
     let mut property_defs: HashSet<FunctionId> = HashSet::new();
 
-    let sys_python = python.map(super::path::absolute_utf8).transpose()?;
+    let sys_python = python
+        .map(crate::env_discovery::absolute_python_path)
+        .transpose()?;
     let mut db = AsyncDoctorDb::open(project_root, sys_python.as_deref())?;
     facts.environment = db.scan_environment().clone();
     let mut package_meta = PackageMetaMemo::for_site_packages(&facts.environment.site_packages);

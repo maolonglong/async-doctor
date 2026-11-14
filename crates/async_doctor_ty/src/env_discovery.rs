@@ -160,6 +160,31 @@ pub(crate) fn discover_environment(
     Ok(probe_path_python(system).unwrap_or_else(DiscoveredEnvironment::none))
 }
 
+/// Preserve a venv's interpreter symlink, but resolve ordinary interpreter aliases.
+/// A `pyvenv.cfg` beside `bin` / `Scripts` determines the selected environment;
+/// following its interpreter link would incorrectly select the base environment.
+pub(crate) fn absolute_python_path(path: &Path) -> anyhow::Result<SystemPathBuf> {
+    let absolute = std::path::absolute(path)?;
+    let resolved = if absolute.is_file()
+        && let (Some(parent), Some(name)) = (absolute.parent(), absolute.file_name())
+        && matches!(
+            parent.file_name().and_then(|n| n.to_str()),
+            Some("bin" | "Scripts")
+        )
+        && parent
+            .parent()
+            .is_some_and(|p| p.join("pyvenv.cfg").is_file())
+    {
+        dunce::canonicalize(parent)
+            .unwrap_or_else(|_| parent.to_path_buf())
+            .join(name)
+    } else {
+        dunce::canonicalize(&absolute).unwrap_or(absolute)
+    };
+    SystemPathBuf::from_path_buf(resolved)
+        .map_err(|p| anyhow::anyhow!("`{}` is not valid UTF-8", p.display()))
+}
+
 /// Path-level helper so `scan_cache` and `twin_resolve` inspect the exact same
 /// environment and `site-packages` / `dist-packages` roots as `AsyncDoctorDb`.
 pub(crate) fn discover_site_packages_for_path(
@@ -172,12 +197,7 @@ pub(crate) fn discover_site_packages_for_path(
     let Ok(sys_root) = SystemPathBuf::from_path_buf(abs) else {
         return (EnvironmentKind::None, None, Vec::new());
     };
-    let sys_python = python.and_then(|p| {
-        let p_abs = dunce::canonicalize(p)
-            .or_else(|_| std::path::absolute(p))
-            .unwrap_or_else(|_| p.to_path_buf());
-        SystemPathBuf::from_path_buf(p_abs).ok()
-    });
+    let sys_python = python.and_then(|p| absolute_python_path(p).ok());
     if python.is_some() && sys_python.is_none() {
         return (EnvironmentKind::None, None, Vec::new());
     }

@@ -81,6 +81,10 @@ statically without running Python), `CONDA_PREFIX`, and `PATH` `python3` /
 `python` (filtering ephemeral `uvx` / `pipx` tool venvs). Without a matching
 project environment, results degrade and `environment.note` plus
 `environment.unresolvedThirdPartyModules` report which packages did not resolve.
+An explicit venv `bin/python` / `Scripts/python.exe` retains its `pyvenv.cfg`
+environment even when the executable links to a base interpreter. Ordinary
+interpreter aliases without that marker still resolve their target. This
+selection is shared by cold/warm scans, cache fingerprints, and twin checks.
 Optional debug/perf env vars (`ASYNC_DOCTOR_TIMING`, `ASYNC_DOCTOR_PASS2_BATCH`)
 are documented in [benchmark.md](benchmark.md).
 

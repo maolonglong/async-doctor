@@ -68,6 +68,11 @@ pyright-extra discovery (`search_paths.rs`, `doctor_system.rs`), encoding skips
 `unresolvedThirdPartyModules`), and twin resolution against the scanned venv
 (`twin_resolve.rs`).
 
+Explicit venv interpreter links retain the pyvenv.cfg environment rather than
+resolving to the base interpreter; ordinary aliases still resolve their target.
+Extraction, empty scans, warm refresh, fingerprints, and twin checks share this
+normalization in `env_discovery.rs`.
+
 `extract/`: path discovery (`files.rs`, `path.rs`), pass-1 function collection
 (`functions.rs`, recording `FunctionFact.end_line`), pass-2 typed edges
 (`pass2.rs` / `pass2/` — default parallel path caps workers at 8, clears
@@ -200,8 +205,13 @@ same-package availability, not semantically equivalent replacements.
 Repo checks and corpus comparison: `scripts/check_rust_file_length.sh` (≤800
 lines under `crates/`), `scripts/check_docs.py` (doc links, budgets,
 plan/decision structure), `scripts/audit_compare.py` (finding/candidate/advice
-ID, location, and payload diff; optional strict gate), and `scripts/tests/`
-(standard-library subprocess regressions for audit/benchmark contracts).
+ID, location, and payload diff; optional strict gate), `scripts/agent_eval.py`
+(external source/check captures and transcript-reviewed comparison eligibility),
+and `scripts/tests/` (standard-library public-script regressions). Evaluation
+snapshots and caches must stay disjoint from the project; scan/test Python
+prefixes must agree. Transcript review is manual process evidence, not an
+enforced isolation sandbox. See the
+[evaluation note](docs/notes/2026-11-14-agent-repair-evaluation.md).
 
 ### `bench/`
 

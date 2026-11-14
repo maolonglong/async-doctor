@@ -210,7 +210,9 @@ fn refresh_environment_on_cache_hit(
     let Ok(root) = ruff_db::system::SystemPathBuf::from_path_buf(scan_root.to_path_buf()) else {
         return Ok(());
     };
-    let sys_python = python.map(absolute_utf8).transpose()?;
+    let sys_python = python
+        .map(crate::env_discovery::absolute_python_path)
+        .transpose()?;
     let live_res =
         crate::env_info::discover_scan_environment_with_python(&root, sys_python.as_deref());
     let mut live = match live_res {
