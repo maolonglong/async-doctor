@@ -129,7 +129,7 @@ files changed):
 ```yaml
 repos:
   - repo: https://github.com/maolonglong/async-doctor
-    rev: v0.1.3
+    rev: v0.1.4
     hooks:
       - id: async-doctor
 ```
