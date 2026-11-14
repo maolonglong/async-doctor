@@ -122,6 +122,8 @@ class AgentEvaluationTests(unittest.TestCase):
         self.assertFalse((self.root / "escaped-source").exists())
 
     def test_changed_removed_or_added_protected_tests_cannot_earn_eligibility(self):
+        # Keep a real contract test: Python 3.12 exits 5 for an empty suite.
+        (self.project / "tests/test_retained.py").write_text(self.original_test)
         self.assertEqual(self.capture("before").returncode, 0)
         self.app.write_text("def answer(): return 42\n")
         for change in ("changed", "removed", "added"):
@@ -139,12 +141,13 @@ class AgentEvaluationTests(unittest.TestCase):
                 if after.exists():
                     after = self.root / ("after-" + change)
                 capture = self.capture("unused", output=after)
-                self.assertEqual(capture.returncode, 0, capture.stderr)
+                self.assertEqual(capture.returncode, 0, capture.stdout + capture.stderr)
                 review = json.loads(self.review().read_text())
                 review["afterSha256"] = hashlib.sha256((after / "metadata.json").read_bytes()).hexdigest()
                 (self.root / "review.json").write_text(json.dumps(review))
                 result, data = self.check(self.root / "review.json", after=after.name)
                 self.assertNotEqual(result.returncode, 0)
+                self.assertTrue(data["checksPassed"])
                 self.assertFalse(data["eligibleForIsolatedComparison"])
                 self.assertIn("protected", " ".join(data["issues"]))
 
