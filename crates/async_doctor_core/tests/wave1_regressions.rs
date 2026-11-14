@@ -2,7 +2,7 @@
 //! - Bound offload wrapper methods (`self.wrap(sync_fn, async_cb)` vs `self.wrap(async_fn)`)
 //! - Quoted / `--path` locator parsing in `why_file_line` (`refresh_sink_sites`)
 //! - Sync-only caller fan-in on `SinkSiteSummary` (`syncCallerCount` + `sampleSyncCaller`)
-//! - `.venv`-aware `findings[].fix.hint` qualification via `resolved_symbols` + `SinkTable::async_twin`
+//! - Installed async symbols do not establish a repair for a blocking finding
 
 use async_doctor_core::{
     AsyncTwinHit, CallEdge, CallKind, CalleeRef, ConditionTag, EntryLabel, FunctionFact,
@@ -11,11 +11,11 @@ use async_doctor_core::{
 
 struct Wave1Sinks;
 
-fn sink(rule: &'static str, sink_qualname: &'static str, fix_hint: &'static str) -> SinkHit {
+fn sink(rule: &'static str, sink_qualname: &'static str) -> SinkHit {
     SinkHit {
         rule,
         sink_qualname,
-        fix_hint,
+        fix_hint: "",
         candidate_only: false,
         candidate_reason: None,
         with_only: false,
@@ -26,36 +26,14 @@ fn sink(rule: &'static str, sink_qualname: &'static str, fix_hint: &'static str)
 impl SinkTable for Wave1Sinks {
     fn lookup(&self, qualname: &str) -> Option<SinkHit> {
         match qualname {
-            "time.sleep" => Some(sink(
-                "blocking-sleep",
-                "time.sleep",
-                "Replace `time.sleep(...)` with `await asyncio.sleep(...)`.",
-            )),
-            "httpx.get" => Some(sink(
-                "blocking-http",
-                "httpx.get",
-                "Use `httpx.AsyncClient` (`await client.get(...)`) or offload via `await asyncio.to_thread(...)`.",
-            )),
-            "requests.get" => Some(sink(
-                "blocking-http",
-                "requests.get",
-                "Use an async HTTP client (`httpx.AsyncClient` / `aiohttp.ClientSession`), or offload via `await asyncio.to_thread(...)`.",
-            )),
-            "sqlalchemy.orm.Session.execute" => Some(sink(
-                "blocking-db",
-                "sqlalchemy.orm.Session.execute",
-                "Use `sqlalchemy.ext.asyncio.AsyncSession` (`await session.execute(...)`) or offload via `await asyncio.to_thread(...)`.",
-            )),
-            "builtins.open" => Some(sink(
-                "blocking-file",
-                "builtins.open",
-                "Use `aiofiles.open` or offload file IO via `await asyncio.to_thread(...)`.",
-            )),
-            "io.TextIOWrapper.write" => Some(sink(
-                "blocking-file",
-                "io.TextIOWrapper.write",
-                "Offload file IO via `await asyncio.to_thread(...)`.",
-            )),
+            "time.sleep" => Some(sink("blocking-sleep", "time.sleep")),
+            "httpx.get" => Some(sink("blocking-http", "httpx.get")),
+            "requests.get" => Some(sink("blocking-http", "requests.get")),
+            "sqlalchemy.orm.Session.execute" => {
+                Some(sink("blocking-db", "sqlalchemy.orm.Session.execute"))
+            }
+            "builtins.open" => Some(sink("blocking-file", "builtins.open")),
+            "io.TextIOWrapper.write" => Some(sink("blocking-file", "io.TextIOWrapper.write")),
             _ => None,
         }
     }
@@ -107,7 +85,6 @@ fn fn_fact(id: u32, qualname: &str, is_async: bool, file: &str, line: u32) -> Fu
         is_generator: false,
         label: EntryLabel::Other,
         is_sync_route: false,
-        async_twins: vec![],
         param_names: vec![],
         is_third_party: false,
         package_name: None,
@@ -511,7 +488,7 @@ fn sink_sites_report_sync_caller_fan_in_and_omit_when_zero() {
 }
 
 #[test]
-fn findings_fix_hint_reflects_scanned_venv_async_twins() {
+fn findings_do_not_infer_repairs_from_installed_async_symbols() {
     let make_single_sink_facts = |qualname: &str, symbols: &[&str]| {
         let entry = route_fact(0, "handler", "app.py", 1);
         let sink_edge = edge(
@@ -530,63 +507,29 @@ fn findings_fix_hint_reflects_scanned_venv_async_twins() {
         facts
     };
 
-    // 1. Empty `resolved_symbols` (synthetic unit tests without env scan): unchanged base hint.
-    let empty_env = analyze(&make_single_sink_facts("httpx.get", &[]), &Wave1Sinks);
-    assert_eq!(
-        empty_env.findings[0].fix.hint,
-        "Use `httpx.AsyncClient` (`await client.get(...)`) or offload via `await asyncio.to_thread(...)`."
-    );
-
-    // 2. Twin installed in scanned env -> notes `(installed in env)`.
-    let installed = analyze(
-        &make_single_sink_facts("httpx.get", &["httpx.AsyncClient"]),
-        &Wave1Sinks,
-    );
-    assert!(
-        installed.findings[0]
-            .fix
-            .hint
-            .contains("(installed in env)")
-    );
-
-    // 3. Non-empty scanned env where async twin package is NOT installed -> warns & favors to_thread.
-    let missing_pkg = analyze(
-        &make_single_sink_facts("requests.get", &["redis.asyncio"]),
-        &Wave1Sinks,
-    );
-    let missing_hint = &missing_pkg.findings[0].fix.hint;
-    assert!(
-        missing_hint.contains("not installed in the scanned env")
-            && missing_hint.contains("asyncio.to_thread")
-    );
-
-    // 4. SQLAlchemy `AsyncSession` + `greenlet` without async DB driver (`any_needs`) ->
-    //    warns driver is not installed; once `asyncpg` is present, marks `(installed in env)`.
-    let missing_driver = analyze(
-        &make_single_sink_facts(
-            "sqlalchemy.orm.Session.execute",
-            &["sqlalchemy.ext.asyncio.AsyncSession", "greenlet"],
-        ),
-        &Wave1Sinks,
-    );
-    assert!(
-        missing_driver.findings[0]
-            .fix
-            .hint
-            .contains("not installed in the scanned env")
-    );
-
-    let with_driver = analyze(
-        &make_single_sink_facts(
-            "sqlalchemy.orm.Session.execute",
-            &["sqlalchemy.ext.asyncio.AsyncSession", "greenlet", "asyncpg"],
-        ),
-        &Wave1Sinks,
-    );
-    assert!(
-        with_driver.findings[0]
-            .fix
-            .hint
-            .contains("(installed in env)")
-    );
+    let environments: &[&[&str]] = &[
+        &[],
+        &["httpx.AsyncClient"],
+        &["redis.asyncio"],
+        &["sqlalchemy.ext.asyncio.AsyncSession", "greenlet"],
+        &["sqlalchemy.ext.asyncio.AsyncSession", "greenlet", "asyncpg"],
+        &["aiofiles.open"],
+    ];
+    for qualname in [
+        "httpx.get",
+        "requests.get",
+        "sqlalchemy.orm.Session.execute",
+        "builtins.open",
+    ] {
+        let baseline = analyze(&make_single_sink_facts(qualname, &[]), &Wave1Sinks);
+        assert_eq!(baseline.findings.len(), 1, "{qualname}");
+        assert!(baseline.findings[0].fix.hint.is_empty(), "{qualname}");
+        for symbols in environments {
+            let report = analyze(&make_single_sink_facts(qualname, symbols), &Wave1Sinks);
+            assert_eq!(
+                report.findings, baseline.findings,
+                "installed symbols must not select a repair: {qualname}, {symbols:?}"
+            );
+        }
+    }
 }

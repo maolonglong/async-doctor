@@ -147,10 +147,7 @@ fn collect_dangling_task_advice(
                 },
                 chain: chain_steps,
                 fix: Fix {
-                    hint: "Keep a strong reference to the returned `Task` (e.g. `tasks.add(t); \
-                           t.add_done_callback(tasks.discard)`), use `asyncio.TaskGroup`, or \
-                           `await` the task so it cannot be garbage-collected mid-execution."
-                        .to_string(),
+                    hint: String::new(),
                     fix_group_id: fix_group_id(RULE_DANGLING_TASK, RULE_DANGLING_TASK),
                 },
                 why: format!("async-doctor why {}:{}", edge.file, edge.line),
@@ -241,12 +238,7 @@ fn collect_ephemeral_async_client_advice(
                 },
                 chain: chain_steps,
                 fix: Fix {
-                    hint: format!(
-                        "`{client_name}` is created and closed on every request or loop iteration, \
-                         discarding connection pools and repeating DNS/TLS handshakes. Create one \
-                         shared `{client_name}` in your application lifespan (or outside the loop) \
-                         and reuse it across calls."
-                    ),
+                    hint: String::new(),
                     fix_group_id: fix_group_id(RULE_EPHEMERAL_ASYNC_CLIENT, client_name),
                 },
                 why: format!("async-doctor why {}:{}", edge.file, edge.line),
@@ -333,13 +325,7 @@ fn collect_shared_async_session_advice(
                 },
                 chain: chain_steps,
                 fix: Fix {
-                    hint: format!(
-                        "`{handle_name}` is a stateful async session/connection and is not safe to \
-                         share concurrently across tasks in `gather` / `TaskGroup` (causes \
-                         `InvalidRequestError` or interleaved protocol errors). Open a separate \
-                         session/connection per task (e.g. via `async_sessionmaker` or a pool) \
-                         or `await` the operations sequentially."
-                    ),
+                    hint: String::new(),
                     fix_group_id: fix_group_id(RULE_SHARED_ASYNC_SESSION, RULE_SHARED_ASYNC_SESSION),
                 },
                 why: format!("async-doctor why {}:{}", edge.file, edge.line),

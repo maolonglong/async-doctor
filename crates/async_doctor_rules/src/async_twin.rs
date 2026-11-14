@@ -1,13 +1,13 @@
-//! Structured async-twin table for high-confidence offload advice.
+//! Structured same-package async-API mappings and availability requirements.
 //!
-//! Design exception (see `docs/decisions/2026-10-31-advice-tier.md`): twins
-//! appear as a dedicated advice rule at offload cut sites — not as findings,
-//! and not double-reported with blocking-* findings (those sites are already
-//! cut).
+//! Resolved mappings support factual `offload-has-async-twin` advice at already-cut
+//! offload sites, not blocking findings or migration recommendations. A mapped
+//! API's availability does not establish a behavior-preserving substitution.
 
 use async_doctor_core::{AsyncTwinHit, TwinConfidence};
 
 /// One high-confidence same-package async twin mapping.
+/// This describes an API relationship, not a recommended edit.
 #[derive(Debug, Clone, Copy)]
 pub struct AsyncTwinEntry {
     /// Human/symbol form, e.g. `httpx.AsyncClient`.
@@ -16,6 +16,7 @@ pub struct AsyncTwinEntry {
     pub needs: &'static [&'static str],
     /// Extra modules where AT LEAST ONE must resolve when non-empty (e.g. an async SQL driver).
     pub any_needs: &'static [&'static str],
+    /// Confidence in the mapping, not in migration safety or suitability.
     pub confidence: TwinConfidence,
     /// Sink qualname prefixes / matchers that this twin covers.
     matchers: &'static [TwinMatcher],
@@ -37,7 +38,7 @@ const SQLALCHEMY_ASYNC_DRIVERS: &[&str] = &[
     "psycopg.AsyncConnection",
 ];
 
-/// High-confidence same-package twins eligible for `offload-has-async-twin`.
+/// Same-package mappings whose resolved availability can support `offload-has-async-twin`.
 pub static ASYNC_TWINS: &[AsyncTwinEntry] = &[
     AsyncTwinEntry {
         symbol: "httpx.AsyncClient",
@@ -289,7 +290,7 @@ pub static ASYNC_TWINS: &[AsyncTwinEntry] = &[
     },
 ];
 
-/// Every symbol that advice may need to resolve in the scanned venv.
+/// Every symbol that may need resolution to establish mapped API availability.
 pub fn twin_resolution_symbols() -> Vec<&'static str> {
     let mut out = Vec::new();
     for t in ASYNC_TWINS {
@@ -303,6 +304,9 @@ pub fn twin_resolution_symbols() -> Vec<&'static str> {
 }
 
 /// Look up a high-confidence same-package twin for a sink qualname.
+///
+/// Callers resolve the returned symbol and dependency requirements in the scanned
+/// environment. A match alone establishes neither availability nor a safe migration.
 ///
 /// Returns `None` for excluded families (pymongo, requests, boto3, file IO, …)
 /// and for sinks without a structured twin entry.

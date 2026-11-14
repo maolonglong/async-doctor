@@ -17,19 +17,37 @@ async-doctor install-skill [--force] --path DIR      # install .agents/skills/as
 
 | Flag / behaviour | Contract |
 | --- | --- |
-| Default format | Human text (environment + prominent warning if `complete=false`, sink-site summary + `Top fix:` choke callout + sync-caller fan-in annotations, capped fix groups/advice + scan summary footer with 0–100 score; TTY-styled via `anstyle`/`anstream`, respects `NO_COLOR` and `CLICOLOR_FORCE`/`FORCE_COLOR`) |
+| Default format | Human text (environment + prominent warning if `complete=false`, sink-site summary + `Top site:` callout with `reached by N` counts + sync-caller fan-in annotations, capped diagnostic groups/advice + scan summary footer with 0–100 score; TTY-styled via `anstyle`/`anstream`, respects `NO_COLOR` and `CLICOLOR_FORCE`/`FORCE_COLOR`) |
 | `--python <PATH>` | Explicit Python interpreter executable or virtual environment root for third-party resolution, whole-scan cache fingerprinting, and async-twin checks (supported on both `async-doctor` and `async-doctor why`) |
 | `--format json` | Schema in [json-contract.md](json-contract.md); pretty-printed on TTYs, compact single-line JSON on pipes/non-TTYs |
 | `--format sarif` | SARIF 2.1.0 for code scanning (canonical `driver.rules` + `ruleIndex` + RFC 3986 percent-encoded URIs) |
 | `--format markdown` | GitHub-Flavored Markdown for `$GITHUB_STEP_SUMMARY` and PR comments (caps advice/groups unless `--expand`; surfaces `complete=false` warning) |
 | `--score` | Print only the 0–100 health score on stdout (exit code still reflects findings unless `--fail-on none`) |
 | `--fail-on <findings\|none>` | Exit-code policy: `findings` (default) exits 1 on findings or unused suppressions; `none` exits 0 for advisory CI / preview runs (tool errors still exit 2) |
-| `--expand` | Show every finding chain, fix group, and advice item (also supported on `why` when >5 entries share a sink/rule) |
+| `--expand` | Show every finding chain, diagnostic group, and advice item (also supported on `why` when >5 entries share a sink/rule) |
 | `--show-unresolved` | Surface `reason=unresolved` candidates (else hidden / aggregated) |
 | `--include-non-production` | Include entries under tests/docs/examples/scripts/hidden dirs |
 | `--changed[=base]` / `--diff[=base]` | Short-circuits with a clean empty report (`<20ms`) when git diff touches zero Python or Python config/lock files; otherwise runs full analysis and retains items touching NEW-side changed lines, cross-file `def` → `async def` target definitions (`unawaited-coroutine`, `offload-coroutine`, `sync-with-async-cm`, `sync-for-async-iterable`), or overlapping intermediate/sink function and `Class.__init__` body spans. Run a full scan or `--baseline` before merge |
 | `--baseline` / `--write-baseline` | CI / agent loops; `--write-baseline` cannot combine with `--changed` / `--diff` |
 | `--max-findings N` | Cap `findings`/`candidates`/`advice` each to N (output-only; score, exit code, `sinkSites` and `--write-baseline` use the full report). Findings are picked round-robin over `sinkSites` so every site keeps an example while N >= site count; grouped text, Markdown, and the `omitted*` JSON fields preserve full pre-cap `sinkSites` counts |
+
+## Interpreting diagnostics
+
+`Top site:` and `reached by N findings across M entries` describe observed
+reachability, not a repair that will clear N findings. Fix groups retain their
+stable grouping ids even when no edit is recommended. Sync-caller counts and
+samples are evidence within the analyzed graph, not complete coverage of
+external or dynamic callers or permission to convert a helper to async. See
+[Reachability summaries](json-contract.md#reachability-summaries).
+
+Diagnostics remain visible when `fix.hint` is empty (no recommended edit);
+human-readable reports omit the empty repair block. `explain` and `why` retain
+the diagnosis without a default offload, migration, or scheduling recipe. Only
+the two async-only protocol rules may suggest a local correction on the same
+object where async syntax is already legal. `why` also omits rule-level repair
+text when none of the selected diagnostics establishes a correction; `explain`
+describes the rule's context-independent applicability. Details are in
+[rules.md](rules.md).
 
 ## Suppressions
 

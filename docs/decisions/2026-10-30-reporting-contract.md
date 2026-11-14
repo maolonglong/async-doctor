@@ -1,6 +1,9 @@
 # Findings, candidates, exit codes, and JSON schema
 
-Status: accepted
+Status: superseded by [Evidence-bounded repair guidance](2026-11-14-evidence-bounded-repair-guidance.md)
+
+The replacement revises repair guidance only and explicitly retains this
+record's diagnostic tiers, schema, identity, and exit-code policies.
 
 ## Problem
 

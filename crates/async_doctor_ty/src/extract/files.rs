@@ -18,7 +18,7 @@ use crate::sitepkgs::{FollowTarget, PackageMetaMemo};
 
 use super::ctx::{DefKey, TaskTargets};
 use super::follow::follow_third_party;
-use super::functions::{Pass1FileOutcome, merge_pass1_file_data, twin_name};
+use super::functions::{Pass1FileOutcome, merge_pass1_file_data};
 use super::panic_util::panic_message;
 use super::pass2::{
     PASS2_WAVE_AST_CLEAR_INTERVAL, Pass2FileResult, Pass2FileSpec, Pass2Shared, extract_one_file,
@@ -97,7 +97,6 @@ pub(crate) fn extract_files(
     let mut def_map: HashMap<DefKey, FunctionId> = HashMap::new();
     let mut qual_map: HashMap<(String, String), FunctionId> = HashMap::new();
     let mut property_defs: HashSet<FunctionId> = HashSet::new();
-    let mut class_methods: HashMap<(String, String), Vec<String>> = HashMap::new();
 
     let sys_python = python.map(super::path::absolute_utf8).transpose()?;
     let mut db = AsyncDoctorDb::open(project_root, sys_python.as_deref())?;
@@ -139,22 +138,10 @@ pub(crate) fn extract_files(
                         &mut facts,
                         &mut def_map,
                         &mut qual_map,
-                        &mut class_methods,
                         &mut property_defs,
                     );
                     catalog_to_kept[idx] = Some(kept_specs.len());
                     kept_specs.push(spec);
-                }
-            }
-        }
-
-        for func in &mut facts.functions {
-            if let Some((class, method)) = func.qualname.rsplit_once('.') {
-                let key = (func.module.clone(), class.to_string());
-                if let Some(methods) = class_methods.get(&key)
-                    && let Some(t) = twin_name(method, methods)
-                {
-                    func.async_twins.push((method.to_string(), t));
                 }
             }
         }
@@ -213,7 +200,6 @@ pub(crate) fn extract_files(
                         &mut facts,
                         &mut def_map,
                         &mut qual_map,
-                        &mut class_methods,
                         &mut property_defs,
                     );
                     kept.push(entry);
@@ -222,17 +208,6 @@ pub(crate) fn extract_files(
             }
         }
         db = db.fresh_empty();
-
-        for func in &mut facts.functions {
-            if let Some((class, method)) = func.qualname.rsplit_once('.') {
-                let key = (func.module.clone(), class.to_string());
-                if let Some(methods) = class_methods.get(&key)
-                    && let Some(t) = twin_name(method, methods)
-                {
-                    func.async_twins.push((method.to_string(), t));
-                }
-            }
-        }
 
         let entries: Vec<&FileRef> = kept.iter().collect();
         run_pass2_batched(

@@ -2,10 +2,10 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
-use crate::graph::{CallEdge, CalleeRef, FunctionId, ProjectFacts};
+use crate::graph::{CalleeRef, FunctionId, ProjectFacts};
 use crate::report::{Finding, SinkSiteSummary};
 
-use super::{AsyncTwinHit, SinkHit, SinkTable};
+use super::{AsyncTwinHit, SinkTable};
 
 /// Precomputed reachability and reverse-caller index for sync-caller checks.
 pub(super) struct SyncCallerIndex {
@@ -244,25 +244,6 @@ pub(super) fn twin_lookup_key(
         return Some(hit.sink_qualname.to_string());
     }
     None
-}
-
-/// Lookup structured `AsyncTwinHit` for a sink seed edge.
-pub(super) fn lookup_sink_async_twin(
-    sinks: &dyn SinkTable,
-    edge: &CallEdge,
-    hit: &SinkHit,
-) -> Option<AsyncTwinHit> {
-    if let Some(recv) = edge.constructed_receiver.as_deref()
-        && let Some(twin) = sinks.async_twin(recv)
-    {
-        return Some(twin);
-    }
-    if let CalleeRef::External { qualname } = &edge.callee
-        && let Some(twin) = sinks.async_twin(qualname)
-    {
-        return Some(twin);
-    }
-    sinks.async_twin(hit.sink_qualname)
 }
 
 fn build_edges_by_caller(facts: &ProjectFacts) -> HashMap<FunctionId, Vec<usize>> {

@@ -194,7 +194,6 @@ pub(crate) fn materialize_cached_functions_with_deferred(
             is_generator: cf.is_generator,
             label: EntryLabel::Other,
             is_sync_route: false,
-            async_twins: Vec::new(),
             param_names: cf.param_names.clone(),
             is_third_party: true,
             package_name: Some(package.to_string()),

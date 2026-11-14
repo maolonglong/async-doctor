@@ -151,7 +151,9 @@ pub fn write_report(report: &Report, opts: TextOptions) -> anyhow::Result<()> {
             writeln!(out)?;
             for c in extras {
                 writeln!(out, "[{}] {}", c.rule, c.reason)?;
-                writeln!(out, "  fix: {}", c.fix.hint)?;
+                if !c.fix.hint.is_empty() {
+                    writeln!(out, "  fix: {}", c.fix.hint)?;
+                }
             }
         }
     }
@@ -278,7 +280,7 @@ pub(crate) fn sink_label(f: &Finding) -> Option<&str> {
     async_doctor_core::primary_sink_step(f).map(|(_, s)| {
         s.resolution
             .strip_prefix("blocking sink `")
-            .and_then(|r| r.strip_suffix('`'))
+            .and_then(|r| r.split_once('`').map(|(qualname, _)| qualname))
             .unwrap_or_else(|| {
                 let t = s.text.trim();
                 t.split('(').next().unwrap_or(t).trim()
@@ -318,7 +320,9 @@ pub fn write_finding_styled(
     if !finding.conditions.is_empty() {
         writeln!(out, "  conditions: {}", finding.conditions.join(", "))?;
     }
-    writeln!(out, "  {fx}fix:{fx:#} {}", finding.fix.hint)?;
+    if !finding.fix.hint.is_empty() {
+        writeln!(out, "  {fx}fix:{fx:#} {}", finding.fix.hint)?;
+    }
     if !finding.docs_url.is_empty() {
         writeln!(out, "  docs: {}", finding.docs_url)?;
     }
@@ -376,7 +380,9 @@ pub fn write_advice(out: &mut impl Write, advice: &Advice) -> anyhow::Result<()>
         advice.entry.line
     )?;
     write_chain(out, &advice.chain, "  ", true)?;
-    writeln!(out, "  {fx}fix:{fx:#} {}", advice.fix.hint)?;
+    if !advice.fix.hint.is_empty() {
+        writeln!(out, "  {fx}fix:{fx:#} {}", advice.fix.hint)?;
+    }
     if !advice.docs_url.is_empty() {
         writeln!(out, "  docs: {}", advice.docs_url)?;
     }
@@ -400,7 +406,9 @@ pub fn write_candidate(out: &mut impl Write, candidate: &Candidate) -> anyhow::R
         candidate.entry.line
     )?;
     write_chain(out, &candidate.chain, "  ", true)?;
-    writeln!(out, "  {fx}fix:{fx:#} {}", candidate.fix.hint)?;
+    if !candidate.fix.hint.is_empty() {
+        writeln!(out, "  {fx}fix:{fx:#} {}", candidate.fix.hint)?;
+    }
     if !candidate.docs_url.is_empty() {
         writeln!(out, "  docs: {}", candidate.docs_url)?;
     }

@@ -15,15 +15,55 @@ CLI flags: [cli.md](cli.md).
 | `environment` | interpreter/venv/site-packages used; `frameworks` when async frameworks/runtimes (FastAPI, Starlette, Django, aiohttp, anyio, Trio, … — not client libs like httpx/redis) are detected in `site-packages`; `unresolvedThirdPartyModules` (up to 10 sorted top-level missing third-party package names); `note` when degraded (ratio-aware when a venv is active). `environment.note`, `environment.frameworks`, and `environment.unresolvedThirdPartyModules` are omitted from JSON when empty (`skip_serializing_if`); `environment.followBudgetSkipped` counts third-party callees not followed because the follow budget was reached — omitted when 0, and it never flips `complete` |
 | `findings[]` / `candidates[]` / `advice[]` | always emitted (even empty); candidates have `reason` (e.g. `conditional`, `metadata`, `short-lock`, `cheap-path-op`, `unresolved`); advice is non-blocking (SARIF `note`) |
 | `locationLessCandidates[]` | always emitted; missing-third-party aggregate lives here with empty `entry.file`/`chain` and empty `why` |
-| `skipped[]` / `sinkSites[]` / `unusedSuppressions[]` / `unresolvedSummary[]` | always emitted (even empty); `sinkSites[]` attributes merged `open` + `read`/`write` chains to the primary `open` hop, and includes optional `syncCallerCount` (omitted when 0) and `sampleSyncCaller` (`file:line`, omitted when absent) when synchronous callers also invoke the sink helper |
+| `skipped[]` / `sinkSites[]` / `unusedSuppressions[]` / `unresolvedSummary[]` | always emitted (even empty); `sinkSites[]` attributes merged `open` + `read`/`write` chains to the primary `open` hop, and includes optional `syncCallerCount` (omitted when 0) and `sampleSyncCaller` (`file:line`, omitted when absent); see **Reachability summaries** below |
 | `hiddenUnresolvedCandidates` / `omittedNonProductionEntries` / `fileCount` / `asyncEntryCount` / `omittedFindings` / `omittedCandidates` / `omittedAdvice` | always emitted, including `0` — the `omitted*` trio counts entries cut by `--max-findings` (0 without the flag) |
 | `id` | stable sha256 (16-byte hex) of **rule + entry qualname + sink qualname + chain qualnames + occurrence**; **not** file/line/column |
 | `rule` | e.g. `blocking-sleep`, `blocking-http` |
+| `category` | advice only; `performance` or `correctness`, informational and unchanged by the presence or absence of a repair hint |
 | `entry` | async def location + label (`route` / `lifecycle` / `task` / `async_def`) |
 | `chain[]` | shortest evidence chain (`file`, `line`, `text`) |
 | `conditions[]` | prove-only tags (see below) |
-| `fix` | hint + `fixGroupId` (shared across same root cause) |
+| `fix` | always-present object with string `hint` and stable `fixGroupId`; `hint: ""` means no recommended edit; grouping remains available even without a recommendation |
 | `why` | runnable `async-doctor why file:line --path <cwd-relative>` (locations with spaces are quoted); empty on location-less entries. Running `async-doctor why <file:line> --format json` emits `{ schemaVersion, location: { file, line }, findings, candidates, advice, rules }` after applying inline suppressions |
+
+## Diagnosis and repair hints
+
+`schemaVersion` remains **2**. Every finding, candidate, and advice item,
+including a location-less candidate, keeps `fix`, its string `hint`, and its
+stable `fixGroupId`. An empty hint is `""`, not `null` or an omitted field. It
+means the scan recommends no edit; the diagnosis, evidence, tier, ids, and
+exit-code semantics remain intact. A shared `fixGroupId` groups diagnostics,
+not a proven repair that resolves them all.
+
+Non-empty repair hints are limited to `sync-with-async-cm` and
+`sync-for-async-iterable`: a local correction selects the supported async-only
+protocol on the same object, only inside an already-async function. A sync
+helper reached from an async entry still receives the diagnosis, but no hint
+requiring an API conversion. This is not a claim of a globally optimal repair.
+
+`why` limits rule-level repair text to corrections present in the selected
+diagnostics. Its `rules[].fix` remains a string, empty when no selected
+diagnostic establishes a correction for that rule.
+
+`offload-has-async-twin` records same-package async-symbol availability in the
+scanned environment. Its `performance` category remains for compatibility,
+not as a measured performance result or a recommendation to replace a safe
+offload. Its repair hint is empty.
+
+## Reachability summaries
+
+`sinkSites[].findingCount` and `entryCount` count the analyzed finding chains
+and async entries reaching a site. Optional `chokePoint*` fields identify a
+shared intermediate hop in those chains. These are reachability summaries,
+not predictions of how many findings an edit will clear.
+
+`syncCallerCount` counts distinct sync-only project callers reaching the site's
+sync helper in the analyzed graph, directly or through sync helpers.
+`sampleSyncCaller` is one observed call location, not a complete caller list.
+Zero or omitted counts do not prove that no synchronous callers exist:
+external, dynamic, or otherwise unresolved callers may be absent from the
+graph. Neither these counts nor `complete=true` establish complete caller
+coverage or permission to convert an API to async.
 
 ## Condition tags
 

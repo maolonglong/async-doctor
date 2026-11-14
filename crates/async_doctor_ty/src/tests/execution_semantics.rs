@@ -6,7 +6,7 @@ use super::helpers::fixtures_dir;
 use crate::scan_path;
 
 #[test]
-fn coroutine_protocol_use_requires_await_not_an_async_protocol_rewrite() {
+fn coroutine_protocol_use_diagnoses_without_an_async_protocol_rewrite() {
     let report = scan_path(&fixtures_dir().join("python_execution")).unwrap();
     for name in [
         "coroutine_sync_for",
@@ -22,9 +22,8 @@ fn coroutine_protocol_use_requires_await_not_an_async_protocol_rewrite() {
             .collect();
         assert_eq!(findings.len(), 1, "{name}: {findings:?}");
         assert_eq!(findings[0].rule, "unawaited-coroutine", "{name}");
-        assert!(findings[0].fix.hint.contains("await"), "{name}");
         assert!(
-            !findings[0].fix.hint.contains("instead of sync"),
+            findings[0].fix.hint.is_empty(),
             "{name}: {:?}",
             findings[0].fix
         );

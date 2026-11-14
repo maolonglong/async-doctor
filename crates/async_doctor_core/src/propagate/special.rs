@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::graph::{
-    CalleeRef, ConditionTag, FunctionId, ProjectFacts, is_non_production_entry_path,
+    CalleeRef, ConditionTag, FunctionFact, FunctionId, ProjectFacts, is_non_production_entry_path,
 };
 use crate::id::{FindingIdParts, fix_group_id};
 use crate::report::{Entry, Finding, Fix};
@@ -24,14 +24,18 @@ pub(super) const RULE_EAGER_OFFLOAD_CALL: &str = "eager-offload-call";
 pub(super) const RULE_UNAWAITED_COROUTINE: &str = "unawaited-coroutine";
 
 /// Seed a special finding hit (`nested-event-loop` or first-party async anti-patterns).
-pub(super) fn special_finding_hit(qualname: &str, caller_is_installed_tp: bool) -> Option<SinkHit> {
-    if !caller_is_installed_tp {
+pub(super) fn special_finding_hit(qualname: &str, caller: &FunctionFact) -> Option<SinkHit> {
+    if !caller.is_installed_third_party() {
         if qualname == RULE_SYNC_WITH_ASYNC_CM {
             return Some(SinkHit {
                 rule: RULE_SYNC_WITH_ASYNC_CM,
                 sink_qualname: RULE_SYNC_WITH_ASYNC_CM,
-                fix_hint: "Use `async with ...:` instead of sync `with ...:` — \
-                           this context manager only implements the async context protocol (`__aenter__` / `__aexit__`).",
+                fix_hint: if caller.is_async {
+                    "Use `async with ...:` instead of sync `with ...:` — \
+                     this context manager only implements the async context protocol (`__aenter__` / `__aexit__`)."
+                } else {
+                    ""
+                },
                 candidate_only: false,
                 candidate_reason: None,
                 with_only: true,
@@ -42,9 +46,13 @@ pub(super) fn special_finding_hit(qualname: &str, caller_is_installed_tp: bool) 
             return Some(SinkHit {
                 rule: RULE_SYNC_FOR_ASYNC_ITERABLE,
                 sink_qualname: RULE_SYNC_FOR_ASYNC_ITERABLE,
-                fix_hint: "Use `async for ... in ...:` (or `[x async for x in ...]`) instead of \
-                           sync iteration — this object only implements the async iterator protocol \
-                           (`__aiter__` / `__anext__`).",
+                fix_hint: if caller.is_async {
+                    "Use `async for ... in ...:` (or `[x async for x in ...]`) instead of \
+                     sync iteration — this object only implements the async iterator protocol \
+                     (`__aiter__` / `__anext__`)."
+                } else {
+                    ""
+                },
                 candidate_only: false,
                 candidate_reason: None,
                 with_only: false,
@@ -55,11 +63,7 @@ pub(super) fn special_finding_hit(qualname: &str, caller_is_installed_tp: bool) 
             return Some(SinkHit {
                 rule: RULE_UNAWAITED_COROUTINE,
                 sink_qualname: RULE_UNAWAITED_COROUTINE,
-                fix_hint: "Calling a coroutine function without `await` constructs a coroutine \
-                           object, not its result. Await it before using the result in a loop or \
-                           context manager; `async for` / `async with` do not await the object for \
-                           you. For discarded calls, use `await fn(...)` or schedule explicitly \
-                           with `asyncio.TaskGroup` / `asyncio.create_task(...)`.",
+                fix_hint: "",
                 candidate_only: false,
                 candidate_reason: None,
                 with_only: false,
@@ -71,10 +75,7 @@ pub(super) fn special_finding_hit(qualname: &str, caller_is_installed_tp: bool) 
         Some(SinkHit {
             rule: RULE_NESTED_EVENT_LOOP,
             sink_qualname: "nested-event-loop",
-            fix_hint: "Do not call `asyncio.run` / `loop.run_until_complete` / `anyio.run` / \
-                       `trio.run` from async code — you are already inside a running loop. \
-                       Await the coroutine directly, or offload truly sync work with \
-                       `asyncio.to_thread`.",
+            fix_hint: "",
             candidate_only: false,
             candidate_reason: None,
             with_only: false,
@@ -219,12 +220,7 @@ pub(super) fn collect_offload_coroutine_findings(ctx: &mut SpecialFindingCtx<'_>
                 chain: chain_steps,
                 conditions,
                 fix: Fix {
-                    hint: format!(
-                        "`{}` expects a sync callable. Passing an `async def` builds a \
-                         coroutine that is never awaited — the work does not run. Await \
-                         the coroutine directly, or pass a sync function.",
-                        kind.as_str()
-                    ),
+                    hint: String::new(),
                     fix_group_id: fix_group_id(RULE_OFFLOAD_COROUTINE, kind.as_str()),
                 },
                 why: format!("async-doctor why {}:{}", edge.file, edge.line),
@@ -357,12 +353,7 @@ pub(super) fn collect_eager_offload_findings(
                 chain: chain_steps,
                 conditions,
                 fix: Fix {
-                    hint: format!(
-                        "This argument call runs eagerly on the event loop before `{offload_name}`, \
-                         and its return value is not callable (`TypeError` at runtime) — pass the \
-                         callable (e.g. `asyncio.to_thread(f, ...)`) rather than calling it \
-                         (`to_thread(f())`), or wrap keyword calls with `functools.partial(f, ...)`."
-                    ),
+                    hint: String::new(),
                     fix_group_id: fix_group_id(RULE_EAGER_OFFLOAD_CALL, offload_name),
                 },
                 why: format!("async-doctor why {}:{}", edge.file, edge.line),

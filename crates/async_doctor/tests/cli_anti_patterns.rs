@@ -103,6 +103,11 @@ fn sync_with_async_cm_reports_finding_and_respects_dual_cm_and_async_with() {
     assert!(entries.contains(&"bad_stdlib_lock"));
     assert!(entries.contains(&"bad_project_cm"));
     assert!(!entries.contains(&"good_cases"));
+    assert!(findings.iter().all(|f| {
+        f["fix"]["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("async with"))
+    }));
 }
 
 #[test]
@@ -152,6 +157,31 @@ fn dangling_task_reports_correctness_advice_only_when_discarded() {
     assert_eq!(advice[0]["rule"], "dangling-task");
     assert_eq!(advice[0]["category"], "correctness");
     assert_eq!(advice[0]["entry"]["name"], "bad_fire_and_forget");
+    assert_eq!(advice[0]["fix"]["hint"], "");
+
+    for format in ["text", "markdown", "sarif"] {
+        let out = bin()
+            .args(["--format", format])
+            .arg(dir.path())
+            .output()
+            .expect("run advice reporter");
+        assert_eq!(out.status.code(), Some(0), "{format}");
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        if format == "sarif" {
+            let doc: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+            let result = &doc["runs"][0]["results"][0];
+            assert_eq!(result["ruleId"], "dangling-task");
+            assert_eq!(result["level"], "note");
+            let message = result["message"]["text"].as_str().unwrap();
+            assert!(message.contains("reference discarded"), "{message}");
+        } else {
+            assert!(stdout.contains("reference discarded"), "{stdout}");
+            assert!(
+                !stdout.contains("fix:") && !stdout.contains("**Fix:**"),
+                "{stdout}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -170,11 +200,10 @@ fn explain_supports_all_async_anti_pattern_rules() {
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(stdout.contains(rule));
         assert!(stdout.contains(&format!("#{rule}")));
-        if rule == "unawaited-coroutine" {
-            assert!(
-                stdout.contains("for x in await") && stdout.contains("with await"),
-                "explain must show awaiting the result before protocol use: {stdout}"
-            );
+        if matches!(rule, "sync-with-async-cm" | "sync-for-async-iterable") {
+            assert!(stdout.contains("How to fix"), "{stdout}");
+        } else {
+            assert!(!stdout.contains("How to fix"), "{stdout}");
         }
     }
 }
@@ -299,6 +328,14 @@ fn sync_for_async_iterable_catches_for_and_comp_and_respects_dual_and_getitem() 
     assert!(entries.contains(&"bad_comp_agen"));
     assert!(entries.contains(&"bad_for_cls"));
     assert!(!entries.contains(&"good_cases"));
+    assert!(
+        findings
+            .iter()
+            .filter(|f| f["rule"] == "sync-for-async-iterable")
+            .all(|f| f["fix"]["hint"]
+                .as_str()
+                .is_some_and(|hint| hint.contains("async for")))
+    );
 }
 
 #[test]
@@ -608,18 +645,18 @@ fn expanded_async_twins_gate_sqlalchemy_on_greenlet_and_driver_and_support_grpc_
         .expect("run 1");
     assert_eq!(out1.status.code(), Some(0));
     let v1: serde_json::Value = serde_json::from_slice(&out1.stdout).unwrap();
-    let hints1: Vec<&str> = v1["advice"]
-        .as_array()
-        .unwrap()
+    let advice1 = v1["advice"].as_array().unwrap();
+    assert!(advice1.iter().all(|a| a["fix"]["hint"] == ""));
+    let evidence1: Vec<&str> = advice1
         .iter()
-        .filter_map(|a| a["fix"]["hint"].as_str())
+        .filter_map(|a| a["chain"].as_array()?.last()?["resolution"].as_str())
         .collect();
     assert_eq!(
-        hints1.len(),
+        evidence1.len(),
         1,
-        "expected only grpc.aio advice: {hints1:#?}"
+        "expected only grpc.aio availability: {evidence1:#?}"
     );
-    assert!(hints1[0].contains("grpc.aio"));
+    assert!(evidence1[0].contains("grpc.aio"));
 
     // 2. Once `asyncpg` is installed, SQLAlchemy AsyncSession twin advice fires too!
     add_pkg(&sp, "asyncpg", "asyncpg/__init__.py", "");
@@ -628,20 +665,21 @@ fn expanded_async_twins_gate_sqlalchemy_on_greenlet_and_driver_and_support_grpc_
         .arg(dir.path())
         .output()
         .expect("run 2");
+    assert_eq!(out2.status.code(), Some(0));
     let v2: serde_json::Value = serde_json::from_slice(&out2.stdout).unwrap();
-    let hints2: Vec<&str> = v2["advice"]
-        .as_array()
-        .unwrap()
+    let advice2 = v2["advice"].as_array().unwrap();
+    assert!(advice2.iter().all(|a| a["fix"]["hint"] == ""));
+    let evidence2: Vec<&str> = advice2
         .iter()
-        .filter_map(|a| a["fix"]["hint"].as_str())
+        .filter_map(|a| a["chain"].as_array()?.last()?["resolution"].as_str())
         .collect();
     assert_eq!(
-        hints2.len(),
+        evidence2.len(),
         2,
-        "expected grpc.aio + AsyncSession advice: {hints2:#?}"
+        "expected grpc.aio + AsyncSession availability: {evidence2:#?}"
     );
     assert!(
-        hints2
+        evidence2
             .iter()
             .any(|h| h.contains("sqlalchemy.ext.asyncio.AsyncSession"))
     );

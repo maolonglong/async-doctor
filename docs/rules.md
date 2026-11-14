@@ -1,13 +1,23 @@
 # async-doctor rules
 
 Stable rule ids for findings, candidates, and advice. Use `async-doctor explain <rule-id>`
-for the same text in the terminal. Inline suppressions: `# async-doctor: ignore[<rule-id>]: <reason>`.
+for terminal rule help. Inline suppressions: `# async-doctor: ignore[<rule-id>]: <reason>`.
+
+**Diagnosis and repair:** a proven problem remains reportable without a
+prescribed repair. An empty `fix.hint` means no recommended edit, not an absent
+diagnosis; the stable `fixGroupId`, evidence, tier, and exit-code behaviour
+remain intact. Only `sync-with-async-cm` and `sync-for-async-iterable` may suggest
+a local correction to the supported async-only protocol on the same object.
+This does not establish a globally optimal repair or justify changing callers,
+offload boundaries, clients, drivers, transactions, or scheduling. Field
+contract: [json-contract.md](json-contract.md).
 
 **Execution model:** findings follow where Python executes a body, not merely
 where it creates a callable or deferred object.
 
 - An inferred offload wrapper still runs its own pre/postamble on the loop;
   only its worker target is cut. Offload-decorated function bodies stay cut.
+  A cut does not prove that cancelling an await stops a running worker.
 - For named sync generators, unambiguous local assignments and aliases are
   followed at sync loop/comprehension, `yield from`, or proven builtin
   `list` / `tuple` / `set` / `frozenset` / `sorted` consumption. Creating the
@@ -26,15 +36,9 @@ where it creates a callable or deferred object.
   followed through the resolved type's method resolution order. Instance
   assignments do not replace implicit special-method lookup.
 
-Offload repair hints do not promise that cancelling an await stops a running
-worker thread. Use underlying IO timeouts and keep resource ownership inside
-the worker where appropriate.
-
 ## blocking-sleep
 
 `time.sleep` (and similar) freezes every task sharing the asyncio event loop.
-
-**Fix:** `await asyncio.sleep(...)`, or `await asyncio.to_thread(time.sleep, seconds)`.
 
 ## blocking-socket
 
@@ -42,20 +46,12 @@ Sync socket IO (`recv*`, `send*`, `sendfile`), blocking DNS (`getaddrinfo`),
 `SSLContext.wrap_socket` / `SSLSocket` handshakes and reads/writes, or sync
 `smtplib` / `ftplib` clients on the loop thread.
 
-**Fix:** asyncio connection/server/datagram APIs (`open_connection(..., ssl=...)`),
-`aiosmtplib` / async FTP, or offload with `asyncio.to_thread`.
-
 ## blocking-http
 
 Sync HTTP, RPC, messaging, and cloud/AI/vector SDKs (`urllib`, `http.client`,
 `requests`, sync `httpx` / `urllib3`, `boto3` / `botocore`, `openai`,
 `anthropic` / `AnthropicBedrock` / `AnthropicVertex`, `groq`, `ollama`,
 `qdrant_client`, `elasticsearch`, `kafka`, `confluent_kafka`, sync `grpc`).
-
-**Fix:** `httpx.AsyncClient` / `aiohttp` / `AsyncOpenAI` / `AsyncAnthropic` /
-`AsyncAnthropicBedrock` / `AsyncAnthropicVertex` / `AsyncGroq` /
-`ollama.AsyncClient` / `AsyncQdrantClient` / `AsyncElasticsearch` /
-`aioboto3` / `aiokafka` / `grpc.aio`, or `await asyncio.to_thread(...)`.
 
 **Notes:**
 
@@ -69,7 +65,7 @@ Sync HTTP, RPC, messaging, and cloud/AI/vector SDKs (`urllib`, `http.client`,
   (`ssl_channel_credentials`, etc.) and `.future(...)` calls are not blocking RPCs.
 - Sync `boto3` / `botocore` client/resource API calls, `Waiter.wait`, and
   `botocore.response.StreamingBody.{read, iter_lines, iter_chunks}` report under
-  `blocking-http` with an `aioboto3` / `aiobotocore` fix hint. Meta helpers
+  `blocking-http`. Meta helpers
   (`get_paginator`, `get_waiter`, `can_paginate`, `generate_presigned_url`,
   `generate_presigned_post`, `meta`) are not IO and stay clean. `aioboto3.*` /
   `aiobotocore.*` qualnames are classified as async counterparts (never findings).
@@ -84,8 +80,6 @@ Sync HTTP, RPC, messaging, and cloud/AI/vector SDKs (`urllib`, `http.client`,
 `subprocess.run` / `Popen.wait` / `os.system` / `os.waitpid` wait on the
 event-loop thread (`subprocess.Popen(...)` construction itself is not a finding).
 
-**Fix:** `asyncio.create_subprocess_*` and await communicate/wait, or offload.
-
 ## blocking-file
 
 `open`, `io.BufferedReader` / `io.FileIO`, raw fd ops (`os.read` / `write` /
@@ -94,8 +88,6 @@ event-loop thread (`subprocess.Popen(...)` construction itself is not a finding)
 `walk` / `touch`), `importlib.resources` `Traversable` reads, `shutil` file and
 archive helpers, directory walks (`os.listdir` / `pathlib.Path.iterdir` / `glob`),
 archives (`zipfile` / `tarfile`), and blocking `input()` on the loop.
-
-**Fix:** async file helpers, or `await asyncio.to_thread(...)`.
 
 **Notes:**
 
@@ -133,9 +125,6 @@ archives (`zipfile` / `tarfile`), and blocking `input()` on the loop.
 Threading locks, `queue.Queue`, blocking `concurrent.futures.Future.result`,
 `Executor.map` consumption, and `concurrent.futures.wait` on the loop.
 
-**Fix:** asyncio primitives, `asyncio.wrap_future` / `asyncio.wait`, or confine
-waits to workers.
-
 **Notes:**
 
 - Thread-identity off-loop guards drop blocking sites in that branch when the
@@ -152,21 +141,11 @@ Sync SQL, document, and KV database drivers (`sqlite3`, `psycopg` / `psycopg2`,
 `pymysql`, `pymongo`, sync `redis` / `RedisCluster`, sync `valkey`, sync
 `sqlalchemy` / `sqlmodel`).
 
-**Fix:** switch to the async driver/session (`AsyncSession`,
-`sqlmodel.ext.asyncio.session.AsyncSession`, `aiosqlite`,
-`psycopg.AsyncConnection`, `asyncpg`, `aiomysql`, `motor` /
-`pymongo.AsyncMongoClient`, `redis.asyncio`, `valkey.asyncio.Valkey`), or
-offload a **self-contained sync unit-of-work function**
-(`await asyncio.to_thread(run_sync_query, ...)`) that opens, commits, and closes
-its own `Session` / `Connection` inside the worker thread.
-
 **Notes:**
 
-- Never pass bound methods of a request-scoped or shared sync `Session` or
-  `sqlite3.Connection` into `asyncio.to_thread`: `sqlite3.Connection` defaults
-  to `check_same_thread=True` and raises `ProgrammingError` on pool threads, and
-  SQLAlchemy/SQLModel sync `Session` instances are not thread-safe across
-  worker threads.
+- `sqlite3.Connection` defaults to `check_same_thread=True` and raises
+  `ProgrammingError` when used from another thread. SQLAlchemy/SQLModel sync
+  `Session` instances hold non-thread-safe identity-map and transaction state.
 - `AsyncSession.run_sync` runs sync work on a greenlet in the event-loop thread
   — it is **not** a thread offload and is not treated as one.
 - Pure helpers and handle getters do not report: `pymysql.err.*` /
@@ -186,23 +165,22 @@ Password hashing and key-derivation functions (`bcrypt.hashpw` / `checkpw`,
 tuned to burn tens to hundreds of milliseconds of CPU per call. Because cost
 parameters vary by caller, they report strictly as candidates.
 
-**Fix:** offload with `await asyncio.to_thread(bcrypt.checkpw, ...)` /
-`await asyncio.to_thread(ph.verify, ...)` (or a `ProcessPoolExecutor`).
-
 ## unresolved-call
 
 Dynamic dispatch that could not be proven. Candidates only — never fails the
-exit code by itself. Inspect, add types, or offload if the call is sync IO.
+exit code by itself. Inspect the target and its types; an unresolved call is
+not proof of blocking IO.
 
 ## offload-has-async-twin
 
-**Advice (performance)** — never fails the exit code.
+**Advice (`performance` category)** — never fails the exit code.
 
 An offload boundary (`asyncio.to_thread`, `run_in_executor`,
 `anyio.to_thread.run_sync`, `starlette.concurrency.run_in_threadpool`,
 `asgiref.sync.sync_to_async`, `channels.db.database_sync_to_async`, inferred
-wrappers) cuts a sync call that only reaches sinks with a high-confidence
-same-package async twin (`httpx.AsyncClient` including module-level
+wrappers) cuts a sync call whose unconditionally reached sinks all map to
+same-package async symbols available in the scanned environment
+(`httpx.AsyncClient` including module-level
 `httpx.get`/`post`/`put`/`patch`/`delete`/`head`/`options`/`request`/`stream`,
 `redis.asyncio` including `RedisCluster` and distributed locks,
 `valkey.asyncio.Valkey`, `openai.AsyncOpenAI`, `openai.AsyncAzureOpenAI`,
@@ -215,14 +193,15 @@ plus an async SQL driver such as `asyncpg`, `psycopg`, `aiosqlite`, `aiomysql`,
 or `asyncmy` are installed). The twin and its `needs` / `any_needs` must resolve
 in the scanned venv. The offload site's own try/if/loop conditions do not
 suppress advice. Skipped when the offloaded function is also called from
-sync-only code, or when any reached sink is excluded (`pymongo`, `requests`,
-`boto3`, `sqlite3`, `confluent_kafka`, file IO, subprocess, CPU/KDF work).
+sync-only code in the analyzed graph, or when any reached sink is excluded
+(`pymongo`, `requests`, `boto3`, `sqlite3`, `confluent_kafka`, file IO,
+subprocess, CPU/KDF work).
 
-**Why:** the offload already avoids blocking the loop, but the async twin
-removes the thread hop and keeps cancellation/context on the event loop.
-
-**Fix:** call the async client/API directly from `async def` instead of
-offloading the sync client.
+**Evidence:** this is same-package symbol and dependency availability, not a
+recommendation to replace an already-cut offload. The `performance` category
+is retained for compatibility; the scan measures no performance benefit and
+does not establish migration suitability, equivalent cancellation, or matching
+resource lifetimes.
 
 **Notes:**
 
@@ -253,8 +232,6 @@ function), `except RuntimeError` after `get_running_loop` / `get_event_loop`,
 `not loop.is_running()`, and similar helpers. Other conditional nested-loop
 sites stay findings (with normal branch conditions).
 
-**Fix:** await the coroutine directly; do not nest event-loop runners.
-
 ## offload-coroutine
 
 An offload target resolves to a coroutine function (`async def` without
@@ -262,8 +239,6 @@ An offload target resolves to a coroutine function (`async def` without
 only builds a coroutine object rather than executing its body on the worker.
 Async-generator functions are excluded: calling one creates an async iterator,
 whose body executes during later async iteration, not during the offload.
-
-**Fix:** await the coroutine directly, or pass a sync function to the offload.
 
 ## sync-with-async-cm
 
@@ -278,7 +253,9 @@ manager with sync `with` raises `TypeError` at runtime. Sync anyio timeouts
 (`fail_after`, `move_on_after`) are not flagged — they expose `__enter__` and
 `with` is correct.
 
-**Fix:** replace `with ...:` with `async with ...:`.
+**Local correction:** where async syntax is legal, `async with ...:` selects
+the supported context protocol on the same object. This is not permission to
+change a containing function's API.
 
 ## sync-for-async-iterable
 
@@ -288,10 +265,12 @@ iterable (`async def` generator call, known async stream such as
 `redis.asyncio.PubSub.listen`, `aiohttp.StreamReader`, `asyncpg.Connection.cursor`,
 `AsyncResult`, or a base-free project class implementing `__aiter__` without
 `__iter__` or `__getitem__`). Sync iteration raises `TypeError` at runtime.
-Coroutine objects instead report `unawaited-coroutine`; they must be awaited
-before choosing the returned value's iteration protocol.
+Coroutine objects instead report `unawaited-coroutine`; a coroutine object is
+not its result and implements neither iteration protocol.
 
-**Fix:** replace `for x in ...:` with `async for x in ...:` (or `[x async for x in ...]`).
+**Local correction:** where async syntax is legal, `async for x in ...:` (or
+`[x async for x in ...]`) selects the supported iteration protocol on the same
+object. This is not permission to change a containing function's API.
 
 ## eager-offload-call
 
@@ -304,9 +283,6 @@ evaluates `fn(...)` eagerly on the event loop before the offload helper is
 entered and then raises `TypeError` on the worker thread. Deduplicated when the
 inner call already emits a `blocking-*` finding through the same offload site.
 
-**Fix:** pass the callable and its arguments separately (`await asyncio.to_thread(fn, arg)`),
-or wrap keyword arguments with `functools.partial(fn, key=val)`.
-
 ## unawaited-coroutine
 
 A proven coroutine object is discarded by a bare call statement, or used
@@ -316,11 +292,6 @@ comprehension, or `with` statement. Discarding it leaves the body unexecuted
 `TypeError`. `async for` and `async with` do not implicitly await a coroutine
 to obtain its result. Excludes async generators (`yield`),
 `@asynccontextmanager`, and custom decorators that may alter call semantics.
-
-**Fix:** await the result first, then use the protocol it implements (for
-example, `[x for x in await get_rows()]` or `with await get_resource():`). For
-discarded calls, `await fn(...)`, or schedule explicitly with
-`asyncio.TaskGroup` / a referenced `asyncio.create_task(...)`.
 
 ## dangling-task
 
@@ -333,9 +304,6 @@ unreferenced task may be garbage-collected mid-execution and any unhandled
 exception goes unobserved. Assigned, awaited, returned, passed-as-argument, or
 `asyncio.TaskGroup.create_task` calls are not reported.
 
-**Fix:** await the task, use `asyncio.TaskGroup`, or keep a strong reference in
-a task set (`tasks.add(t); t.add_done_callback(tasks.discard)`).
-
 ## ephemeral-async-client
 
 **Advice (performance)** — never fails the exit code.
@@ -346,9 +314,6 @@ or inside a loop, discarding connection pools and repeating DNS + TLS handshakes
 on every call. Lifespan entries, one-shot non-route scripts without loops, lazy
 singletons, and custom `transport=` / `mounts=` / `app=` / `connector=` wrappers
 are excluded.
-
-**Fix:** create one shared client in your application lifespan (or outside the
-loop) and reuse it across requests.
 
 ## shared-async-session
 
@@ -365,9 +330,6 @@ Concurrency-safe factories and pools (`AsyncEngine`, `async_sessionmaker`,
 `asyncpg.Pool`, `AsyncConnectionPool`) and distinct per-task sessions are not
 reported.
 
-**Fix:** open a separate session/connection per concurrent task (via
-`async_sessionmaker` or `pool.acquire()`), or `await` the operations sequentially.
-
 ## offload-stateful-session
 
 **Advice (correctness)** — never fails the exit code.
@@ -381,10 +343,6 @@ and `sqlite3` handles enforce `check_same_thread=True` by default
 (`ProgrammingError` across pool threads). Offloading a self-contained sync
 function or thread-safe `Engine` / `scoped_session` is not reported.
 
-**Fix:** offload a self-contained sync unit-of-work function that opens, commits,
-and closes its own `Session` / `Connection` inside the worker thread, or migrate
-to `AsyncSession` / `aiosqlite`.
-
 ## useless-local-async-lock
 
 **Advice (correctness)** — never fails the exit code.
@@ -395,10 +353,6 @@ inside an `async def` and entered via `async with` without escaping to any
 nested closure, task argument, attribute, return value, or global/module binding.
 Every call allocates a private lock instance that no other coroutine can see, so
 mutual exclusion or concurrency limiting is a no-op.
-
-**Fix:** allocate the `Lock` / `Semaphore` once on shared state (`self._lock` in
-`__init__`, lifespan state, or module scope) so concurrent coroutines contend on
-the same primitive.
 
 ## swallowed-cancelled-error
 
@@ -411,7 +365,3 @@ without re-raising. Swallowing `CancelledError` leaves cancellation state
 uncleared and breaks `asyncio.timeout`, `asyncio.wait_for`, and
 `asyncio.TaskGroup`. Top-level `Task` and `Lifecycle` entries, `except Exception:`
 handlers, and `Task.uncancel()` scopes are not reported.
-
-**Fix:** move cleanup to `finally:` or end `except asyncio.CancelledError:` with
-`raise`; use `except Exception:` instead of bare `except:` / `except BaseException:`
-for application errors.

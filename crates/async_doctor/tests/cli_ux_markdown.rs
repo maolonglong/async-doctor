@@ -167,6 +167,11 @@ fn markdown_format_emits_gfm_tables_and_details_with_exit_code() {
         "missing collapsible details block: {md}"
     );
     assert!(md.contains("blocking-sleep"), "missing rule id: {md}");
+    assert!(md.contains("time.sleep"), "missing blocking evidence: {md}");
+    assert!(
+        !md.contains("**Fix:**") && !md.contains("to_thread"),
+        "{md}"
+    );
 
     let clean = fixture("negative_sync.py");
     let clean_out = bin()

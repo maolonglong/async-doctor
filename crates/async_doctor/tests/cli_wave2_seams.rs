@@ -225,7 +225,7 @@ fn cli_grouped_text_and_why_render_sync_caller_count_and_sample() {
     assert_eq!(why.status.code(), Some(1));
     let why_stdout = String::from_utf8_lossy(&why.stdout);
     assert!(
-        why_stdout.contains("1 sync caller also reaches this helper")
+        why_stdout.contains("1 observed sync caller also reaches this helper")
             && why_stdout.contains("cli_job.py:4"),
         "why text output must surface sync caller info with singular verb:\n{why_stdout}"
     );

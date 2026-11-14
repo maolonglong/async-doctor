@@ -25,7 +25,6 @@ pub(super) fn match_http_ai_family(q: &str) -> Option<SinkHit> {
         return Some(hit(&BuiltinSink::finding(
             "requests.request",
             RULE_BLOCKING_HTTP,
-            "Use `httpx.AsyncClient` (or `aiohttp`) instead of sync `requests`.",
         )));
     }
 
@@ -36,7 +35,6 @@ pub(super) fn match_http_ai_family(q: &str) -> Option<SinkHit> {
         return Some(hit(&BuiltinSink::finding(
             "httpx.Client.request",
             RULE_BLOCKING_HTTP,
-            "Use `httpx.AsyncClient` instead of sync `httpx.Client`.",
         )));
     }
     if matches!(
@@ -54,7 +52,6 @@ pub(super) fn match_http_ai_family(q: &str) -> Option<SinkHit> {
         return Some(hit(&BuiltinSink::finding(
             "httpx.request",
             RULE_BLOCKING_HTTP,
-            "Use `httpx.AsyncClient` instead of sync module-level `httpx` calls.",
         )));
     }
 
@@ -68,7 +65,6 @@ pub(super) fn match_http_ai_family(q: &str) -> Option<SinkHit> {
         return Some(hit(&BuiltinSink::finding(
             "urllib3.request",
             RULE_BLOCKING_HTTP,
-            "Use an async HTTP client (`httpx.AsyncClient`), or offload.",
         )));
     }
 
@@ -102,7 +98,6 @@ pub(super) fn match_http_ai_family(q: &str) -> Option<SinkHit> {
         return Some(hit(&BuiltinSink::finding(
             "kafka.KafkaProducer.send",
             RULE_BLOCKING_HTTP,
-            "Use `aiokafka` instead of sync `kafka-python`.",
         )));
     }
 
@@ -116,7 +111,6 @@ pub(super) fn match_http_ai_family(q: &str) -> Option<SinkHit> {
             return Some(hit(&BuiltinSink::finding(
                 "confluent_kafka.Producer.flush",
                 RULE_BLOCKING_HTTP,
-                "Use `aiokafka` / `confluent_kafka.experimental.aio.AIOProducer`, or offload `Producer.flush`.",
             )));
         }
         if matches!(
@@ -129,7 +123,6 @@ pub(super) fn match_http_ai_family(q: &str) -> Option<SinkHit> {
             return Some(hit(&BuiltinSink::finding(
                 "confluent_kafka.Consumer.poll",
                 RULE_BLOCKING_HTTP,
-                "Use `aiokafka` / `confluent_kafka.experimental.aio.AIOConsumer`, or offload `Consumer.poll`.",
             )));
         }
     }
@@ -150,7 +143,6 @@ pub(super) fn match_http_ai_family(q: &str) -> Option<SinkHit> {
         return Some(hit(&BuiltinSink::finding(
             "elasticsearch.Elasticsearch.search",
             RULE_BLOCKING_HTTP,
-            "Use `elasticsearch.AsyncElasticsearch` instead of sync client.",
         )));
     }
 
@@ -169,7 +161,6 @@ pub(super) fn match_http_ai_family(q: &str) -> Option<SinkHit> {
         return Some(hit(&BuiltinSink::finding(
             "grpc.Channel",
             RULE_BLOCKING_HTTP,
-            "Use `grpc.aio` channel/stubs instead of sync gRPC.",
         )));
     }
 
@@ -191,7 +182,6 @@ fn match_ai_or_vector_sdk(q: &str) -> Option<Option<SinkHit>> {
         return Some(Some(hit(&BuiltinSink::finding(
             "openai.AzureOpenAI",
             RULE_BLOCKING_HTTP,
-            "Use `openai.AsyncAzureOpenAI` instead of sync `AzureOpenAI`.",
         ))));
     }
     if q.starts_with("openai.OpenAI.")
@@ -200,7 +190,6 @@ fn match_ai_or_vector_sdk(q: &str) -> Option<Option<SinkHit>> {
         return Some(Some(hit(&BuiltinSink::finding(
             "openai.OpenAI",
             RULE_BLOCKING_HTTP,
-            "Use `openai.AsyncOpenAI` instead of sync `OpenAI`.",
         ))));
     }
 
@@ -213,7 +202,6 @@ fn match_ai_or_vector_sdk(q: &str) -> Option<Option<SinkHit>> {
         return Some(Some(hit(&BuiltinSink::finding(
             "anthropic.AnthropicBedrock",
             RULE_BLOCKING_HTTP,
-            "Use `anthropic.AsyncAnthropicBedrock` instead of sync `AnthropicBedrock`.",
         ))));
     }
     if q == "anthropic.AnthropicVertex"
@@ -224,7 +212,6 @@ fn match_ai_or_vector_sdk(q: &str) -> Option<Option<SinkHit>> {
         return Some(Some(hit(&BuiltinSink::finding(
             "anthropic.AnthropicVertex",
             RULE_BLOCKING_HTTP,
-            "Use `anthropic.AsyncAnthropicVertex` instead of sync `AnthropicVertex`.",
         ))));
     }
     if q.starts_with("anthropic.Anthropic.")
@@ -233,7 +220,6 @@ fn match_ai_or_vector_sdk(q: &str) -> Option<Option<SinkHit>> {
         return Some(Some(hit(&BuiltinSink::finding(
             "anthropic.Anthropic",
             RULE_BLOCKING_HTTP,
-            "Use `anthropic.AsyncAnthropic` instead of sync `Anthropic`.",
         ))));
     }
 
@@ -245,7 +231,6 @@ fn match_ai_or_vector_sdk(q: &str) -> Option<Option<SinkHit>> {
         return Some(Some(hit(&BuiltinSink::finding(
             "groq.Groq",
             RULE_BLOCKING_HTTP,
-            "Use `groq.AsyncGroq` instead of sync `Groq`.",
         ))));
     }
 
@@ -274,7 +259,6 @@ fn match_ai_or_vector_sdk(q: &str) -> Option<Option<SinkHit>> {
         return Some(Some(hit(&BuiltinSink::finding(
             "ollama.Client",
             RULE_BLOCKING_HTTP,
-            "Use `ollama.AsyncClient` instead of sync `ollama` calls.",
         ))));
     }
 
@@ -288,7 +272,6 @@ fn match_ai_or_vector_sdk(q: &str) -> Option<Option<SinkHit>> {
         return Some(Some(hit(&BuiltinSink::finding(
             "qdrant_client.QdrantClient",
             RULE_BLOCKING_HTTP,
-            "Use `qdrant_client.AsyncQdrantClient` instead of sync `QdrantClient`.",
         ))));
     }
 

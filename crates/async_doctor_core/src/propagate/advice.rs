@@ -3,6 +3,8 @@
 //! Fires only at offload cut sites reachable from async entries, when every
 //! unconditionally reached sink has a high-confidence same-package async twin
 //! that resolves (with its `needs`) in the scanned venv. Never affects exit code.
+//! Symbol availability is evidence, not a migration recommendation or proof of
+//! equivalent behavior or better performance.
 //!
 //! The offload site's own try/if/loop conditions are irrelevant — advice is about
 //! the offloaded work's sinks, not whether the offload call is branch-guarded.
@@ -97,7 +99,7 @@ pub(super) fn collect_offload_twin_advice(
             continue;
         }
 
-        // Prefer a single twin symbol when unanimous; otherwise join for the hint.
+        // Keep all resolved symbols as evidence, sorted for cold/warm parity.
         let mut twin_list: Vec<&'static str> = twin_symbols.into_iter().collect();
         twin_list.sort_unstable();
         let twin_label = twin_list.join(" / ");
@@ -137,7 +139,10 @@ pub(super) fn collect_offload_twin_advice(
                 edge.file.clone(),
                 edge.line,
                 edge.text.clone(),
-                format!("offload boundary (`{}`)", kind.as_str()),
+                format!(
+                    "offload boundary (`{}`); same-package async APIs resolve in the scanned environment: `{twin_label}`",
+                    kind.as_str()
+                ),
             ));
             // Offload-site try/if/loop tags are intentionally ignored — only
             // unconditional sink reachability inside the target matters.
@@ -166,17 +171,6 @@ pub(super) fn collect_offload_twin_advice(
                 collect_item_spans(facts, class_inits, &path, edge),
             );
 
-            let target_desc = match &target {
-                OffloadTarget::Project(fid) => facts.function(*fid).full_qualname(),
-                OffloadTarget::External { qualname, .. } => qualname.clone(),
-            };
-            let hint = format!(
-                "Offloaded work reaches sync APIs with async twins (`{twin_label}`). \
-                 Prefer the async client instead of `{offload}` around `{target}`.",
-                offload = kind.as_str(),
-                target = target_desc,
-            );
-
             advice.push(Advice {
                 id,
                 rule: RULE_OFFLOAD_HAS_ASYNC_TWIN.to_string(),
@@ -189,7 +183,7 @@ pub(super) fn collect_offload_twin_advice(
                 },
                 chain: chain_steps,
                 fix: Fix {
-                    hint,
+                    hint: String::new(),
                     // Group by offload site + twin so text can cluster them.
                     fix_group_id: fix_group_id(
                         RULE_OFFLOAD_HAS_ASYNC_TWIN,

@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use async_doctor_core::{ChainStep, Report};
+use async_doctor_core::{ChainStep, Report, primary_sink_step};
 use async_doctor_rules::rule_doc;
 use serde_json::{Value, json};
 
@@ -102,6 +102,9 @@ pub fn report_to_sarif(report: &Report, scan_root: &Path, src_root: &Path) -> Va
             }
         }
 
+        let evidence = primary_sink_step(f)
+            .map(|(_, step)| step.resolution.as_str())
+            .unwrap_or(&f.rule);
         results.push(json!({
             "ruleId": f.rule,
             "ruleIndex": rule_idx,
@@ -111,10 +114,10 @@ pub fn report_to_sarif(report: &Report, scan_root: &Path, src_root: &Path) -> Va
                     "[{}] reachable from {} — {}",
                     f.rule,
                     f.entry.name,
-                    f.fix.hint
+                    evidence
                 )
             },
-            "locations": [physical_location(&prim_loc, prim_line, &f.fix.hint)],
+            "locations": [physical_location(&prim_loc, prim_line, evidence)],
             "partialFingerprints": {
                 "asyncDoctor/findingId": f.id,
             },
@@ -176,6 +179,11 @@ pub fn report_to_sarif(report: &Report, scan_root: &Path, src_root: &Path) -> Va
             }
         }
 
+        let evidence = a
+            .chain
+            .last()
+            .map(|step| step.resolution.as_str())
+            .unwrap_or(&a.rule);
         results.push(json!({
             "ruleId": a.rule,
             "ruleIndex": rule_idx,
@@ -186,10 +194,10 @@ pub fn report_to_sarif(report: &Report, scan_root: &Path, src_root: &Path) -> Va
                     a.rule,
                     a.category.as_str(),
                     a.entry.name,
-                    a.fix.hint
+                    evidence
                 )
             },
-            "locations": [physical_location(&prim_loc, prim_line, &a.fix.hint)],
+            "locations": [physical_location(&prim_loc, prim_line, evidence)],
             "partialFingerprints": {
                 "asyncDoctor/findingId": a.id,
             },
@@ -239,8 +247,8 @@ fn build_rule_descriptor(rule_id: &str, default_level: &str) -> Value {
             "helpUri": doc.docs_url(),
             "help": {
                 "text": format!(
-                    "{}\n\nFix:\n{}\n\nExplain: async-doctor explain {}",
-                    doc.body, doc.fix, rule_id
+                    "{}\nExplain: async-doctor explain {}",
+                    doc.explain_text(), rule_id
                 )
             },
             "defaultConfiguration": { "level": default_level },

@@ -78,6 +78,12 @@ fn sarif_output_validates_against_2_1_0_schema() {
     let rule_name = sleep_rule["name"].as_str().unwrap();
     assert_ne!(rule_name, "blocking-sleep", "name must differ from id");
     assert!(!rule_name.is_empty());
+    let help = sleep_rule["help"]["text"].as_str().unwrap();
+    assert!(help.contains("time.sleep"), "{help}");
+    assert!(
+        !help.contains("How to fix") && !help.contains("to_thread"),
+        "{help}"
+    );
 
     let src = doc["runs"][0]["originalUriBaseIds"]["%SRCROOT%"]["uri"]
         .as_str()
@@ -91,6 +97,9 @@ fn sarif_output_validates_against_2_1_0_schema() {
     let results = doc["runs"][0]["results"].as_array().expect("results");
     assert!(!results.is_empty());
     assert_eq!(results[0]["ruleId"], "blocking-sleep");
+    let message = results[0]["message"]["text"].as_str().unwrap();
+    assert!(message.contains("time.sleep"), "{message}");
+    assert!(!message.contains("to_thread"), "{message}");
     assert!(results[0]["locations"][0]["physicalLocation"]["region"]["startLine"].is_number());
     let uri = results[0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
         .as_str()

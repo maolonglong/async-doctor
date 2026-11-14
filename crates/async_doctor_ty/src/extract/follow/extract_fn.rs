@@ -144,7 +144,6 @@ pub(super) fn extract_third_party_file_group(
             is_generator: body_has_yield(&func.body),
             label: EntryLabel::Other,
             is_sync_route: false,
-            async_twins: Vec::new(),
             param_names,
             is_third_party: true,
             package_name: target.package_name.clone(),

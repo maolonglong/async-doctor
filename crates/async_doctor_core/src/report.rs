@@ -123,7 +123,10 @@ pub struct Entry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Fix {
+    /// Empty when analysis does not establish a local correction. Diagnostic
+    /// evidence remains in the call chain; this is not a placeholder to fill.
     pub hint: String,
+    /// Stable diagnostic grouping key, independent of whether a repair exists.
     pub fix_group_id: String,
 }
 
@@ -168,8 +171,8 @@ pub struct Candidate {
 /// Non-blocking diagnostic tier (schemaVersion 1 additive).
 ///
 /// Advice never affects [`Report::exit_code`] — same contract as candidates, but
-/// for high-confidence performance suggestions (e.g. replace an offload with an
-/// async twin) rather than uncertain findings.
+/// for non-blocking correctness and performance observations rather than
+/// uncertain blocking findings. An observation need not recommend an edit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Advice {
@@ -217,8 +220,8 @@ pub struct UnusedSuppression {
 
 /// One concrete sink line and how many findings/entries reach it.
 ///
-/// Agents use this to pick the few lines that clear the most findings. Optional
-/// choke-point fields name a shared intermediate hop that dominates paths to
+/// Counts summarize observed reachability, not how many findings an edit will
+/// fix. Optional choke-point fields name a shared intermediate hop on paths to
 /// this sink (`chokePointFindingCount == 0` means none).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -231,8 +234,7 @@ pub struct SinkSiteSummary {
     pub finding_count: u32,
     pub entry_count: u32,
     /// Stable id of the entry set that reaches this sink (within the fix group).
-    /// Sites that share the same id reach the exact same entries — fixing one
-    /// line does not clear the others.
+    /// Sites that share the same id are reached by the exact same entries.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub entry_set_id: String,
     /// How many sink sites in this fix group share `entry_set_id`. `1` = unique.

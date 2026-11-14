@@ -249,8 +249,6 @@ pub struct FunctionFact {
     pub label: EntryLabel,
     /// Sync FastAPI/Starlette route handlers run in a threadpool — not entries.
     pub is_sync_route: bool,
-    /// Async twins discovered on the same class (method name → twin name), for fix hints.
-    pub async_twins: Vec<(String, String)>,
     /// Positional parameter names (for guard matching / higher-order).
     pub param_names: Vec<String>,
     /// True when this function was extracted from site-packages (not first-party).

@@ -589,7 +589,6 @@ fn wanted_scoped_cross_probes_and_disjoint_flush_union() {
         is_generator: false,
         label: EntryLabel::Other,
         is_sync_route: false,
-        async_twins: vec![],
         param_names: vec![],
         is_third_party: true,
         package_name: Some("upkg".into()),

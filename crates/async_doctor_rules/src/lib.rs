@@ -43,17 +43,13 @@ pub const RULE_BLOCKING_LOCK: &str = "blocking-lock";
 pub const RULE_BLOCKING_DB: &str = "blocking-db";
 pub const RULE_BLOCKING_CPU: &str = "blocking-cpu";
 
-pub fn blocking_sleep_fix_hint() -> &'static str {
-    "Replace `time.sleep(...)` with `await asyncio.sleep(...)` \
-     (or offload with `await asyncio.to_thread(...)`)."
-}
-
-/// One stdlib (or builtins) sink primitive.
+/// One built-in sink primitive and its diagnostic classification.
+///
+/// Recognizing a sink does not establish a recommended repair.
 #[derive(Debug, Clone, Copy)]
 pub struct BuiltinSink {
     pub qualname: &'static str,
     pub rule: &'static str,
-    pub fix_hint: &'static str,
     pub candidate_only: bool,
     pub candidate_reason: Option<&'static str>,
     /// Only fire for `with` enter edges (e.g. `with Engine.begin()`).
@@ -64,15 +60,10 @@ pub struct BuiltinSink {
 }
 
 impl BuiltinSink {
-    pub const fn finding(
-        qualname: &'static str,
-        rule: &'static str,
-        fix_hint: &'static str,
-    ) -> Self {
+    pub const fn finding(qualname: &'static str, rule: &'static str) -> Self {
         Self {
             qualname,
             rule,
-            fix_hint,
             candidate_only: false,
             candidate_reason: None,
             with_only: false,
@@ -80,15 +71,10 @@ impl BuiltinSink {
         }
     }
 
-    pub const fn finding_with_only(
-        qualname: &'static str,
-        rule: &'static str,
-        fix_hint: &'static str,
-    ) -> Self {
+    pub const fn finding_with_only(qualname: &'static str, rule: &'static str) -> Self {
         Self {
             qualname,
             rule,
-            fix_hint,
             candidate_only: false,
             candidate_reason: None,
             with_only: true,
@@ -96,15 +82,10 @@ impl BuiltinSink {
         }
     }
 
-    pub const fn finding_consume_only(
-        qualname: &'static str,
-        rule: &'static str,
-        fix_hint: &'static str,
-    ) -> Self {
+    pub const fn finding_consume_only(qualname: &'static str, rule: &'static str) -> Self {
         Self {
             qualname,
             rule,
-            fix_hint,
             candidate_only: false,
             candidate_reason: None,
             with_only: false,
@@ -115,13 +96,11 @@ impl BuiltinSink {
     pub const fn candidate(
         qualname: &'static str,
         rule: &'static str,
-        fix_hint: &'static str,
         reason: &'static str,
     ) -> Self {
         Self {
             qualname,
             rule,
-            fix_hint,
             candidate_only: true,
             candidate_reason: Some(reason),
             with_only: false,
@@ -129,11 +108,12 @@ impl BuiltinSink {
         }
     }
 
+    /// Build a diagnostic hit with no repair recommendation (`fix_hint` is empty).
     pub fn hit(self) -> SinkHit {
         SinkHit {
             rule: self.rule,
             sink_qualname: self.qualname,
-            fix_hint: self.fix_hint,
+            fix_hint: "",
             candidate_only: self.candidate_only,
             candidate_reason: self.candidate_reason,
             with_only: self.with_only,

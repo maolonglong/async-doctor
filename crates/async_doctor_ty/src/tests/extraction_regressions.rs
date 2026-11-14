@@ -322,10 +322,14 @@ async def partial_eager_blocks() -> None:
     );
     assert_eq!(report.findings[0].rule, "blocking-file");
     assert!(
-        report.findings[0].fix.hint.contains("pass the callable"),
-        "expected eager offload hint, got: {}",
-        report.findings[0].fix.hint
+        report.findings[0].chain.iter().any(|step| {
+            step.resolution
+                .contains("argument evaluated on the event loop before offload")
+        }),
+        "eager IO must remain diagnostic evidence: {:?}",
+        report.findings[0].chain
     );
+    assert!(report.findings[0].fix.hint.is_empty());
 }
 
 #[test]

@@ -139,13 +139,7 @@ fn collect_offload_stateful_session_advice(
                 },
                 chain: chain_steps,
                 fix: Fix {
-                    hint: format!(
-                        "`{handle_name}` is a stateful sync handle that is not safe to dispatch \
-                         across worker threads via `{offload_name}` (sync `Session` state is not \
-                         thread-safe, and `sqlite3` defaults to `check_same_thread=True`). Offload \
-                         a self-contained sync function that opens, commits, and closes its own \
-                         session/connection inside the worker thread, or switch to an async driver."
-                    ),
+                    hint: String::new(),
                     fix_group_id: fix_group_id(RULE_OFFLOAD_STATEFUL_SESSION, handle_name),
                 },
                 why: format!("async-doctor why {}:{}", edge.file, edge.line),
@@ -230,12 +224,7 @@ fn collect_useless_local_async_lock_advice(
                 },
                 chain: chain_steps,
                 fix: Fix {
-                    hint: format!(
-                        "`{lock_name}` is freshly constructed on every call and never shared with \
-                         another coroutine or closure, so `async with` provides zero mutual \
-                         exclusion or concurrency limiting. Store the primitive once on shared \
-                         state (`self._lock` in `__init__`, lifespan state, or module scope)."
-                    ),
+                    hint: String::new(),
                     fix_group_id: fix_group_id(RULE_USELESS_LOCAL_ASYNC_LOCK, lock_name),
                 },
                 why: format!("async-doctor why {}:{}", edge.file, edge.line),
@@ -324,12 +313,7 @@ fn collect_swallowed_cancelled_error_advice(
                 },
                 chain: chain_steps,
                 fix: Fix {
-                    hint: "Catching `asyncio.CancelledError` (or bare `except:` / `except \
-                           BaseException:` over an `await`) without re-raising swallows task \
-                           cancellation and breaks `asyncio.timeout`, `wait_for`, and `TaskGroup`. \
-                           Run cleanup in `finally:` or end the handler with `raise` (and use \
-                           `except Exception:` for ordinary errors)."
-                        .to_string(),
+                    hint: String::new(),
                     fix_group_id: fix_group_id(
                         RULE_SWALLOWED_CANCELLED_ERROR,
                         RULE_SWALLOWED_CANCELLED_ERROR,

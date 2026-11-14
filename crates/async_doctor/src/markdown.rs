@@ -94,29 +94,33 @@ fn write_markdown_to(
         let total = report.advice.len();
         if opts.expand || total <= TOP_ADVICE_SHOWN {
             writeln!(out, "## Advice ({total}) — does not fail the run\n")?;
-            for a in &report.advice {
-                writeln!(
-                    out,
-                    "- **`[advice:{}]`** `{}` (`{}:{}`) — {}",
-                    a.rule, a.entry.name, a.entry.file, a.entry.line, a.fix.hint
-                )?;
-            }
         } else {
             writeln!(
                 out,
                 "## Advice ({total}) — showing top {TOP_ADVICE_SHOWN} (pass `--expand` for all); does not fail the run\n"
             )?;
-            for a in report.advice.iter().take(TOP_ADVICE_SHOWN) {
-                writeln!(
-                    out,
-                    "- **`[advice:{}]`** `{}` (`{}:{}`) — {}",
-                    a.rule, a.entry.name, a.entry.file, a.entry.line, a.fix.hint
-                )?;
+        }
+        let limit = if opts.expand { total } else { TOP_ADVICE_SHOWN };
+        for a in report.advice.iter().take(limit) {
+            let evidence = a
+                .chain
+                .last()
+                .map(|step| step.resolution.as_str())
+                .unwrap_or(&a.rule);
+            writeln!(
+                out,
+                "- **`[advice:{}]`** `{}` (`{}:{}`) — {}",
+                a.rule, a.entry.name, a.entry.file, a.entry.line, evidence
+            )?;
+            if !a.fix.hint.is_empty() {
+                writeln!(out, "  - **Fix:** {}", a.fix.hint)?;
             }
+        }
+        if total > limit {
             writeln!(
                 out,
                 "- _…and {} more advice item(s) (pass `--expand` to list all)_",
-                total - TOP_ADVICE_SHOWN
+                total - limit
             )?;
         }
         writeln!(out)?;
@@ -226,7 +230,7 @@ fn write_findings_section(
     let group_s = if total_groups == 1 { "" } else { "s" };
     writeln!(
         out,
-        "Found **{}** sink site{} · **{}** finding{} · **{}** entr{} · **{}** fix group{}\n",
+        "Found **{}** sink site{} · **{}** finding{} · **{}** entr{} · **{}** diagnostic group{}\n",
         sites.len(),
         site_s,
         total_findings,
@@ -277,7 +281,9 @@ fn write_findings_section(
             sink,
             group.len()
         )?;
-        writeln!(out, "- **Fix:** {}", rep.fix.hint)?;
+        if !rep.fix.hint.is_empty() {
+            writeln!(out, "- **Fix:** {}", rep.fix.hint)?;
+        }
         if !rep.docs_url.is_empty() {
             writeln!(out, "- **Docs:** {}", rep.docs_url)?;
         }
@@ -297,7 +303,7 @@ fn write_findings_section(
     if omitted_groups > 0 {
         writeln!(
             out,
-            "_…and {omitted_groups} more fix group(s) (pass `--expand` to list all)_\n"
+            "_…and {omitted_groups} more diagnostic group(s) (pass `--expand` to list all)_\n"
         )?;
     }
     Ok(())

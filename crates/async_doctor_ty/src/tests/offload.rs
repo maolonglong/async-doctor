@@ -48,16 +48,14 @@ fn offload_eager_call_still_reports() {
         report.findings
     );
     assert!(
-        report.findings.iter().any(|f| {
-            f.fix.hint.contains("pass the callable") || f.fix.hint.contains("rather than calling")
-        }),
-        "eager hint must say pass callable: {:?}",
-        report
-            .findings
-            .iter()
-            .map(|f| &f.fix.hint)
-            .collect::<Vec<_>>()
+        report.findings.iter().any(|f| f.chain.iter().any(|step| {
+            step.resolution
+                .contains("argument evaluated on the event loop before offload")
+        })),
+        "eager evaluation must remain diagnostic evidence: {:?}",
+        report.findings
     );
+    assert!(report.findings.iter().all(|f| f.fix.hint.is_empty()));
     let _ = fs::remove_dir_all(dir);
 }
 

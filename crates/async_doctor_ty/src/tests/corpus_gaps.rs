@@ -100,7 +100,7 @@ fn m3a_unsafe_async_mutation_out_of_scope() {
 }
 
 #[test]
-fn m3a_eager_offload_reports_and_mentions_pass_callable() {
+fn m3a_eager_offload_reports_evaluation_without_prescribing_a_repair() {
     // Copy into an isolated project dir (scanning the fixtures/ tree as a
     // single-file project root can pull sibling .venv noise under parallel tests).
     let src = fs::read_to_string(fixtures_dir().join("m3a_eager_offload.py")).unwrap();
@@ -109,15 +109,20 @@ fn m3a_eager_offload_reports_and_mentions_pass_callable() {
     let by_entry: Vec<_> = report
         .findings
         .iter()
-        .map(|f| (f.entry.name.as_str(), f.fix.hint.as_str()))
+        .map(|f| (f.entry.name.as_str(), f))
         .collect();
     for expected in ["eager_to_thread", "eager_run_in_executor"] {
         let hit = by_entry.iter().find(|(n, _)| *n == expected);
         assert!(hit.is_some(), "missing {expected}: {by_entry:?}");
-        let hint = hit.unwrap().1;
+        let finding = hit.unwrap().1;
+        assert!(finding.fix.hint.is_empty(), "{expected}: {:?}", finding.fix);
         assert!(
-            hint.contains("pass the callable") || hint.contains("rather than calling"),
-            "{expected} hint must mention pass-vs-call: {hint}"
+            finding.chain.iter().any(|step| {
+                step.resolution
+                    .contains("argument evaluated on the event loop before offload")
+            }),
+            "{expected} must retain eager-evaluation evidence: {:?}",
+            finding.chain
         );
     }
     let names: Vec<_> = by_entry.iter().map(|(n, _)| *n).collect();
@@ -289,13 +294,13 @@ fn m3a_eager_inline_fixture() {
     let report = scan_path(&dir).unwrap();
     assert!(!report.findings.is_empty(), "eager must report");
     assert!(
-        report
-            .findings
-            .iter()
-            .any(|f| f.fix.hint.contains("pass the callable")
-                || f.fix.hint.contains("rather than calling")),
-        "hint={:?}",
-        report.findings[0].fix.hint
+        report.findings.iter().any(|f| f.chain.iter().any(|step| {
+            step.resolution
+                .contains("argument evaluated on the event loop before offload")
+        })),
+        "eager evaluation must remain diagnostic evidence: {:?}",
+        report.findings
     );
+    assert!(report.findings.iter().all(|f| f.fix.hint.is_empty()));
     let _ = fs::remove_dir_all(dir);
 }

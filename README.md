@@ -48,9 +48,14 @@ async-doctor --write-baseline baseline.json .
 async-doctor --baseline baseline.json .
 ```
 
-Every finding includes the full call chain (`file:line` per hop), a concrete fix
-hint, a stable rule id, a `docsAnchor` into [docs/rules.md](docs/rules.md), and
-a runnable `why` command. No config file — flags and inline comments only.
+Every finding includes an evidence chain (`file:line` per hop), a stable rule
+id, a `docsAnchor` into [docs/rules.md](docs/rules.md), and a runnable `why`
+command. Diagnosis does not require a prescribed repair: `fix` always retains
+its stable `fixGroupId`, while an empty `fix.hint` means **no recommended edit**,
+not a clean result. Only sync use of a proven async-only context or iteration
+protocol inside an already-async function may receive a local correction on
+the same object; this is not permission to convert a containing API or a claim
+of a globally optimal repair. No config file — flags and inline comments only.
 
 ```python
 time.sleep(1)  # async-doctor: ignore[blocking-sleep]: brief sync boundary in CLI wrapper
@@ -78,11 +83,12 @@ hidden dirs are skipped (`--include-non-production` to include).
   local generator consumption, and project context-manager methods
 - **Advice** (`offload-has-async-twin`, `dangling-task`, `ephemeral-async-client`,
   `shared-async-session`, `offload-stateful-session`, `useless-local-async-lock`,
-  `swallowed-cancelled-error`): offload cuts with an installed same-package async
-  twin, discarded `create_task` / `ensure_future` handles, per-request / per-loop
-  HTTP client pools, shared non-concurrency-safe async DB sessions across
-  `gather` / `TaskGroup`, offloaded bound sync DB session/cursor methods,
-  per-call unshared `asyncio.Lock` / `Semaphore` guards, and swallowed
+  `swallowed-cancelled-error`): same-package async-symbol availability behind
+  offload cuts (not a recommendation to replace the offload or a measured
+  performance claim), discarded `create_task` / `ensure_future` handles,
+  per-request / per-loop HTTP client pools, shared non-concurrency-safe async DB
+  sessions across `gather` / `TaskGroup`, offloaded bound sync DB session/cursor
+  methods, per-call unshared `asyncio.Lock` / `Semaphore` guards, and swallowed
   `CancelledError` handlers (non-blocking; SARIF `note`; text **Advice** section,
   capped unless `--expand`)
 - **Errors:** `nested-event-loop` (`asyncio.run` / … from async without offload;
@@ -94,7 +100,7 @@ hidden dirs are skipped (`--include-non-production` to include).
   iterable), `eager-offload-call` (`to_thread(fn(...))` where `fn(...)` runs on
   the loop and returns a non-callable), and `unawaited-coroutine` (discarded
   coroutine calls, or coroutine objects used directly as iteration/context
-  protocols instead of awaiting their result)
+  protocols)
 
 ## GitHub Actions & pre-commit
 

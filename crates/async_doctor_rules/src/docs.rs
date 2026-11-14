@@ -14,9 +14,9 @@ pub struct RuleDoc {
     pub title: &'static str,
     /// One-line summary for agents and compact CLI output.
     pub summary: &'static str,
-    /// Longer explanation: why it blocks the event loop and how to fix it.
+    /// Diagnostic explanation and limits of the available evidence.
     pub body: &'static str,
-    /// Typical fix patterns (async twin, `to_thread`, client swap).
+    /// Proven local protocol correction, or empty when no edit is established.
     pub fix: &'static str,
 }
 
@@ -32,14 +32,19 @@ impl RuleDoc {
     }
 
     /// Full text printed by `async-doctor explain <rule-id>`.
+    /// Omits the repair section when [`Self::fix`] is empty.
     pub fn explain_text(&self) -> String {
+        let correction = if self.fix.is_empty() {
+            String::new()
+        } else {
+            format!("\n\nHow to fix\n{}", self.fix)
+        };
         format!(
-            "{id} — {title}\n\n{summary}\n\nWhy it matters\n{body}\n\nHow to fix\n{fix}\n\nDocs: {url}\n",
+            "{id} — {title}\n\n{summary}\n\nWhy it matters\n{body}{correction}\n\nDocs: {url}\n",
             id = self.id,
             title = self.title,
             summary = self.summary,
             body = self.body,
-            fix = self.fix,
             url = self.docs_url(),
         )
     }
@@ -53,11 +58,9 @@ pub static RULE_DOCS: &[RuleDoc] = &[
         summary: "`time.sleep` (and similar) freezes every task sharing the loop.",
         body: "\
 While `time.sleep` runs, the asyncio event loop cannot schedule other coroutines,\n\
-so latency spikes and timeouts pile up across the process. Prefer the async twin\n\
-`asyncio.sleep`, or offload truly sync work with `asyncio.to_thread`.",
-        fix: "\
-- Await `asyncio.sleep(...)` instead of `time.sleep(...)`.\n\
-- Or offload: `await asyncio.to_thread(time.sleep, seconds)`.",
+so other tasks sharing that thread are delayed for the duration of the sleep.\n\
+This can increase latency and cause timeouts in otherwise unrelated work.",
+        fix: "",
     },
     RuleDoc {
         id: "blocking-socket",
@@ -65,12 +68,10 @@ so latency spikes and timeouts pile up across the process. Prefer the async twin
         summary: "Sync socket, DNS, `SSLContext.wrap_socket` / `SSLSocket`, or `smtplib` / `ftplib` stalls the loop.",
         body: "\
 BSD sockets, blocking DNS, TLS handshakes/reads/writes, and sync `smtplib` /\n\
-`ftplib` clients resolve on the calling thread. Inside `async def`, that thread\n\
-is the event loop. Use asyncio helpers / `aiosmtplib`, or run the sync call in\n\
-a worker thread.",
-        fix: "\
-- Prefer `asyncio.open_connection(..., ssl=...)` / asyncio servers / `loop.getaddrinfo`.\n\
-- Or `await asyncio.to_thread(socket.create_connection, ...)`.",
+`ftplib` clients perform their waits on the calling thread. When reached on the\n\
+event-loop thread, those waits prevent it from scheduling other tasks until\n\
+the synchronous call returns.",
+        fix: "",
     },
     RuleDoc {
         id: "blocking-http",
@@ -79,12 +80,9 @@ a worker thread.",
         body: "\
 Network and service round-trips are often tens to hundreds of milliseconds. Sync\n\
 HTTP clients, RPC stubs, and cloud/AI/search/vector/messaging SDKs hold the event\n\
-loop for the whole wait. Switch to the async client twin, or offload the call.",
-        fix: "\
-- Use `httpx.AsyncClient`, `aiohttp`, `AsyncOpenAI`, `AsyncAnthropic` /\n\
-  `AsyncAnthropicBedrock` / `AsyncAnthropicVertex`, `AsyncGroq`, `ollama.AsyncClient`,\n\
-  `AsyncQdrantClient`, `AsyncElasticsearch`, `aioboto3`, `aiokafka`, or `grpc.aio`.\n\
-- Or `await asyncio.to_thread(requests.get, url)`.",
+loop for the duration of a blocking wait when called on its thread. Other tasks\n\
+cannot make progress on that loop during the wait.",
+        fix: "",
     },
     RuleDoc {
         id: "blocking-subprocess",
@@ -92,11 +90,9 @@ loop for the whole wait. Switch to the async client twin, or offload the call.",
         summary: "`subprocess.run` / `Popen.wait` / `os.system` / `os.waitpid` block until exit.",
         body: "\
 Waiting on a child process from the event-loop thread prevents other tasks from\n\
-running for the entire child lifetime.",
-        fix: "\
-- Prefer `asyncio.create_subprocess_exec` / `create_subprocess_shell` and await\n\
-  `communicate` / `wait`.\n\
-- Or offload the sync subprocess helper with `asyncio.to_thread`.",
+running for the duration of that blocking wait. The delay depends on the child's\n\
+state and the operation being performed.",
+        fix: "",
     },
     RuleDoc {
         id: "blocking-file",
@@ -106,11 +102,10 @@ running for the entire child lifetime.",
 Disk IO (including `io.BufferedReader` / `FileIO`, `os.read` / `write` / `fsync`,\n\
 `pathlib.Path` reads/writes/walks/mutations, `importlib.resources` `Traversable`\n\
 reads, `shutil` copies/archives, `glob`, `zipfile` / `tarfile`, and blocking\n\
-`input()`) can stall under load or on network filesystems. Inside `async def`,\n\
-use async helpers or offload sync calls.",
-        fix: "\
-- Use `aiofiles` / AnyIO file APIs where practical.\n\
-- Or `await asyncio.to_thread(path.read_text)` / `to_thread(open, ...)`.",
+`input()`) can stall under load or on network filesystems. When performed on\n\
+the event-loop thread, these operations delay every task sharing that loop\n\
+until the synchronous call returns.",
+        fix: "",
     },
     RuleDoc {
         id: "blocking-lock",
@@ -119,11 +114,9 @@ use async helpers or offload sync calls.",
         body: "\
 A contended lock, blocking queue get, `concurrent.futures.Future.result()`,\n\
 `Executor.map` consumption, or `wait()` on the event-loop thread freezes every\n\
-task. Prefer asyncio primitives, or confine blocking waits to worker threads.",
-        fix: "\
-- Prefer `asyncio.Lock` / `Event` / `Queue`.\n\
-- Await `asyncio.wrap_future` instead of `Future.result()`.\n\
-- Hold threading locks only inside `to_thread` workers.",
+task sharing the loop while the wait lasts. Actual delay depends on contention,\n\
+queue state, and whether the awaited thread work is already complete.",
+        fix: "",
     },
     RuleDoc {
         id: "blocking-db",
@@ -131,17 +124,11 @@ task. Prefer asyncio primitives, or confine blocking waits to worker threads.",
         summary: "Sync SQL, document, and KV database drivers (`sqlite3`, `psycopg`, `pymysql`, `pymongo`, sync `redis` / `RedisCluster`, sync `valkey`, sync `sqlalchemy` / `sqlmodel`) block on queries.",
         body: "\
 Sync SQL, MongoDB, and Redis/Valkey drivers perform wire or disk IO on the calling\n\
-thread. From `async def`, that blocks the event loop for every query or command.\n\
-Prefer async drivers/sessions, or offload a self-contained sync unit-of-work\n\
-function that opens, commits, and closes its own `Session` or `Connection` inside\n\
-the worker thread. Never dispatch bound methods of a shared/request sync\n\
-`Session` or `sqlite3.Connection` (`check_same_thread=True`) across pool threads.",
-        fix: "\
-- Switch to an async driver or session (`AsyncSession`, `sqlmodel` `AsyncSession`,\n\
-  `aiosqlite`, `psycopg.AsyncConnection`, `asyncpg`, `aiomysql`, `motor`,\n\
-  `pymongo.AsyncMongoClient`, `redis.asyncio`, `valkey.asyncio.Valkey`).\n\
-- Or offload a self-contained sync unit-of-work function: `await asyncio.to_thread(run_sync_query, ...)`\n\
-  where `run_sync_query` opens, commits, and closes its own `Session` / `Connection` in the worker thread.",
+thread. When reached on the event-loop thread, that work prevents other tasks\n\
+from running for its duration. Stateful sessions and connections also carry\n\
+transaction state and thread or task ownership constraints; the blocking\n\
+diagnosis does not establish a safe driver, ownership, or transaction change.",
+        fix: "",
     },
     RuleDoc {
         id: "blocking-cpu",
@@ -153,9 +140,7 @@ CPU per call while holding or contending on the event-loop thread. Because cost\
 parameters and call frequency vary by environment, async-doctor reports them\n\
 strictly as `slow-kdf` candidates — never findings, and never failing the exit\n\
 code by default.",
-        fix: "\
-- Offload password hashing/verification with `await asyncio.to_thread(bcrypt.checkpw, ...)`\n\
-  or `await asyncio.to_thread(ph.verify, ...)` (or a `ProcessPoolExecutor` if GIL-bound).",
+        fix: "",
     },
     RuleDoc {
         id: "unresolved-call",
@@ -165,29 +150,20 @@ code by default.",
 When the callee cannot be resolved statically, async-doctor does not invent a\n\
 finding. Candidates need human or agent judgment and never fail the exit code\n\
 by themselves.",
-        fix: "\
-- Inspect the call; add types or simplify indirection so the sink is visible.\n\
-- If it is truly sync IO, await an async API or offload with `to_thread`.",
+        fix: "",
     },
     RuleDoc {
         id: "offload-has-async-twin",
         title: "Offload has an async twin (advice)",
         summary: "Offloaded sync client work has a same-package async twin available.",
         body: "\
-The call is already behind an offload cut, so it does not block the loop. When\n\
-every unconditionally reached sink has a high-confidence same-package async twin\n\
-installed in the scanned venv, prefer the async API to avoid the thread hop and\n\
-keep cancellation on the loop. This is advice only — it never fails the exit code.\n\
-Explicit exception to design decision #2 (twins as fix hints only): advice fires\n\
-at cut offload sites so nothing is double-reported with blocking findings.",
-        fix: "\
-- Replace the sync client with its async twin (`httpx.AsyncClient`,\n\
-  `redis.asyncio`, `valkey.asyncio.Valkey`, `AsyncOpenAI`, `AsyncAnthropic` /\n\
-  `AsyncAnthropicBedrock` / `AsyncAnthropicVertex`, `AsyncGroq`,\n\
-  `ollama.AsyncClient`, `AsyncQdrantClient`, `AsyncElasticsearch`,\n\
-  `psycopg.AsyncConnection`, `grpc.aio`, `AsyncSession` / `AsyncEngine`)\n\
-  and await it directly.\n\
-- Keep the offload if the function must also run from sync-only callers.",
+The call is already behind an offload cut, so this rule does not report blocking\n\
+work on the loop at that site. Every unconditionally reached sink has a\n\
+high-confidence same-package async twin available in the scanned venv, with\n\
+its dependency requirements resolved. This records API availability, not\n\
+semantic equivalence or a recommendation to change clients or remove the\n\
+offload. It is advice only and never fails the exit code.",
+        fix: "",
     },
     RuleDoc {
         id: "nested-event-loop",
@@ -201,9 +177,7 @@ Sites under a proven \"no running loop\" guard are dropped (not even candidates)
 `if loop is None`, early-return `if loop is not None: return`, `except RuntimeError` after `get_running_loop` / `get_event_loop`,\n\
 `not loop.is_running()`, and similar helpers. Other conditional nested-loop sites\n\
 remain findings with normal branch conditions.",
-        fix: "\
-- Await the coroutine directly instead of nesting a runner.\n\
-- Or confine a sync nested-run helper to `asyncio.to_thread` if you must.",
+        fix: "",
     },
     RuleDoc {
         id: "offload-coroutine",
@@ -215,9 +189,7 @@ Passing a coroutine function (`async def` without `yield`) only creates a corout
 object; the offload does not await it. Async-generator functions are excluded:\n\
 they create async iterators whose bodies execute during later async iteration,\n\
 not during offload.",
-        fix: "\
-- Await the coroutine directly from async code.\n\
-- Or pass a sync function into the offload.",
+        fix: "",
     },
     RuleDoc {
         id: "sync-with-async-cm",
@@ -228,10 +200,13 @@ Async-only context managers (`httpx.AsyncClient`, `aiohttp.ClientSession`,\n\
 `asyncio.Lock` / `Semaphore` / `TaskGroup` / `timeout`, `AsyncSession`, or classes\n\
 that implement `__aenter__` without `__enter__`) do not implement the synchronous\n\
 context protocol and raise `TypeError` at runtime when entered with `with`.\n\
-A coroutine returning a context manager must instead be awaited first; that\n\
-case reports `unawaited-coroutine`, not this protocol-rewrite rule.",
+A coroutine object is not a context manager; those sites report\n\
+`unawaited-coroutine`, not this async-only protocol rule.",
         fix: "\
-- Use `async with ...:` instead of `with ...:`.",
+- Where async syntax is already legal, use `async with ...:` on the same object\n\
+  to invoke its supported async context protocol. This addresses only the\n\
+  protocol mismatch; it does not authorize converting the containing API or\n\
+  establish the surrounding resource lifetime or control flow.",
     },
     RuleDoc {
         id: "sync-for-async-iterable",
@@ -241,10 +216,13 @@ case reports `unawaited-coroutine`, not this protocol-rewrite rule.",
 Async generators (`async def` with `yield`), async streams (`httpx.Response.aiter_*`,\n\
 `redis.asyncio.Redis.scan_iter`, `aiohttp.StreamReader`, `aiokafka.AIOKafkaConsumer`),\n\
 and classes implementing `__aiter__` without `__iter__` or `__getitem__` cannot be\n\
-iterated synchronously and raise `TypeError` at runtime. Coroutine objects must\n\
-instead be awaited to obtain the iterable; they report `unawaited-coroutine`.",
+iterated synchronously and raise `TypeError` at runtime. Coroutine objects do\n\
+not implement either iteration protocol; those sites report `unawaited-coroutine`.",
         fix: "\
-- Use `async for ... in ...:` (or an async comprehension `[... async for ... in ...]`).",
+- Where async syntax is already legal, use `async for ... in ...:` or an async\n\
+  comprehension (`[... async for ... in ...]`) on the same object to invoke its\n\
+  supported async iteration protocol. This addresses only the protocol mismatch;\n\
+  it does not authorize converting the containing API or establish control flow.",
     },
     RuleDoc {
         id: "eager-offload-call",
@@ -256,9 +234,7 @@ instead be awaited to obtain the iterable; they report `unawaited-coroutine`.",
 to a worker thread. Writing `to_thread(fn(x))` runs `fn(x)` synchronously on the\n\
 event loop and then passes its non-callable return value to the worker, raising\n\
 `TypeError` at runtime.",
-        fix: "\
-- Pass the callable and its arguments separately: `await asyncio.to_thread(fn, x)`.\n\
-- For keyword arguments, use `functools.partial(fn, x, k=v)` or `lambda: fn(x, k=v)`.",
+        fix: "",
     },
     RuleDoc {
         id: "unawaited-coroutine",
@@ -269,12 +245,10 @@ Calling an `async def` coroutine function as a standalone statement only constru
 a coroutine object and immediately drops it. The body never executes, and Python\n\
 emits `RuntimeWarning: coroutine '...' was never awaited` when garbage-collected.\n\
 Using that object directly in a loop, comprehension, or `with` raises `TypeError`.\n\
-`async for` / `async with` do not await a coroutine to obtain its result; choose\n\
-the returned value's protocol only after awaiting it.",
-        fix: "\
-- Await before protocol use: `[x for x in await get_rows()]` or `with await get_resource():`.\n\
-- For discarded calls, `await coro(...)`, or schedule explicitly with\n\
-  `asyncio.TaskGroup` / `asyncio.create_task` (keeping a reference).",
+`async for` / `async with` do not implicitly await a coroutine to obtain an\n\
+iterable or context manager. The diagnostic does not establish the intended\n\
+scheduling or resource lifetime.",
+        fix: "",
     },
     RuleDoc {
         id: "dangling-task",
@@ -284,11 +258,10 @@ the returned value's protocol only after awaiting it.",
 The asyncio event loop only holds weak references to scheduled tasks. A task\n\
 created via a bare `asyncio.create_task(coro())` statement with no variable\n\
 reference can be garbage-collected mid-execution, and unhandled task exceptions\n\
-go unobserved. This is correctness advice and never fails the exit code.",
-        fix: "\
-- Await the task or `asyncio.TaskGroup` when structured concurrency fits.\n\
-- For intentional background tasks, store the task in a set (`bg_tasks.add(t)`)\n\
-  and register `t.add_done_callback(bg_tasks.discard)`.",
+can go unobserved. The discarded handle does not establish the intended\n\
+background-task ownership or lifetime. This is correctness advice and never\n\
+fails the exit code.",
+        fix: "",
     },
     RuleDoc {
         id: "ephemeral-async-client",
@@ -296,13 +269,12 @@ go unobserved. This is correctness advice and never fails the exit code.",
         summary: "`httpx.AsyncClient` / `aiohttp.ClientSession` is created and torn down per route call or loop turn.",
         body: "\
 Opening and closing a fresh `httpx.AsyncClient` or `aiohttp.ClientSession` on every\n\
-route invocation or loop iteration discards connection pooling, keep-alive sockets,\n\
-and TLS session reuse — forcing a new TCP/TLS handshake each time and risking\n\
-ephemeral port exhaustion under load. This is performance advice and never fails\n\
-the exit code.",
-        fix: "\
-- Initialize a shared client once in application lifespan / startup and reuse it\n\
-  across requests or loop iterations, closing it on shutdown.",
+route invocation or loop iteration prevents reuse of that client's connection\n\
+pool across those calls. Repeated connections can add TCP/TLS handshake work and\n\
+port pressure under load. The scan does not measure connection reuse or\n\
+establish the appropriate client lifetime. This is performance advice and never\n\
+fails the exit code.",
+        fix: "",
     },
     RuleDoc {
         id: "shared-async-session",
@@ -314,9 +286,7 @@ the exit code.",
 connection and are not safe for concurrent use across `asyncio.gather` or\n\
 `TaskGroup` tasks (raising `InvalidRequestError` or corrupting protocol state at\n\
 runtime). This is correctness advice and never fails the exit code.",
-        fix: "\
-- Open a separate `AsyncSession` / connection per concurrent task from a shared\n\
-  `async_sessionmaker` / connection pool, or await the queries sequentially.",
+        fix: "",
     },
     RuleDoc {
         id: "offload-stateful-session",
@@ -328,13 +298,10 @@ identity-map and transaction state that is not thread-safe across pool threads,\
 and `sqlite3.Connection` / `sqlite3.Cursor` default to `check_same_thread=True`\n\
 (raising `ProgrammingError` when used on a different thread than the one that\n\
 opened the connection). Dispatching `asyncio.to_thread(session.execute, ...)`\n\
-crosses thread boundaries on an existing handle instead of isolating the unit of\n\
-work inside the worker thread. This is correctness advice and never fails the\n\
-exit code.",
-        fix: "\
-- Offload a self-contained sync unit-of-work function (`await asyncio.to_thread(run_query, engine, ...)`)\n\
-  that opens, commits, and closes its own `Session` or `Connection` inside the worker thread.\n\
-- Or migrate to `sqlalchemy.ext.asyncio.AsyncSession` / `aiosqlite`.",
+passes an existing handle across a thread boundary. That call does not establish\n\
+the handle's origin thread, overlapping use, or intended transaction ownership.\n\
+This is correctness advice and never fails the exit code.",
+        fix: "",
     },
     RuleDoc {
         id: "useless-local-async-lock",
@@ -348,9 +315,7 @@ and only entering it locally (`async with asyncio.Lock():` or an unescaped local
 call. No concurrent caller can contend on that instance, so mutual exclusion or\n\
 concurrency limiting is a no-op. Locks shared with nested closures or passed to\n\
 helper tasks are excluded. This is correctness advice and never fails the exit code.",
-        fix: "\
-- Store the `Lock` / `Semaphore` on a shared instance (`self._lock` in `__init__`),\n\
-  lifespan state, or module scope so concurrent coroutines contend on the same primitive.",
+        fix: "",
     },
     RuleDoc {
         id: "swallowed-cancelled-error",
@@ -362,12 +327,10 @@ structured cancellation (`asyncio.timeout`, `asyncio.wait_for`, `asyncio.TaskGro
 and client disconnect cleanup). Catching `CancelledError` (or bare `except:` /\n\
 `except BaseException:` without an earlier `CancelledError` re-raise) and returning\n\
 or falling through without `raise` leaves the task's cancellation count un-cleared\n\
-and breaks enclosing timeouts and `TaskGroup`s. Top-level `Task` and `Lifecycle`\n\
+and can interfere with enclosing timeouts and `TaskGroup`s. Top-level `Task` and `Lifecycle`\n\
 entries and `Task.uncancel()` scopes are excluded. This is correctness advice and\n\
 never fails the exit code.",
-        fix: "\
-- Run cleanup in `finally:` or re-raise `raise` at the end of `except asyncio.CancelledError:`.\n\
-- Catch `except Exception:` instead of bare `except:` / `except BaseException:` when you only want application errors.",
+        fix: "",
     },
 ];
 
@@ -458,12 +421,35 @@ mod tests {
     }
 
     #[test]
-    fn explain_mentions_fix_and_absolute_url() {
+    fn explain_keeps_diagnosis_and_url_without_an_unsupported_fix() {
         let text = rule_doc("blocking-sleep").unwrap().explain_text();
-        assert!(text.contains("asyncio.sleep"));
+        assert!(text.contains("time.sleep"));
+        assert!(text.contains("Why it matters"));
+        assert!(!text.contains("How to fix"));
         assert!(text.contains("#blocking-sleep"));
         assert!(
             text.contains("https://github.com/maolonglong/async-doctor/blob/main/docs/rules.md")
         );
+    }
+
+    #[test]
+    fn only_async_only_protocol_rules_offer_local_corrections() {
+        for doc in RULE_DOCS {
+            assert!(!doc.summary.is_empty(), "{} needs a summary", doc.id);
+            assert!(!doc.body.is_empty(), "{} needs an explanation", doc.id);
+            let text = doc.explain_text();
+            let protocol = match doc.id {
+                "sync-with-async-cm" => "async with",
+                "sync-for-async-iterable" => "async for",
+                _ => {
+                    assert!(doc.fix.is_empty(), "{} must not prescribe a repair", doc.id);
+                    assert!(!text.contains("How to fix"), "{}: {text}", doc.id);
+                    continue;
+                }
+            };
+            assert!(doc.fix.contains(protocol), "{}: {}", doc.id, doc.fix);
+            assert!(doc.fix.contains("same object"), "{}: {}", doc.id, doc.fix);
+            assert!(text.contains("How to fix"), "{}: {text}", doc.id);
+        }
     }
 }

@@ -5,14 +5,98 @@ mod gaps;
 use async_doctor_core::SinkTable;
 
 use super::BuiltinSinkTable;
-use crate::RULE_BLOCKING_HTTP;
+use crate::{RULE_BLOCKING_DB, RULE_BLOCKING_HTTP};
 
 #[test]
-fn requests_matches_async_twin_hint() {
+fn requests_matches_without_prescribing_another_client() {
     let t = BuiltinSinkTable::new();
     let hit = t.lookup("requests.get").unwrap();
     assert_eq!(hit.rule, RULE_BLOCKING_HTTP);
-    assert!(hit.fix_hint.contains("httpx.AsyncClient"));
+    assert_eq!(hit.sink_qualname, "requests.get");
+    assert!(hit.fix_hint.is_empty());
+    assert!(t.async_twin("requests.get").is_none());
+}
+
+#[test]
+fn family_matchers_keep_diagnoses_without_repair_hints() {
+    let t = BuiltinSinkTable::new();
+    for (q, rule) in [
+        ("requests.Session.close", RULE_BLOCKING_HTTP),
+        ("httpx.Client.close", RULE_BLOCKING_HTTP),
+        ("urllib3.util.retry.Retry.increment", RULE_BLOCKING_HTTP),
+        ("kafka.KafkaConsumer.commit", RULE_BLOCKING_HTTP),
+        (
+            "confluent_kafka.SerializingProducer.flush",
+            RULE_BLOCKING_HTTP,
+        ),
+        ("elasticsearch.Elasticsearch.delete", RULE_BLOCKING_HTTP),
+        (
+            "grpc._channel._UnaryUnaryMultiCallable.with_call",
+            RULE_BLOCKING_HTTP,
+        ),
+        ("openai.lib.azure.AzureOpenAI.complete", RULE_BLOCKING_HTTP),
+        (
+            "anthropic.resources.messages.Messages.create",
+            RULE_BLOCKING_HTTP,
+        ),
+        ("groq.resources.models.Models.list", RULE_BLOCKING_HTTP),
+        ("ollama.show", RULE_BLOCKING_HTTP),
+        (
+            "qdrant_client.QdrantClient.query_points",
+            RULE_BLOCKING_HTTP,
+        ),
+        ("boto3.session.Session.resource", RULE_BLOCKING_HTTP),
+        ("botocore.waiter.S3Waiter.wait", RULE_BLOCKING_HTTP),
+        ("botocore.client.BaseClient.get_object", RULE_BLOCKING_HTTP),
+        ("psycopg.Cursor.fetchall", RULE_BLOCKING_DB),
+        ("pymysql.Connection.cursor", RULE_BLOCKING_DB),
+        (
+            "pymongo.collection.Collection.create_index",
+            RULE_BLOCKING_DB,
+        ),
+        ("sqlmodel.Session.refresh", RULE_BLOCKING_DB),
+        ("sqlalchemy.orm.Session.scalar_one", RULE_BLOCKING_DB),
+        ("sqlalchemy.orm.Query.all", RULE_BLOCKING_DB),
+        (
+            "sqlalchemy.engine.Connection.exec_driver_sql",
+            RULE_BLOCKING_DB,
+        ),
+        ("redis.Redis.hget", RULE_BLOCKING_DB),
+        ("redis.cluster.RedisCluster.hget", RULE_BLOCKING_DB),
+        ("valkey.Valkey.hget", RULE_BLOCKING_DB),
+        ("redis.Pipeline.immediate_execute_command", RULE_BLOCKING_DB),
+        (
+            "redis.cluster.ClusterPipeline.immediate_execute_command",
+            RULE_BLOCKING_DB,
+        ),
+        (
+            "valkey.Pipeline.immediate_execute_command",
+            RULE_BLOCKING_DB,
+        ),
+        ("redis.Lock.__enter__", RULE_BLOCKING_DB),
+        ("valkey.Lock.__enter__", RULE_BLOCKING_DB),
+        ("redis.PubSub.subscribe", RULE_BLOCKING_DB),
+        ("valkey.PubSub.subscribe", RULE_BLOCKING_DB),
+    ] {
+        let hit = t
+            .lookup(q)
+            .unwrap_or_else(|| panic!("expected sink for {q}"));
+        assert_eq!(hit.rule, rule, "{q}");
+        assert!(!hit.candidate_only, "{q} must stay a finding");
+        assert_eq!(hit.candidate_reason, None, "{q}");
+        assert!(hit.fix_hint.is_empty(), "{q}: {}", hit.fix_hint);
+    }
+
+    let begin = t
+        .lookup("sqlalchemy.engine.base.Engine.begin.__enter__")
+        .unwrap();
+    assert_eq!(begin.sink_qualname, "sqlalchemy.engine.Engine.begin");
+    assert!(begin.with_only);
+    assert!(begin.fix_hint.is_empty());
+    let listen = t.lookup("valkey.client.PubSub.listen").unwrap();
+    assert_eq!(listen.sink_qualname, "valkey.PubSub.listen");
+    assert!(listen.consume_only);
+    assert!(listen.fix_hint.is_empty());
 }
 
 #[test]
@@ -175,13 +259,17 @@ fn azure_openai_is_blocking_sink() {
 }
 
 #[test]
-fn boto_dynamic_client_methods_match_aioboto_advice() {
+fn boto_dynamic_client_methods_match_without_client_substitution_advice() {
     let t = BuiltinSinkTable::new();
     let hit = t
         .lookup("botocore.client.BaseClient.get_object")
         .expect("get_object");
     assert_eq!(hit.rule, RULE_BLOCKING_HTTP);
-    assert!(hit.fix_hint.contains("aioboto3"));
+    assert_eq!(
+        hit.sink_qualname,
+        "botocore.client.BaseClient._make_api_call"
+    );
+    assert!(hit.fix_hint.is_empty());
     assert!(t.lookup("botocore.client.BaseClient.meta").is_none());
     assert!(
         t.lookup("botocore.client.BaseClient.get_paginator")

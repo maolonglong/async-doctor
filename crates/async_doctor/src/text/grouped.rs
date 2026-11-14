@@ -62,7 +62,7 @@ pub(super) fn write_grouped(
     let group_s = if total_groups == 1 { "" } else { "s" };
     writeln!(
         out,
-        "{b}Found {} sink site{} · {} finding{} · {} entr{} · {} fix group{}{b:#}",
+        "{b}Found {} sink site{} · {} finding{} · {} entr{} · {} diagnostic group{}{b:#}",
         unique_sites,
         site_s,
         total_findings,
@@ -73,7 +73,7 @@ pub(super) fn write_grouped(
         group_s
     )?;
     if let Some(top) = sites.first().filter(|s| s.finding_count > 1) {
-        write_top_fix_callout(out, top, ck)?;
+        write_top_site_callout(out, top, ck)?;
     }
     writeln!(out)?;
     writeln!(
@@ -142,7 +142,9 @@ pub(super) fn write_grouped(
             group_sites.len(),
             if group_sites.len() == 1 { "" } else { "s" }
         )?;
-        writeln!(out, "  {fx}fix:{fx:#} {}", rep.fix.hint)?;
+        if !rep.fix.hint.is_empty() {
+            writeln!(out, "  {fx}fix:{fx:#} {}", rep.fix.hint)?;
+        }
         if !rep.docs_url.is_empty() {
             writeln!(out, "  docs: {}", rep.docs_url)?;
         } else if !rep.docs_anchor.is_empty() {
@@ -187,7 +189,7 @@ pub(super) fn write_grouped(
     if omitted_groups > 0 {
         writeln!(
             out,
-            "{dim}… and {omitted_groups} more fix group(s) ({omitted_group_findings} finding(s)); pass --expand to list all{dim:#}\n"
+            "{dim}… and {omitted_groups} more diagnostic group(s) ({omitted_group_findings} finding(s)); pass --expand to list all{dim:#}\n"
         )?;
     }
     Ok(())
@@ -209,7 +211,7 @@ fn format_sync_callers_note(site: &SinkSiteSummary) -> String {
     }
 }
 
-fn write_top_fix_callout(
+fn write_top_site_callout(
     out: &mut impl Write,
     top: &SinkSiteSummary,
     ck: anstyle::Style,
@@ -221,7 +223,7 @@ fn write_top_fix_callout(
         if top.choke_point_finding_count == top.finding_count {
             writeln!(
                 out,
-                "{ck}Top fix:{ck:#} {}:{}  {choke_call} → {}:{}  (clears {} findings across {} entr{entry_s}{sync_note})",
+                "{ck}Top site:{ck:#} {}:{}  {choke_call} → {}:{}  (reached by {} findings across {} entr{entry_s}{sync_note})",
                 top.choke_point_file,
                 top.choke_point_line,
                 top.file,
@@ -232,7 +234,7 @@ fn write_top_fix_callout(
         } else {
             writeln!(
                 out,
-                "{ck}Top fix:{ck:#} {}:{}  {}  (clears {} findings across {} entr{entry_s}; choke {}:{} in {}{sync_note})",
+                "{ck}Top site:{ck:#} {}:{}  {}  (reached by {} findings across {} entr{entry_s}; choke {}:{} in {}{sync_note})",
                 top.file,
                 top.line,
                 truncate_call(&top.text, 48),
@@ -247,7 +249,7 @@ fn write_top_fix_callout(
         let call = truncate_call(&top.text, 56);
         writeln!(
             out,
-            "{ck}Top fix:{ck:#} {}:{}  {call}  (clears {} findings across {} entr{entry_s}{sync_note})",
+            "{ck}Top site:{ck:#} {}:{}  {call}  (reached by {} findings across {} entr{entry_s}{sync_note})",
             top.file, top.line, top.finding_count, top.entry_count,
         )?;
     }

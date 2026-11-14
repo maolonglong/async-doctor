@@ -558,8 +558,8 @@ fn p1_miss_probe_covers_stdlib_and_boto_gaps() {
         .find(|f| f.entry.name == "h_boto")
         .unwrap();
     assert!(
-        boto.fix.hint.contains("aioboto3") || boto.fix.hint.contains("aiobotocore"),
-        "boto advice must mention aioboto3/aiobotocore: {}",
+        boto.fix.hint.is_empty(),
+        "blocking SDK evidence does not establish a client migration: {}",
         boto.fix.hint
     );
     let fut = report

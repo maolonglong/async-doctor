@@ -23,7 +23,6 @@ pub(crate) struct Pass1Fn {
 
 pub(crate) struct Pass1FileData {
     pub(crate) functions: Vec<Pass1Fn>,
-    pub(crate) class_methods: Vec<(String, String)>,
     pub(crate) property_name_starts: Vec<u32>,
 }
 
@@ -57,13 +56,6 @@ pub(crate) fn collect_functions_standalone(index: &LineIndex, suite: &[Stmt]) ->
                 Stmt::FunctionDef(func) => {
                     let qualname =
                         scope_qualname(&self.class_stack, &self.fn_stack, func.name.as_str());
-                    if !self.class_stack.is_empty() && self.fn_stack.is_empty() {
-                        let class = self.class_stack.join(".");
-                        self.data
-                            .class_methods
-                            .push((class, func.name.as_str().to_string()));
-                    }
-
                     let label = infer_entry_label(func);
                     let is_sync_route = !func.is_async && label == EntryLabel::Route;
                     let name_start = u32::from(func.name.range.start());
@@ -138,7 +130,6 @@ pub(crate) fn collect_functions_standalone(index: &LineIndex, suite: &[Stmt]) ->
         index,
         data: Pass1FileData {
             functions: Vec::new(),
-            class_methods: Vec::new(),
             property_name_starts: Vec::new(),
         },
         class_stack: Vec::new(),
@@ -148,7 +139,6 @@ pub(crate) fn collect_functions_standalone(index: &LineIndex, suite: &[Stmt]) ->
     c.data
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn merge_pass1_file_data(
     rel: &str,
     module: &str,
@@ -156,15 +146,8 @@ pub(crate) fn merge_pass1_file_data(
     facts: &mut ProjectFacts,
     def_map: &mut HashMap<DefKey, FunctionId>,
     qual_map: &mut HashMap<(String, String), FunctionId>,
-    class_methods: &mut HashMap<(String, String), Vec<String>>,
     property_defs: &mut HashSet<FunctionId>,
 ) {
-    for (class, method) in data.class_methods {
-        class_methods
-            .entry((module.to_string(), class))
-            .or_default()
-            .push(method);
-    }
     let prop_starts: HashSet<u32> = data.property_name_starts.into_iter().collect();
     for f in data.functions {
         let id = FunctionId(facts.functions.len() as u32);
@@ -188,7 +171,6 @@ pub(crate) fn merge_pass1_file_data(
             is_generator: f.is_generator,
             label: f.label,
             is_sync_route: f.is_sync_route,
-            async_twins: Vec::new(),
             param_names: f.param_names,
             is_third_party: false,
             package_name: None,
@@ -198,17 +180,6 @@ pub(crate) fn merge_pass1_file_data(
             offload_decorator: None,
         });
     }
-}
-
-pub(crate) fn twin_name(method: &str, methods: &[String]) -> Option<String> {
-    let candidates = [
-        format!("a{method}"),
-        format!("async_{method}"),
-        format!("{method}_async"),
-    ];
-    candidates
-        .into_iter()
-        .find(|c| methods.iter().any(|m| m == c))
 }
 
 pub(crate) fn decorator_is_property(expr: &Expr) -> bool {

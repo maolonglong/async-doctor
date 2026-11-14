@@ -1,4 +1,4 @@
-//! Regression tests for mainstream third-party sink/twin gaps and DB guidance.
+//! Regression tests for mainstream third-party sink/twin gaps and diagnostic-only DB help.
 
 use async_doctor_core::SinkTable;
 
@@ -7,13 +7,16 @@ use crate::{
 };
 
 #[test]
-fn blocking_db_docs_and_hints_never_recommend_shared_session_to_thread() {
+fn blocking_db_docs_and_hits_do_not_prescribe_driver_or_ownership_changes() {
     let doc = rule_doc("blocking-db").expect("blocking-db doc");
     let full = doc.explain_text();
+    assert!(doc.fix.is_empty());
+    assert!(!full.contains("How to fix"));
     for forbidden in [
-        "to_thread(session.execute",
-        "to_thread(session.exec",
-        "to_thread(conn.execute",
+        "to_thread",
+        "Switch to",
+        "Prefer async",
+        "opens, commits, and closes",
     ] {
         assert!(
             !full.contains(forbidden),
@@ -21,8 +24,8 @@ fn blocking_db_docs_and_hints_never_recommend_shared_session_to_thread() {
         );
     }
     assert!(
-        full.contains("unit-of-work") || full.contains("opens") || full.contains("worker thread"),
-        "blocking-db explain_text must explain worker-owned Session/Connection: {full}"
+        doc.body.contains("event-loop thread") && doc.body.contains("transaction"),
+        "blocking-db must retain a meaningful diagnostic explanation: {full}"
     );
 
     let t = BuiltinSinkTable::new();
@@ -38,9 +41,8 @@ fn blocking_db_docs_and_hints_never_recommend_shared_session_to_thread() {
             .unwrap_or_else(|| panic!("expected sink for {q}"));
         assert_eq!(hit.rule, RULE_BLOCKING_DB);
         assert!(
-            !hit.fix_hint.contains("to_thread(session.execute")
-                && !hit.fix_hint.contains("to_thread(conn.execute"),
-            "unsafe fix_hint on {q}: {}",
+            hit.fix_hint.is_empty(),
+            "{q} must not prescribe a driver or ownership change: {}",
             hit.fix_hint
         );
     }

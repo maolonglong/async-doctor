@@ -18,6 +18,13 @@ and never loads a project config file.
 Trio-only semantics; no gevent/eventlet monkey-patch modelling; no autofix; no
 general CPU profiling (obvious CPU hotspots may appear only as *candidates*).
 
+Diagnosis is independent of repair: schema 2 keeps `fix.hint` as a string,
+empty when no edit is established. Only same-object async-only protocol
+corrections inside already-async functions retain hints; async-API availability
+and eager execution remain chain evidence, not migration or offload
+instructions. Rationale:
+[evidence-bounded repair guidance](docs/decisions/2026-11-14-evidence-bounded-repair-guidance.md).
+
 Exit codes and JSON field meanings live in [`docs/json-contract.md`](docs/json-contract.md).
 
 ## Entry points
@@ -43,7 +50,8 @@ git `--changed` / baseline filters (`changed.rs`, `baseline.rs`), text /
 Markdown / JSON / SARIF reporters (`text/`, `markdown.rs`, `sarif.rs`),
 `explain` / `why` (`help_cmd.rs`), and `install-skill` (`skill_cmd.rs`). Depends
 on `async_doctor_ty` for scanning and `async_doctor_core` for report types.
-Non-MSVC builds use jemalloc.
+Human reporters omit empty repair sections; SARIF messages use diagnostic
+chain evidence rather than repair hints. Non-MSVC builds use jemalloc.
 
 **API boundary:** the published CLI surface. Exit codes: see
 [`docs/json-contract.md`](docs/json-contract.md).
@@ -148,6 +156,9 @@ offload-edge materialization and span-aware `--changed` filtering), stable
 finding ids (`id.rs`), environment report struct (`environment.rs`), sink-site
 grouping with sync-caller fan-in (`sink_sites.rs`), and report schema
 (`report.rs`: `Report`, `Finding`, `Candidate`, `Advice`, `SCHEMA_VERSION`).
+Function facts do not carry name-inferred async replacements. Sink-site and
+choke-point counts describe reachability, not how many findings an edit clears;
+sync-caller counts do not establish complete external/dynamic caller coverage.
 
 `propagate/`: mark sinks, materialize higher-order bindings
 (`higher_order.rs`), reverse BFS + multi-guard condition reconciliation + merged
@@ -177,7 +188,9 @@ production entries awaiting non-production helpers still report findings.
 Static builtin sink table (`stdlib/` for stdlib/builtins rows + normalization,
 type-based third-party families in `third_party/`), structured async-twin table
 (`async_twin.rs`), and rule doc anchors into `docs/rules.md` (`docs.rs`). No
-analysis logic.
+analysis logic. Builtin sinks supply no repair hint; rule explanations remain
+available independently of a repair. Structured twins describe resolved
+same-package availability, not semantically equivalent replacements.
 
 **API boundary:** `BuiltinSinkTable` implementing `SinkTable`, plus
 `docs_anchor_for` / rule id constants.

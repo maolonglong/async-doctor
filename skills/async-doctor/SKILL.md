@@ -1,102 +1,66 @@
 ---
 name: async-doctor
 description: >-
-  Use after changing async Python code or before committing. Run
-  `async-doctor --changed` for a fast regression check; run `async-doctor .`
-  for a full audit. Detects sync/blocking IO reachable from async def (sleep,
-  HTTP, DB, file, subprocess, locks), nested event-loop runners, offloaded
-  async defs, and non-blocking async-twin/task advice. Use explain/why and the
-  Agent Fix Decision Tree to remediate safely.
+  Diagnoses Python async blocking IO and protocol errors using async-doctor.
+  Use after changing async Python code, before committing, or for a full audit.
+  Runs changed/full scans, traces explain/why evidence, and separates proven
+  diagnoses from repairs that require application and library context.
 version: "1.3.0"
 ---
 
 # async-doctor
 
-Your agent blocks the event loop. This catches it.
+Report proven async problems; recommend an edit only when inspected program and library evidence supports it.
 
-Zero-config static analysis for Python: finds sync/blocking IO reachable from
-`async def`, with a full evidence chain and a concrete fix hint. Also reports
-correctness errors (`nested-event-loop`, `offload-coroutine`) and non-blocking
-**advice** when an offload could be replaced by a same-package async twin.
+`async-doctor` finds sync/blocking IO reachable from Python `async def`, protocol/coroutine errors, and non-blocking advice, with evidence chains. It never autofixes or loads a project config file.
 
-## Agent Fix Decision Tree
+## Agent Diagnosis and Repair Decision Tree
 
-Follow these 5 steps in order whenever remediating findings:
-
-1. **Work from `sinkSites` choke points first** — Inspect `Top fix:` in grouped
-   text output or `sinkSites[]` (and `chokePointFile` / `chokePointLine`) in
-   JSON. One shared sync helper or sink site often clears dozens of route
-   findings at once; fix the choke point instead of patching each route.
-2. **Check sync callers before converting `def` → `async def`** — Inspect
-   `syncCallerCount` / `sampleSyncCaller` on `sinkSites[]` (or the sync-caller
-   note in grouped text and `why` output), and grep for synchronous callers
-   (`def`, CLI entrypoints, WSGI, background threads). If sync callers exist,
-   keep a sync API or wrap the sync unit of work at the async boundary rather
-   than breaking sync callers.
-3. **NEVER pass stateful `session.execute` / `conn.execute` to `asyncio.to_thread`** —
-   SQLAlchemy `Session`, DB-API `Connection`, and cursors are not thread-safe
-   and must never cross threads mid-transaction. Either migrate to the native
-   async driver (`AsyncSession`, `AsyncConnection`, `asyncpg`) or offload a
-   **self-contained unit-of-work function** that opens, commits/rolls back, and
-   closes its own connection inside the worker thread.
-4. **Always scan the project root `.`, never a single `.py` file** — Scanning a
-   single file misses cross-module callers, shared sync helpers, and project
-   layout roots. Always run `async-doctor .` or `async-doctor --changed .` from
-   the repository/package root.
-5. **Verify with a full `async-doctor .` after `--changed` edits** — `--changed`
-   is a fast diff-scoped check (short-circuiting in `<20ms` when no Python or
-   config files changed), so signature/type changes that expose untouched lines
-   require a final `async-doctor .` (or `--baseline`) check before finishing.
+1. **Locate the evidence.** Inspect `Top site:` in grouped text, or `sinkSites[]` and `chokePointFile` / `chokePointLine` in JSON, then use `why` to trace the affected chains. Use reachability counts to choose what to inspect, not to predict how many findings an edit will clear.
+2. **Inspect intent and callers.** Read the operation's purpose and its synchronous and asynchronous callers, including exported APIs, CLI entrypoints, background threads, and dynamic integrations. `syncCallerCount` / `sampleSyncCaller` describe only the analyzed graph; zero or missing counts do not establish complete external/dynamic caller coverage or permission to convert `def` to `async def`.
+3. **Check ownership and library contracts.** Inspect transaction scope, resource ownership, thread/loop affinity, cancellation, timeouts, and resource lifetime. For a call such as `session.execute`, trace where the handle is created, used, committed or rolled back, and closed. Check the installed library's contracts rather than inferring safe thread transfer or async migration from a blocking diagnosis.
+4. **Choose an evidence-supported outcome.** Justify why a proposed repair fits the intent, callers, ownership, and contracts you inspected. Neither `asyncio.to_thread` nor async client/driver migration is a default repair. If suitability cannot be established, retain and report the diagnosis and the missing evidence instead of making an unproven edit or suppressing it. Do not apply a blanket rewrite.
+5. **Verify justified edits.** After `--changed` checks, run a full scan from the repository/package root and relevant tests for the affected behavior, including ownership, cancellation, and callers. Report remaining findings and analysis gaps; a withheld repair is not a clean scan.
 
 ## After editing async Python
 
-Activate the project venv first (or set `VIRTUAL_ENV`) so third-party imports
-resolve — without it, findings silently drop because site-packages follow cannot
-see project dependencies. Then run:
+Run from the repository/package root so cross-module helpers and callers are available. A single-file scan can diagnose a local site but is not a caller audit. Activate the project venv first (or set `VIRTUAL_ENV`) so third-party imports resolve; inspect the reported `environment` for missing dependencies. Then run:
 
 ```bash
-uvx async-doctor --changed        # or: uvx async-doctor --diff
+uvx async-doctor --changed .      # or: uvx async-doctor --diff .
 ```
 
-(`uvx` fetches the package from PyPI; an already-installed `async-doctor` on
-`PATH` works the same.) `--changed` (`--diff`) reports only findings whose async
-entry or a chain hop line touches lines changed since the merge-base, including
-uncommitted and untracked files — it is a regression check, not a full audit.
+`uvx` fetches the package from PyPI; an already-installed `async-doctor` on `PATH` works the same. `--changed` (`--diff`) filters reporting to changed lines and affected definition/body spans since the merge-base, including uncommitted and untracked files. It short-circuits when no Python or Python config/lock files changed; it is a regression check, not a full audit.
 
-Fix every **finding** before finishing. Candidates and advice do not fail the
-exit code; findings do (unless `--fail-on none` is passed for advisory runs).
+Findings and unused suppressions fail the exit code unless `--fail-on none` is passed for advisory runs. Candidates and advice never affect the exit code.
 
-| Exit | Meaning |
-| ---- | ------- |
-| 0 | Clean (no findings / no new findings vs baseline, or `--fail-on none`) |
-| 1 | Findings (or unused suppressions) |
-| 2 | Tool error |
+- **Exit 0:** no reported findings or unused suppressions, or `--fail-on none`.
+- **Exit 1:** findings or unused suppressions.
+- **Exit 2:** tool error.
 
-## For a full cleanup
+Incomplete analysis sets `complete=false` with skipped-work evidence, not exit 2. Check this separately from the exit code.
+
+## For a full audit
 
 ```bash
 async-doctor .
 async-doctor --format json --max-findings 50 .  # compact JSON on pipes; sinkSites/score stay full
-async-doctor --expand .                         # show all fix groups and advice
+async-doctor --expand .                        # show all chains, groups, and advice
 ```
 
-For agents reading JSON, prefer `--format json --max-findings 50 .` — piped
-stdout emits compact JSON automatically while `omittedFindings`,
-`omittedCandidates`, and `omittedAdvice` record what was cut.
+For JSON, prefer `--format json --max-findings 50 .`: piped stdout emits compact JSON automatically, and `omittedFindings`, `omittedCandidates`, and `omittedAdvice` record what was cut. Expand or inspect omitted groups when the affected sites need more evidence.
 
-JSON includes `environment` (interpreter/venv/site-packages) and additive
-`advice[]` (`schemaVersion` 2). Advice never changes the exit code. SARIF maps
-advice to level `note`.
+JSON retains `schemaVersion` 2 and includes `environment` (interpreter/venv/site-packages), `complete`, and the findings/candidates/advice arrays even when empty. SARIF maps advice to level `note`.
 
-## Understanding a finding or advice
+## Understanding a diagnosis
 
-Each finding/advice includes:
+Each finding, candidate, and advice item keeps its diagnostic evidence and `fix` object:
 
 - **chain** — async entry → … → sink / offload site, with `file:line` per hop
-- **fix.hint** — await the async twin, `asyncio.to_thread(f, args)`, or switch client
+- **fix.hint** — always a string; `""` means no recommended edit, not a clean result. Only `sync-with-async-cm` and `sync-for-async-iterable` may suggest a local correction to the supported async-only protocol on the same object. Where async syntax is legal, that is `async with` or `async for`; it neither authorizes changing a containing function's API nor claims a globally optimal repair.
+- **fix.fixGroupId** — stable diagnostic grouping even when the hint is empty; shared grouping is not a guarantee that one edit resolves every member
 - **rule** / **docsAnchor** — stable id into `docs/rules.md`
-- **why** — runnable locator (`async-doctor why file:line --path .`) that
-  deduplicates rule docs and caps >5 chains per sink/rule unless `--expand`
+- **why** — runnable locator (`async-doctor why file:line --path .`) that deduplicates rule docs and caps >5 chains per sink/rule unless `--expand`; location-less candidates have an empty locator
 
 ```bash
 async-doctor explain blocking-sleep
@@ -108,65 +72,43 @@ async-doctor why path/to/file.py:42 --path . --expand
 async-doctor why path/to/file.py:42 --path . --format json
 ```
 
-### Advice: `offload-has-async-twin` / `dangling-task` / `ephemeral-async-client` / `shared-async-session` / `offload-stateful-session` / `useless-local-async-lock` / `swallowed-cancelled-error`
+### Advice (non-blocking)
 
-- **offload-has-async-twin** — fires only at offload cut sites (`to_thread`, `run_in_executor`, anyio/starlette
-  threadpool, `asgiref.sync.sync_to_async`, inferred wrappers) when every
-  unconditionally reached sink has a high-confidence same-package async twin
-  installed in the scanned venv (`httpx.AsyncClient` including module `httpx.get`,
-  `redis.asyncio`, `AsyncOpenAI` / `AsyncAzureOpenAI`, `AsyncAnthropic`,
-  `AsyncElasticsearch`+`aiohttp`, `psycopg.AsyncConnection`, `grpc.aio`,
-  `sqlalchemy.ext.asyncio.AsyncSession`/`AsyncEngine` with `greenlet` + async driver). Offload-site try/if/loop
-  guards do not suppress advice. Sync-caller exemption when the offloaded fn is
-  also called from sync-only code. Excludes pymongo / requests / boto3 / file IO /
-  subprocess / CPU.
-- **dangling-task** — bare `asyncio.create_task` / `loop.create_task` / `asyncio.ensure_future`
-  statement that discards the returned `Task` (weak loop reference can be GC'd mid-execution).
-- **ephemeral-async-client** — `httpx.AsyncClient` / `aiohttp.ClientSession` constructed and closed per
-  route request or loop iteration instead of reusing a shared pool.
-- **shared-async-session** — one stateful `AsyncSession` / `AsyncConnection` / `asyncpg.Connection` /
-  `psycopg.AsyncConnection` shared concurrently across tasks in `asyncio.gather` or `TaskGroup`.
-- **offload-stateful-session** — passing a bound method of a non-thread-safe sync `Session` / `Connection` / `Cursor`
-  directly to `to_thread` / `run_in_executor` across threads.
-- **useless-local-async-lock** — `async with asyncio.Lock():` / `Semaphore(...)` freshly created per call in `async def`
-  without escaping to shared tasks or closures (serializes nothing).
-- **swallowed-cancelled-error** — `except asyncio.CancelledError:` (or bare `except:` / `except BaseException:`) in a
-  non-Task/Lifecycle `async def` that exits without re-raising cancellation.
+- **offload-has-async-twin** — same-package async symbols and required dependencies resolve in the scanned environment for every unconditionally reached sink behind an offload cut (`to_thread`, executors, anyio/starlette threadpool, `sync_to_async`, decorator offloads, or inferred wrappers). For example, a sync `httpx` call maps to available `httpx.AsyncClient`. Offload-site try/if/loop guards do not suppress advice; observed sync-only callers exempt the target. Excluded families include pymongo / requests / boto3 / file IO / subprocess / CPU. Its `performance` category remains for compatibility, not as a measured gain or a recommendation to replace a safe offload. Availability does not establish migration suitability.
+- **dangling-task** — a bare `asyncio.create_task` / `loop.create_task` / `asyncio.ensure_future` statement discards the returned `Task` (the loop's weak reference does not keep it alive).
+- **ephemeral-async-client** — `httpx.AsyncClient` / `aiohttp.ClientSession` is constructed and closed per route request or loop iteration, discarding its connection pool at that scope.
+- **shared-async-session** — one stateful `AsyncSession` / `AsyncConnection` / `asyncpg.Connection` / `psycopg.AsyncConnection` is shared concurrently across tasks in `asyncio.gather` or `TaskGroup`.
+- **offload-stateful-session** — a bound method of a non-thread-safe sync `Session` / `Connection` / `Cursor` is passed directly to `to_thread` / `run_in_executor` across threads.
+- **useless-local-async-lock** — `async with asyncio.Lock():` / `Semaphore(...)` is freshly created per call in `async def` without escaping to shared tasks or closures (serializes nothing).
+- **swallowed-cancelled-error** — `except asyncio.CancelledError:` (or bare `except:` / `except BaseException:`) in a non-Task/Lifecycle `async def` exits without re-raising cancellation.
 
-### Errors: `nested-event-loop` / `offload-coroutine` / `sync-with-async-cm` / `sync-for-async-iterable` / `eager-offload-call` / `unawaited-coroutine`
+### Error findings
 
-- **nested-event-loop** — `asyncio.run` / `Runner.run` / `run_until_complete` /
-  `run_forever` / `anyio.run` / `trio.run` reachable from async without an
-  offload. Loop-state guards (`if loop is None`, `except RuntimeError` after
-  `get_running_loop`, `not loop.is_running()`, …) are dropped. Other conditional
-  sites stay findings.
-- **offload-coroutine** — offload target is `async def` (coroutine never awaited).
+- **nested-event-loop** — `asyncio.run` / `Runner.run` / `run_until_complete` / `run_forever` / `anyio.run` / `trio.run` is reachable from async without an offload. Loop-state guards (`if loop is None`, `except RuntimeError` after `get_running_loop`, `not loop.is_running()`, …) are dropped. Other conditional sites stay findings.
+- **offload-coroutine** — an offload target is `async def` (coroutine never awaited); async-generator functions are excluded.
 - **sync-with-async-cm** — sync `with` enters an async-only context manager (`__aenter__` without `__enter__`).
 - **sync-for-async-iterable** — sync `for` or sync comprehension iterates an async-only iterable (`__aiter__` without `__iter__`/`__getitem__`).
 - **eager-offload-call** — offload callable slot is a call `to_thread(fn(...))` returning a non-callable value (runs on loop + `TypeError`).
-- **unawaited-coroutine** — bare `fn(...)` statement discards a proven coroutine without `await`.
+- **unawaited-coroutine** — a proven coroutine object is discarded by a bare call or used directly as an iteration/context object; `async for` and `async with` do not implicitly await it.
 
 ## Suppressions (no config file)
 
-Only when a sync call is intentionally on the loop thread — reason required.
-Supports comma-separated rules (`ignore[rule-a, rule-b]: reason`) and stacking
-after `# type: ignore[...]` or `# noqa: ...` on the same line. Trailing ignores
-apply only to their own statement; standalone comment lines apply to `line + 1`.
+For an independently justified intentional exception, use an inline suppression with a reason. Supports comma-separated rules (`ignore[rule-a, rule-b]: reason`) and stacking after `# type: ignore[...]` or `# noqa: ...` on the same line. Trailing ignores apply only to their own statement; standalone comment lines apply to `line + 1`.
 
 ```python
-time.sleep(1)  # type: ignore[arg-type]  # async-doctor: ignore[blocking-sleep]: brief sync boundary
+time.sleep(1)  # type: ignore[arg-type]  # async-doctor: ignore[blocking-sleep]: intentional loop stall in regression test
 ```
 
-Unused suppressions fail the run (tracked per rule). Prefer fixing over ignoring.
+Unused suppressions fail the run (tracked per rule).
 
 ## CI / regression
 
 ```bash
 async-doctor --write-baseline baseline.json .
-async-doctor --baseline baseline.json --changed
+async-doctor --baseline baseline.json --changed .
 ```
 
-Fingerprints are stable across line shifts (rule + symbol path + sink, not lines).
+Fingerprints are stable across line shifts (rule + entry/sink/chain symbol paths + occurrence, not lines).
 
 ## SARIF (GitHub code scanning)
 

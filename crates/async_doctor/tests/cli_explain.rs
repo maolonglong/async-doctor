@@ -30,7 +30,7 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 #[test]
-fn explain_blocking_sleep_prints_fix_and_absolute_url() {
+fn explain_blocking_sleep_describes_problem_without_prescribing_a_repair() {
     let out = bin()
         .args(["explain", "blocking-sleep"])
         .output()
@@ -42,7 +42,9 @@ fn explain_blocking_sleep_prints_fix_and_absolute_url() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("blocking-sleep"));
-    assert!(stdout.contains("asyncio.sleep"));
+    assert!(stdout.contains("time.sleep"));
+    assert!(!stdout.contains("How to fix"), "{stdout}");
+    assert!(!stdout.contains("to_thread"), "{stdout}");
     assert!(stdout.contains("#blocking-sleep"));
     assert!(stdout.contains(
         "https://github.com/maolonglong/async-doctor/blob/main/docs/rules.md#blocking-sleep"
@@ -69,7 +71,8 @@ fn explain_accepts_hash_anchor() {
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("blocking-http"));
-    assert!(stdout.contains("AsyncClient") || stdout.contains("aiohttp"));
+    assert!(stdout.contains("HTTP"));
+    assert!(!stdout.contains("How to fix"), "{stdout}");
 }
 
 #[test]
@@ -102,6 +105,12 @@ fn json_includes_docs_url_chain_resolution_and_runnable_why() {
     );
     let finding = &v["findings"][0];
     assert_eq!(finding["rule"], "blocking-sleep");
+    assert_eq!(finding["fix"]["hint"], "");
+    assert!(
+        finding["fix"]["fixGroupId"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty())
+    );
     assert_eq!(finding["docsAnchor"], "#blocking-sleep");
     assert!(
         finding["docsUrl"]
@@ -161,11 +170,13 @@ fn text_default_is_grouped_expand_lists_all() {
         "sink sites must precede findings: {lead}"
     );
     assert!(
-        stdout.contains("fix group") || stdout.contains("sink site"),
+        stdout.contains("diagnostic group") || stdout.contains("sink site"),
         "{stdout}"
     );
     assert!(stdout.contains("async def handler"));
-    assert!(stdout.contains("fix:"));
+    assert!(!stdout.contains("fix:"), "{stdout}");
+    assert!(!stdout.contains("Top fix:"), "{stdout}");
+    assert!(!stdout.contains("clears "), "{stdout}");
     assert!(stdout.contains("top sinks"), "{stdout}");
     assert!(stdout.contains("https://github.com/maolonglong/async-doctor"));
     assert!(
@@ -178,6 +189,7 @@ fn text_default_is_grouped_expand_lists_all() {
     assert!(exp.contains("why: async-doctor why "));
     assert!(exp.contains(" --path "));
     assert!(exp.contains("explain: async-doctor explain blocking-sleep"));
+    assert!(!exp.contains("fix:"), "{exp}");
 }
 
 #[test]
@@ -214,6 +226,17 @@ fn why_locates_multihop_sink_with_resolution() {
         stdout.contains("blocking sink") || stdout.contains("resolved call"),
         "{stdout}"
     );
+    assert!(!stdout.contains("How to fix"), "{stdout}");
+
+    let json = bin()
+        .args(["why", location, "--format", "json", "--path"])
+        .arg(&dir)
+        .output()
+        .expect("run why json");
+    assert_eq!(json.status.code(), Some(1));
+    let why_json: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(why_json["findings"][0]["fix"]["hint"], "");
+    assert_eq!(why_json["rules"][0]["fix"], "");
 }
 
 #[test]
@@ -273,4 +296,85 @@ fn invalid_path_exits_2() {
         .output()
         .expect("run");
     assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn protocol_corrections_do_not_require_converting_a_sync_api() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("app.py"),
+        r#"class OnlyAsyncCM:
+    async def __aenter__(self): return self
+    async def __aexit__(self, *args): return False
+
+async def rows():
+    yield 7
+
+def sync_api():
+    with OnlyAsyncCM():
+        pass
+    for row in rows():
+        pass
+
+async def direct():
+    with OnlyAsyncCM():
+        pass
+    for row in rows():
+        pass
+
+async def via_sync_api():
+    sync_api()
+"#,
+    )
+    .unwrap();
+    let out = bin()
+        .args(["--format", "json"])
+        .arg(dir.path())
+        .output()
+        .expect("run protocol boundaries");
+    assert_eq!(out.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["complete"], true);
+    let findings = report["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 4, "{report}");
+    for finding in findings {
+        let hint = finding["fix"]["hint"].as_str().unwrap();
+        match finding["entry"]["name"].as_str().unwrap() {
+            "direct" => assert!(!hint.is_empty(), "{finding}"),
+            "via_sync_api" => assert!(hint.is_empty(), "{finding}"),
+            entry => panic!("unexpected entry {entry}: {finding}"),
+        }
+    }
+
+    for (location, has_correction) in [
+        ("app.py:9", false),
+        ("app.py:11", false),
+        ("app.py:15", true),
+        ("app.py:17", true),
+    ] {
+        let out = bin()
+            .args(["why", location, "--format", "json", "--path"])
+            .arg(dir.path())
+            .output()
+            .expect("run contextual why json");
+        assert_eq!(out.status.code(), Some(1), "{location}");
+        let why: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(why["findings"].as_array().unwrap().len(), 1, "{why}");
+        assert_eq!(why["rules"].as_array().unwrap().len(), 1, "{why}");
+        assert_eq!(
+            !why["rules"][0]["fix"].as_str().unwrap().is_empty(),
+            has_correction,
+            "{location}: {why}"
+        );
+
+        let out = bin()
+            .args(["why", location, "--path"])
+            .arg(dir.path())
+            .output()
+            .expect("run contextual why text");
+        assert_eq!(out.status.code(), Some(1), "{location}");
+        let text = String::from_utf8(out.stdout).unwrap();
+        assert!(text.contains("Hop resolution:"), "{text}");
+        assert_eq!(text.contains("How to fix"), has_correction, "{text}");
+    }
 }

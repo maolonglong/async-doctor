@@ -204,7 +204,6 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             is_generator: expr_has_yield(&lam.body),
             label: EntryLabel::Other,
             is_sync_route: false,
-            async_twins: Vec::new(),
             param_names,
             is_third_party: false,
             package_name: None,

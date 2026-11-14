@@ -1,6 +1,6 @@
 //! `explain` and `why` subcommands — agent-facing long-form help.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
@@ -77,27 +77,28 @@ pub fn run_why(
         EXIT_FINDINGS
     };
 
+    let mut rule_corrections = BTreeMap::new();
+    for (rule, fix) in matches
+        .findings
+        .iter()
+        .map(|f| (&f.rule, &f.fix))
+        .chain(matches.candidates.iter().map(|c| (&c.rule, &c.fix)))
+        .chain(matches.advice.iter().map(|a| (&a.rule, &a.fix)))
+    {
+        *rule_corrections.entry(rule.as_str()).or_insert(false) |= !fix.hint.is_empty();
+    }
+
     if matches!(format, WhyFormat::Json) {
-        let mut seen_rules = BTreeSet::new();
-        for f in &matches.findings {
-            seen_rules.insert(f.rule.clone());
-        }
-        for c in &matches.candidates {
-            seen_rules.insert(c.rule.clone());
-        }
-        for a in &matches.advice {
-            seen_rules.insert(a.rule.clone());
-        }
-        let rules: Vec<_> = seen_rules
-            .into_iter()
-            .map(|id| {
-                if let Some(doc) = rule_doc(&id) {
+        let rules: Vec<_> = rule_corrections
+            .iter()
+            .map(|(id, has_correction)| {
+                if let Some(doc) = rule_doc(id) {
                     json!({
                         "id": doc.id,
                         "title": doc.title,
                         "summary": doc.summary,
                         "body": doc.body,
-                        "fix": doc.fix,
+                        "fix": if *has_correction { doc.fix } else { "" },
                         "docsAnchor": doc.docs_anchor(),
                         "docsUrl": doc.docs_url(),
                     })
@@ -152,6 +153,10 @@ pub fn run_why(
         if let Some(doc) = rule_doc(r)
             && seen_rule_ids.insert(doc.id)
         {
+            let mut doc = *doc;
+            if !rule_corrections[doc.id] {
+                doc.fix = "";
+            }
             distinct_docs.push(doc);
         }
     };
@@ -190,12 +195,12 @@ pub fn run_why(
             match site.sample_sync_caller.as_deref() {
                 Some(sample) if !sample.is_empty() => writeln!(
                     out,
-                    "Sync callers: {} sync caller{caller_s} also {reach_verb} this helper (e.g. {sample}) — offloading at the async caller preserves sync callers.\n",
+                    "Sync callers: {} observed sync caller{caller_s} also {reach_verb} this helper (e.g. {sample}).\n",
                     site.sync_caller_count
                 )?,
                 _ => writeln!(
                     out,
-                    "Sync callers: {} sync caller{caller_s} also {reach_verb} this helper — offloading at the async caller preserves sync callers.\n",
+                    "Sync callers: {} observed sync caller{caller_s} also {reach_verb} this helper.\n",
                     site.sync_caller_count
                 )?,
             }

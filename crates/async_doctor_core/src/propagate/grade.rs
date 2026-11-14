@@ -345,35 +345,6 @@ pub(super) fn shortest_paths_to_async_entries(
     entries
 }
 
-pub(super) fn async_twin_hint(
-    facts: &ProjectFacts,
-    entry_id: FunctionId,
-    path: &PathToEntry,
-) -> Option<String> {
-    let host = if let Some(&last) = path.edges.last() {
-        match facts.edges[last].callee {
-            CalleeRef::Project(fid) => facts.function(fid),
-            _ => facts.function(entry_id),
-        }
-    } else {
-        facts.function(entry_id)
-    };
-
-    let method = host.qualname.rsplit('.').next().unwrap_or(&host.qualname);
-    for (sync_name, twin) in &host.async_twins {
-        if sync_name == method {
-            let class = host.qualname.rsplit_once('.').map(|(c, _)| c).unwrap_or("");
-            let q = if class.is_empty() {
-                twin.clone()
-            } else {
-                format!("{class}.{twin}")
-            };
-            return Some(q);
-        }
-    }
-    None
-}
-
 /// Cheap, idempotent path ops (`mkdir(exist_ok=True)`, `makedirs(exist_ok=True)`,
 /// `unlink(missing_ok=True)`) grade as candidates; the flag must be a literal
 /// `True` (keyword, or its stdlib positional slot). `Path.touch` is a candidate

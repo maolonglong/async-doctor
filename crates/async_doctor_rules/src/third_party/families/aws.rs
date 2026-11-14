@@ -20,17 +20,12 @@ pub(super) fn match_aws_family(q: &str) -> Option<SinkHit> {
         } else {
             "boto3.client"
         };
-        return Some(hit(&BuiltinSink::finding(
-            key,
-            RULE_BLOCKING_HTTP,
-            "Use `aioboto3` / `aiobotocore` instead of sync `boto3`.",
-        )));
+        return Some(hit(&BuiltinSink::finding(key, RULE_BLOCKING_HTTP)));
     }
     if q.starts_with("botocore.waiter.") && q.ends_with(".wait") {
         return Some(hit(&BuiltinSink::finding(
             "botocore.waiter.Waiter.wait",
             RULE_BLOCKING_HTTP,
-            "Use `aioboto3` / `aiobotocore` waiters (`await waiter.wait(...)`), or offload.",
         )));
     }
     if matches!(
@@ -42,7 +37,6 @@ pub(super) fn match_aws_family(q: &str) -> Option<SinkHit> {
         return Some(hit(&BuiltinSink::finding(
             "botocore.response.StreamingBody.read",
             RULE_BLOCKING_HTTP,
-            "Use `aiobotocore` async response streams, or offload.",
         )));
     }
     // AWS-op name heuristic only on client/resource receivers — never
@@ -54,7 +48,6 @@ pub(super) fn match_aws_family(q: &str) -> Option<SinkHit> {
         return Some(hit(&BuiltinSink::finding(
             "botocore.client.BaseClient._make_api_call",
             RULE_BLOCKING_HTTP,
-            "Use `aioboto3` / `aiobotocore` instead of sync `boto3`.",
         )));
     }
     None

@@ -4,8 +4,56 @@ use async_doctor_core::SinkTable;
 
 use crate::{
     BuiltinSinkTable, RULE_BLOCKING_DB, RULE_BLOCKING_FILE, RULE_BLOCKING_HTTP,
-    RULE_BLOCKING_SOCKET, RULE_BLOCKING_SUBPROCESS, rule_doc,
+    RULE_BLOCKING_SOCKET, RULE_BLOCKING_SUBPROCESS, STDLIB_SINKS, THIRD_PARTY_SINKS, rule_doc,
 };
+
+#[test]
+fn builtin_rows_keep_diagnostic_metadata_without_repair_hints() {
+    let t = BuiltinSinkTable::new();
+    for sink in STDLIB_SINKS.iter().chain(THIRD_PARTY_SINKS.iter()) {
+        let hit = sink.hit();
+        assert_eq!(hit.rule, sink.rule);
+        assert_eq!(hit.sink_qualname, sink.qualname);
+        assert_eq!(hit.candidate_only, sink.candidate_only);
+        assert_eq!(hit.candidate_reason, sink.candidate_reason);
+        assert_eq!(hit.with_only, sink.with_only);
+        assert_eq!(hit.consume_only, sink.consume_only);
+        assert!(
+            hit.fix_hint.is_empty(),
+            "{}: {}",
+            sink.qualname,
+            hit.fix_hint
+        );
+
+        let resolved = t
+            .lookup(sink.qualname)
+            .unwrap_or_else(|| panic!("expected sink for {}", sink.qualname));
+        assert_eq!(resolved.rule, sink.rule, "{}", sink.qualname);
+        assert_eq!(resolved.sink_qualname, sink.qualname, "{}", sink.qualname);
+        assert_eq!(
+            resolved.candidate_only, sink.candidate_only,
+            "{}",
+            sink.qualname
+        );
+        assert_eq!(
+            resolved.candidate_reason, sink.candidate_reason,
+            "{}",
+            sink.qualname
+        );
+        assert_eq!(resolved.with_only, sink.with_only, "{}", sink.qualname);
+        assert_eq!(
+            resolved.consume_only, sink.consume_only,
+            "{}",
+            sink.qualname
+        );
+        assert!(
+            resolved.fix_hint.is_empty(),
+            "{}: {}",
+            sink.qualname,
+            resolved.fix_hint
+        );
+    }
+}
 
 #[test]
 fn sqlite3_extended_sinks_and_aliases_resolve() {
@@ -28,14 +76,8 @@ fn sqlite3_extended_sinks_and_aliases_resolve() {
         assert_eq!(hit.rule, RULE_BLOCKING_DB, "wrong rule for {q}");
         assert!(!hit.candidate_only, "{q} must be a finding");
         assert!(
-            !hit.fix_hint.contains("to_thread(conn.execute")
-                && !hit.fix_hint.contains("to_thread(session.execute"),
-            "sqlite3 fix_hint must not advise sharing Connection across threads: {}",
-            hit.fix_hint
-        );
-        assert!(
-            hit.fix_hint.contains("aiosqlite") && hit.fix_hint.contains("sqlite3.Connection"),
-            "sqlite3 fix_hint should mention aiosqlite and worker-owned Connection: {}",
+            hit.fix_hint.is_empty(),
+            "sqlite3 diagnosis must not prescribe a driver or ownership change: {}",
             hit.fix_hint
         );
     }
@@ -183,10 +225,12 @@ fn slow_kdf_apis_grade_strictly_as_candidates_never_findings() {
             "{q} must be a candidate (never a finding)"
         );
         assert_eq!(hit.rule, "blocking-cpu", "unexpected rule for {q}");
-        assert!(
-            hit.candidate_reason.is_some(),
-            "{q} candidate must carry a reason"
+        assert_eq!(
+            hit.candidate_reason,
+            Some("slow-kdf"),
+            "{q} candidate must keep its reason"
         );
+        assert!(hit.fix_hint.is_empty(), "{q}: {}", hit.fix_hint);
         assert!(
             t.async_twin(q).is_none(),
             "{q} CPU KDF must never have an async twin"

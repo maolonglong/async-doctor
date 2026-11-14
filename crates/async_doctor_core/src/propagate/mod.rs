@@ -31,6 +31,7 @@ use sync_callers::SyncCallerIndex;
 pub struct SinkHit {
     pub rule: &'static str,
     pub sink_qualname: &'static str,
+    /// A proven local correction, or empty when no repair is established.
     pub fix_hint: &'static str,
     /// When true, emit a candidate instead of a finding (e.g. small metadata IO).
     pub candidate_only: bool,
@@ -48,7 +49,8 @@ pub enum TwinConfidence {
     High,
 }
 
-/// High-confidence async twin for a sync sink (advice tier).
+/// Resolvable async API associated with a sync sink (advice tier).
+/// Availability does not establish equivalent behavior or a suitable migration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AsyncTwinHit {
     pub symbol: &'static str,
@@ -62,7 +64,7 @@ pub struct AsyncTwinHit {
 pub trait SinkTable {
     fn lookup(&self, qualname: &str) -> Option<SinkHit>;
 
-    /// Structured high-confidence twin for `offload-has-async-twin` advice.
+    /// Structured async-API availability for `offload-has-async-twin` advice.
     /// Default: none (tests / minimal tables).
     fn async_twin(&self, _qualname: &str) -> Option<AsyncTwinHit> {
         None
@@ -220,8 +222,7 @@ fn analyze_materialized(
             conditions: Vec::new(),
             reason: format!("unresolved import `{}`", imp.module),
             fix: Fix {
-                hint: "Could not resolve import; check package layout / editable install."
-                    .to_string(),
+                hint: String::new(),
                 fix_group_id: fix_group_id("unresolved-import", &sink_key),
             },
             why: format!("async-doctor why {}:{}", imp.file, imp.line),
@@ -273,8 +274,7 @@ fn analyze_materialized(
                 conditions: Vec::new(),
                 reason: pattern,
                 fix: Fix {
-                    hint: "Install project dependencies into the active venv, then re-scan."
-                        .to_string(),
+                    hint: String::new(),
                     fix_group_id: fix_group_id("unresolved-import", sink_key),
                 },
                 why: String::new(),

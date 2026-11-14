@@ -10,12 +10,11 @@ use crate::id::{FindingIdParts, finding_id, fix_group_id};
 use crate::report::{Candidate, ChainStep, Entry, Finding, Fix};
 
 use super::grade::{
-    self, ClassInitIndex, ItemSpanMap, ParamVerdict, PathToEntry, async_twin_hint, chain_step_for,
+    self, ClassInitIndex, ItemSpanMap, ParamVerdict, PathToEntry, chain_step_for,
     collect_item_spans, evaluate_param_guards, reconcile_conditions, resolution_for_edge,
     shortest_paths_to_async_entries, unique_site_finding_id, unresolved_pattern,
 };
 use super::special::{self, special_finding_hit};
-use super::sync_callers::{lookup_sink_async_twin, twin_resolves};
 use super::{SinkHit, SinkTable};
 
 pub(super) struct SeedDiagnostics {
@@ -244,6 +243,18 @@ pub(super) fn collect_seed_diagnostics(
                             .as_ref()
                             .expect("seed_sink_meta present for SeedKind::Sink");
                     seed_step.resolution = seed_resolution.clone();
+                    // Eager evaluation is evidence, not proof that moving this
+                    // operation into a worker thread is an appropriate repair.
+                    if seed_edge.is_eager_offload_arg
+                        || path
+                            .edges
+                            .iter()
+                            .any(|&i| facts.edges[i].is_eager_offload_arg)
+                    {
+                        seed_step
+                            .resolution
+                            .push_str("; argument evaluated on the event loop before offload");
+                    }
                     chain_steps.push(seed_step);
                     chain_qualnames.push(hit.sink_qualname.to_string());
                     let chain_refs: Vec<&str> =
@@ -264,31 +275,6 @@ pub(super) fn collect_seed_diagnostics(
                         continue;
                     };
 
-                    let mut hint = qualify_hint_for_scanned_env(
-                        hit.fix_hint.to_string(),
-                        facts,
-                        sinks,
-                        seed_edge,
-                        hit,
-                    );
-                    // Eager offload may mark the edge into the sink's caller
-                    // (`to_thread(work())` → work → sleep) rather than the sink edge.
-                    let eager_offload = seed_edge.is_eager_offload_arg
-                        || path
-                            .edges
-                            .iter()
-                            .any(|&i| facts.edges[i].is_eager_offload_arg);
-                    if eager_offload {
-                        hint = format!(
-                            "{hint} This call runs on the event loop before offload — \
-                             pass the callable (e.g. `asyncio.to_thread(f, ...)`) \
-                             rather than calling it (`to_thread(f())`)."
-                        );
-                    }
-                    if let Some(twin) = async_twin_hint(facts, entry_id, path) {
-                        hint = format!("{hint} Async twin available: `{twin}`.");
-                    }
-
                     let entry_out = Entry {
                         file: entry.file.clone(),
                         line: entry.line,
@@ -300,7 +286,7 @@ pub(super) fn collect_seed_diagnostics(
                     let docs_anchor = seed_docs_anchor.clone();
                     let docs_url = seed_docs_url.clone();
                     let fix = Fix {
-                        hint,
+                        hint: hit.fix_hint.to_string(),
                         fix_group_id: seed_fix_group_id.clone(),
                     };
 
@@ -383,7 +369,7 @@ pub(super) fn collect_seed_diagnostics(
                         conditions,
                         reason: reason.clone(),
                         fix: Fix {
-                            hint: "Could not resolve call target; inspect dynamically.".to_string(),
+                            hint: String::new(),
                             fix_group_id: fix_group_id("unresolved-call", &sink_key),
                         },
                         why: seed_why.clone(),
@@ -407,50 +393,6 @@ pub(super) fn collect_seed_diagnostics(
     }
 }
 
-fn qualify_hint_for_scanned_env(
-    mut hint: String,
-    facts: &ProjectFacts,
-    sinks: &dyn SinkTable,
-    seed_edge: &crate::graph::CallEdge,
-    hit: &SinkHit,
-) -> String {
-    if facts.resolved_symbols.is_empty() {
-        return hint;
-    }
-    let Some(twin) = lookup_sink_async_twin(sinks, seed_edge, hit) else {
-        return hint;
-    };
-    if twin_resolves(facts, &twin) {
-        let code_sym = format!("`{}`", twin.symbol);
-        if let Some(pos) = hint.find(&code_sym) {
-            hint.insert_str(pos + code_sym.len(), " (installed in env)");
-        } else {
-            hint.push_str(&format!(
-                " Async twin `{}` (installed in env).",
-                twin.symbol
-            ));
-        }
-        return hint;
-    }
-
-    let missing_desc = if !facts.resolved_symbols.contains(twin.symbol) {
-        format!("`{}`", twin.symbol)
-    } else if let Some(missing_need) = twin
-        .needs
-        .iter()
-        .find(|n| !facts.resolved_symbols.contains(**n))
-    {
-        format!("`{missing_need}` (required by `{}`)", twin.symbol)
-    } else {
-        let drivers = twin.any_needs.join("/");
-        format!("an async driver (`{drivers}` for `{}`)", twin.symbol)
-    };
-    hint.push_str(&format!(
-        " Note: {missing_desc} is not installed in the scanned env; `await asyncio.to_thread(...)` avoids adding dependencies."
-    ));
-    hint
-}
-
 fn collect_seeds(facts: &ProjectFacts, sinks: &dyn SinkTable) -> Vec<Seed> {
     let mut seeds = Vec::new();
     for (idx, edge) in facts.edges.iter().enumerate() {
@@ -467,8 +409,7 @@ fn collect_seeds(facts: &ProjectFacts, sinks: &dyn SinkTable) -> Vec<Seed> {
                 }
                 // Nested event-loop APIs and first-party async anti-patterns are
                 // correctness errors when reachable from async without an offload cut.
-                let caller_is_installed_tp = facts.function(edge.caller).is_installed_third_party();
-                if let Some(hit) = special_finding_hit(qualname, caller_is_installed_tp) {
+                if let Some(hit) = special_finding_hit(qualname, facts.function(edge.caller)) {
                     if hit.with_only && !matches!(edge.kind, CallKind::WithEnter) {
                         continue;
                     }

@@ -7,9 +7,6 @@ use crate::{BuiltinSink, RULE_BLOCKING_DB};
 
 use super::intern_qualname;
 
-const SQLALCHEMY_SESSION_HINT: &str = "Use `sqlalchemy.ext.asyncio.AsyncSession`, or offload a self-contained sync unit-of-work function that opens and closes its own `Session` inside the worker thread.";
-const SQLMODEL_SESSION_HINT: &str = "Use `sqlmodel.ext.asyncio.session.AsyncSession`, or offload a self-contained sync unit-of-work function that opens and closes its own `Session` inside the worker thread.";
-
 pub(super) fn match_sql_or_doc_family(q: &str) -> Option<SinkHit> {
     if let Some(hit) = match_sqlalchemy_or_sqlmodel_family(q) {
         return Some(hit);
@@ -26,7 +23,6 @@ pub(super) fn match_sql_or_doc_family(q: &str) -> Option<SinkHit> {
         return Some(hit(&BuiltinSink::finding(
             "psycopg.connect",
             RULE_BLOCKING_DB,
-            "Use `psycopg.AsyncConnection` / `asyncpg`, or offload a self-contained sync function that opens and closes its own connection in the worker thread.",
         )));
     }
     // pymysql — exception constructors, constants, converters, and pure string/type
@@ -40,7 +36,6 @@ pub(super) fn match_sql_or_doc_family(q: &str) -> Option<SinkHit> {
         return Some(hit(&BuiltinSink::finding(
             "pymysql.connect",
             RULE_BLOCKING_DB,
-            "Use `aiomysql` / `asyncmy`, or offload a self-contained sync function that opens and closes its own connection in the worker thread.",
         )));
     }
     // pymongo sync — exclude pure handle getters (`get_database`, `get_collection`,
@@ -64,7 +59,6 @@ pub(super) fn match_sql_or_doc_family(q: &str) -> Option<SinkHit> {
         return Some(hit(&BuiltinSink::finding(
             "pymongo.collection.Collection.find",
             RULE_BLOCKING_DB,
-            "Use `motor` or `pymongo.AsyncMongoClient` instead of sync `pymongo`.",
         )));
     }
     None
@@ -80,7 +74,7 @@ fn match_sqlalchemy_or_sqlmodel_family(q: &str) -> Option<SinkHit> {
         return Some(SinkHit {
             rule: RULE_BLOCKING_DB,
             sink_qualname,
-            fix_hint: SQLMODEL_SESSION_HINT,
+            fix_hint: "",
             candidate_only: false,
             candidate_reason: None,
             with_only: false,
@@ -93,7 +87,7 @@ fn match_sqlalchemy_or_sqlmodel_family(q: &str) -> Option<SinkHit> {
         return Some(SinkHit {
             rule: RULE_BLOCKING_DB,
             sink_qualname: sqlalchemy_session_sink_qualname(method),
-            fix_hint: SQLALCHEMY_SESSION_HINT,
+            fix_hint: "",
             candidate_only: false,
             candidate_reason: None,
             with_only: false,
@@ -111,7 +105,7 @@ fn match_sqlalchemy_or_sqlmodel_family(q: &str) -> Option<SinkHit> {
         return Some(SinkHit {
             rule: RULE_BLOCKING_DB,
             sink_qualname,
-            fix_hint: "Use `AsyncSession` / `await session.scalars(...)`, or offload a self-contained sync unit-of-work function.",
+            fix_hint: "",
             candidate_only: false,
             candidate_reason: None,
             with_only: false,
@@ -126,7 +120,6 @@ fn match_sqlalchemy_or_sqlmodel_family(q: &str) -> Option<SinkHit> {
         return Some(hit(&BuiltinSink::finding(
             "sqlalchemy.engine.Engine.connect",
             RULE_BLOCKING_DB,
-            "Use `sqlalchemy.ext.asyncio.create_async_engine` / `AsyncEngine`.",
         )));
     }
 
@@ -137,7 +130,6 @@ fn match_sqlalchemy_or_sqlmodel_family(q: &str) -> Option<SinkHit> {
         return Some(hit(&BuiltinSink::finding(
             "sqlalchemy.engine.Connection.execute",
             RULE_BLOCKING_DB,
-            "Use async SQLAlchemy (`AsyncConnection`) or offload a self-contained sync unit-of-work function.",
         )));
     }
 
@@ -148,7 +140,6 @@ fn match_sqlalchemy_or_sqlmodel_family(q: &str) -> Option<SinkHit> {
         return Some(hit(&BuiltinSink::finding_with_only(
             "sqlalchemy.engine.Engine.begin",
             RULE_BLOCKING_DB,
-            "Use `AsyncEngine.begin()` / async SQLAlchemy, or offload a self-contained sync unit-of-work function. (`Engine.begin` blocks when used directly in `with`.)",
         )));
     }
 

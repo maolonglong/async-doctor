@@ -62,7 +62,6 @@ fn fn_fact(id: u32, qualname: &str, is_async: bool, file: &str, line: u32) -> Fu
         is_generator: false,
         label: EntryLabel::Other,
         is_sync_route: false,
-        async_twins: vec![],
         param_names: vec![],
         is_third_party: false,
         package_name: None,

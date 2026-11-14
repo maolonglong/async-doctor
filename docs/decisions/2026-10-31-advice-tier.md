@@ -1,6 +1,9 @@
 # Non-blocking `advice[]` tier for async anti-patterns
 
-Status: accepted
+Status: superseded by [Evidence-bounded repair guidance](2026-11-14-evidence-bounded-repair-guidance.md)
+
+The replacement revises repair interpretation only and explicitly retains the
+advice tier, category values, resolution gates, exclusions, and exit-code policy.
 
 ## Problem
 

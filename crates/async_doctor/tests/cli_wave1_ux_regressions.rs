@@ -3,7 +3,7 @@
 //! - Stacked pragmas (`# type: ignore` / `# noqa`) & multi-rule `ignore[a, b]: reason`
 //! - `why` deduplicated rule docs & >5 chain capping unless `--expand`
 //! - Compact JSON on non-TTY stdout
-//! - Grouped text & Markdown caps, `Top fix:` choke callout, and `complete=false` stdout warning
+//! - Grouped text & Markdown caps, `Top site:` reachability, and `complete=false` stdout warning
 //! - Fast `--changed` zero-Python-diff short-circuit before `scan_project`
 //! - Packaging (`pyproject.toml` sdist `SKILL.md`), `action.yml`, `.pre-commit-hooks.yaml`, `release.yml`, `SKILL.md` decision tree
 
@@ -243,13 +243,13 @@ fn json_stdout_is_compact_single_line_when_piped() {
 }
 
 #[test]
-fn grouped_text_and_markdown_cap_output_and_surface_top_fix_and_incomplete_note() {
+fn grouped_text_and_markdown_cap_output_and_surface_top_site_and_incomplete_note() {
     let tmp = TempDir::new().unwrap();
     // Include a syntax-error file so `report.complete == false`.
     fs::write(tmp.path().join("broken.py"), "def broken(:\n").unwrap();
 
     // Shared choke helper hitting one primary sink across 4 async entries,
-    // plus 11 distinct sink/fix groups (12 fix groups total) and 12 dangling-task advice items.
+    // plus 11 distinct diagnostic groups (12 total) and 12 dangling-task advice items.
     fs::write(
         tmp.path().join("choke.py"),
         "import time\n\ndef shared_gate() -> None:\n    sink_call()\n\ndef sink_call() -> None:\n    time.sleep(1)\n",
@@ -293,12 +293,13 @@ fn grouped_text_and_markdown_cap_output_and_surface_top_fix_and_incomplete_note(
         "text stdout must surface prominent incomplete-scan warning:\n{text}"
     );
     assert!(
-        text.contains("Top fix:") && text.contains("4 findings"),
-        "grouped text must surface 1-line `Top fix:` callout for highest-leverage choke/sink:\n{text}"
+        text.lines()
+            .any(|line| { line.contains("Top site:") && line.contains("reached by 4 findings") }),
+        "grouped text must surface observed reachability without promising a repair:\n{text}"
     );
     assert!(
-        text.contains("more fix group(s)"),
-        "grouped text must cap fix groups unless --expand:\n{text}"
+        text.contains("more diagnostic group(s)"),
+        "grouped text must cap diagnostic groups unless --expand:\n{text}"
     );
 
     let md_out = bin()

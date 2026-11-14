@@ -18,27 +18,14 @@ pub(super) fn match_kv_family(q: &str) -> Option<Option<SinkHit>> {
     // Sync Pipeline / ClusterPipeline buffering is not IO; only `.execute()` blocks.
     if is_redis_sync_pipeline_receiver(q) {
         if is_redis_pipeline_execute_method(q) {
-            let (sink_q, hint) = if is_valkey {
-                (
-                    "valkey.client.Pipeline.execute",
-                    "Use `valkey.asyncio` pipelines (`await pipe.execute()`), or offload.",
-                )
+            let sink_q = if is_valkey {
+                "valkey.client.Pipeline.execute"
             } else if q.contains("ClusterPipeline") {
-                (
-                    "redis.cluster.ClusterPipeline.execute",
-                    "Use `redis.asyncio.cluster` pipelines (`await pipe.execute()`), or offload.",
-                )
+                "redis.cluster.ClusterPipeline.execute"
             } else {
-                (
-                    "redis.client.Pipeline.execute",
-                    "Use `redis.asyncio` pipelines (`await pipe.execute()`), or offload.",
-                )
+                "redis.client.Pipeline.execute"
             };
-            return Some(Some(hit(&BuiltinSink::finding(
-                sink_q,
-                RULE_BLOCKING_DB,
-                hint,
-            ))));
+            return Some(Some(hit(&BuiltinSink::finding(sink_q, RULE_BLOCKING_DB))));
         }
         return Some(None);
     }
@@ -50,62 +37,35 @@ pub(super) fn match_kv_family(q: &str) -> Option<Option<SinkHit>> {
 
     // Distributed Lock.acquire blocks on network IO.
     if is_kv_sync_lock_acquire(q) {
-        let (sink_q, hint) = if is_valkey {
-            (
-                "valkey.Lock.acquire",
-                "Use `valkey.asyncio` locks, or offload lock acquisition.",
-            )
+        let sink_q = if is_valkey {
+            "valkey.Lock.acquire"
         } else {
-            (
-                "redis.Lock.acquire",
-                "Use `redis.asyncio` locks, or offload lock acquisition.",
-            )
+            "redis.Lock.acquire"
         };
-        return Some(Some(hit(&BuiltinSink::finding(
-            sink_q,
-            RULE_BLOCKING_DB,
-            hint,
-        ))));
+        return Some(Some(hit(&BuiltinSink::finding(sink_q, RULE_BLOCKING_DB))));
     }
 
     // PubSub.listen() blocks only when the generator is consumed.
     if q.ends_with(".PubSub.listen") && !q.contains("asyncio") {
-        let (sink_q, hint) = if is_valkey {
-            (
-                "valkey.PubSub.listen",
-                "Use `valkey.asyncio` pub/sub (`async for msg in pubsub.listen()`), or offload.",
-            )
+        let sink_q = if is_valkey {
+            "valkey.PubSub.listen"
         } else {
-            (
-                "redis.PubSub.listen",
-                "Use `redis.asyncio` pub/sub (`async for msg in pubsub.listen()`), or offload.",
-            )
+            "redis.PubSub.listen"
         };
         return Some(Some(hit(&BuiltinSink::finding_consume_only(
             sink_q,
             RULE_BLOCKING_DB,
-            hint,
         ))));
     }
 
     // Other sync PubSub command methods (subscribe/get_message/…) block on use.
     if q.contains(".PubSub.") && !q.contains("asyncio") && !q.ends_with(".listen") {
-        let (sink_q, hint) = if is_valkey {
-            (
-                "valkey.PubSub.get_message",
-                "Use `valkey.asyncio` pub/sub instead of sync `PubSub`.",
-            )
+        let sink_q = if is_valkey {
+            "valkey.PubSub.get_message"
         } else {
-            (
-                "redis.PubSub.get_message",
-                "Use `redis.asyncio` pub/sub instead of sync `PubSub`.",
-            )
+            "redis.PubSub.get_message"
         };
-        return Some(Some(hit(&BuiltinSink::finding(
-            sink_q,
-            RULE_BLOCKING_DB,
-            hint,
-        ))));
+        return Some(Some(hit(&BuiltinSink::finding(sink_q, RULE_BLOCKING_DB))));
     }
 
     let method = q
@@ -120,7 +80,7 @@ pub(super) fn match_kv_family(q: &str) -> Option<Option<SinkHit>> {
         return Some(Some(SinkHit {
             rule: RULE_BLOCKING_DB,
             sink_qualname: redis_cluster_command_sink_qualname(method),
-            fix_hint: "Use `redis.asyncio.cluster.RedisCluster` instead of sync `RedisCluster`.",
+            fix_hint: "",
             candidate_only: false,
             candidate_reason: None,
             with_only: false,
@@ -135,7 +95,7 @@ pub(super) fn match_kv_family(q: &str) -> Option<Option<SinkHit>> {
         return Some(Some(SinkHit {
             rule: RULE_BLOCKING_DB,
             sink_qualname: redis_command_sink_qualname(method),
-            fix_hint: "Use `redis.asyncio.Redis` instead of sync `redis.Redis`.",
+            fix_hint: "",
             candidate_only: false,
             candidate_reason: None,
             with_only: false,
@@ -153,7 +113,7 @@ pub(super) fn match_kv_family(q: &str) -> Option<Option<SinkHit>> {
         return Some(Some(SinkHit {
             rule: RULE_BLOCKING_DB,
             sink_qualname: valkey_command_sink_qualname(method),
-            fix_hint: "Use `valkey.asyncio.Valkey` instead of sync `valkey.Valkey`.",
+            fix_hint: "",
             candidate_only: false,
             candidate_reason: None,
             with_only: false,

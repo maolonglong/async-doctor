@@ -68,6 +68,12 @@ fn advice_offload_twin_positives_and_negatives() {
             .all(|a| a.category.as_str() == "performance"),
         "offload-has-async-twin is performance advice"
     );
+    assert!(report.advice.iter().all(|a| a.fix.hint.is_empty()));
+    assert!(report.advice.iter().all(|a| {
+        a.chain
+            .last()
+            .is_some_and(|step| step.resolution.contains("async APIs resolve"))
+    }));
 
     let finding_rules = rules(&report);
     assert!(
@@ -272,17 +278,16 @@ fn advice_azure_openai_suggests_async_azure() {
     )
     .unwrap();
     let report = scan_path(&dir).unwrap();
+    let handler = report
+        .advice
+        .iter()
+        .find(|a| a.entry.name == "handler")
+        .expect("handler async-symbol availability");
+    assert!(handler.fix.hint.is_empty());
+    let evidence = &handler.chain.last().unwrap().resolution;
     assert!(
-        report
-            .advice
-            .iter()
-            .any(|a| { a.entry.name == "handler" && a.fix.hint.contains("AsyncAzureOpenAI") }),
-        "expected AsyncAzureOpenAI advice: {:?}",
-        report
-            .advice
-            .iter()
-            .map(|a| (&a.entry.name, &a.fix.hint))
-            .collect::<Vec<_>>()
+        evidence.contains("AsyncAzureOpenAI"),
+        "expected AsyncAzureOpenAI availability: {evidence}"
     );
 }
 
@@ -367,25 +372,20 @@ fn advice_azure_resources_path_uses_constructed_receiver() {
     )
     .unwrap();
     let report = scan_path(&dir).unwrap();
-    let hints: Vec<_> = report
+    let handler = report
         .advice
         .iter()
-        .map(|a| (&a.entry.name, &a.fix.hint))
-        .collect();
+        .find(|a| a.entry.name == "handler")
+        .expect("handler async-symbol availability");
+    assert!(handler.fix.hint.is_empty());
+    let evidence = &handler.chain.last().unwrap().resolution;
     assert!(
-        report
-            .advice
-            .iter()
-            .any(|a| { a.entry.name == "handler" && a.fix.hint.contains("AsyncAzureOpenAI") }),
-        "resources path must still hint AsyncAzureOpenAI: {hints:?}"
+        evidence.contains("AsyncAzureOpenAI"),
+        "resources path must still identify AsyncAzureOpenAI: {evidence}"
     );
     assert!(
-        !report.advice.iter().any(|a| {
-            a.entry.name == "handler"
-                && a.fix.hint.contains("AsyncOpenAI")
-                && !a.fix.hint.contains("AsyncAzureOpenAI")
-        }),
-        "must not prefer bare AsyncOpenAI over AsyncAzureOpenAI: {hints:?}"
+        !evidence.contains("openai.AsyncOpenAI"),
+        "must not substitute bare AsyncOpenAI for AsyncAzureOpenAI: {evidence}"
     );
 }
 
@@ -681,15 +681,18 @@ fn advice_fixture_az_real_openai_resources_path() {
     }
     for azure in ["z1", "z2", "z3"] {
         assert!(
+            report.advice.iter().any(|a| {
+                a.entry.name == *azure
+                    && a.fix.hint.is_empty()
+                    && a.chain
+                        .last()
+                        .is_some_and(|step| step.resolution.contains("AsyncAzureOpenAI"))
+            }),
+            "{azure} must identify AsyncAzureOpenAI without prescribing an edit: {:?}",
             report
                 .advice
                 .iter()
-                .any(|a| { a.entry.name == *azure && a.fix.hint.contains("AsyncAzureOpenAI") }),
-            "{azure} must hint AsyncAzureOpenAI: {:?}",
-            report
-                .advice
-                .iter()
-                .map(|a| (&a.entry.name, &a.fix.hint))
+                .map(|a| (&a.entry.name, a.chain.last()))
                 .collect::<Vec<_>>()
         );
     }

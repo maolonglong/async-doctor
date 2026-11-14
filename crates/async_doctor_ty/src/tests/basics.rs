@@ -269,17 +269,17 @@ fn typed_method_receiver() {
 }
 
 #[test]
-fn async_twin_hint_when_present() {
+fn similarly_named_async_method_does_not_prescribe_a_repair() {
     let dir = temp_project(&[(
         "twin.py",
         "import time\n\nclass Client:\n    def fetch(self):\n        time.sleep(1)\n    async def afetch(self):\n        return 1\n\nasync def handler():\n    Client().fetch()\n",
     )]);
     let report = scan_path(&dir).unwrap();
     assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+    assert_eq!(report.findings[0].rule, "blocking-sleep");
     assert!(
-        report.findings[0].fix.hint.contains("afetch")
-            || report.findings[0].fix.hint.contains("Async twin"),
-        "hint={}",
+        report.findings[0].fix.hint.is_empty(),
+        "a similar name does not prove equivalent behavior: {}",
         report.findings[0].fix.hint
     );
     let _ = fs::remove_dir_all(dir);
