@@ -3,7 +3,8 @@
 **Your agent blocks the event loop. This catches it.**
 
 Zero-config static analysis for Python: finds sync/blocking IO reachable from
-`async def` code, and reports evidence an agent can act on. Non-goals (no
+`async def` code, and reports evidence an agent can act on. Inspired by
+[react-doctor](https://github.com/millionco/react-doctor); non-goals (no
 runtime probing, no Trio-only / gevent-eventlet modelling) live in
 [ARCHITECTURE.md](ARCHITECTURE.md).
 
