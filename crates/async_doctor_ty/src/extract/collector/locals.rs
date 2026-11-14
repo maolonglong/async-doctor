@@ -27,7 +27,6 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         match target {
             Expr::Name(n) => {
                 let name = n.id.as_str();
-                self.invalidate_future_done_receiver(name);
                 self.async_with_receivers.remove(name);
                 self.narrowed_locals.remove(name);
                 self.local_lambdas.remove(name);
@@ -64,9 +63,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
     }
 
     pub(crate) fn note_local_binding(&mut self, name: &str, value: &'a Expr) {
-        // Rebind invalidates `.done()` proofs, branch narrowings, and prior
-        // `async with ... as name` receiver types for this local.
-        self.invalidate_future_done_receiver(name);
+        // Rebind invalidates branch narrowings and prior `async with` receiver
+        // types. Future proofs are invalidated at the actual Store expression,
+        // after the RHS has been evaluated, including non-local/attribute writes.
         self.async_with_receivers.remove(name);
         self.narrowed_locals.remove(name);
         match value {
@@ -132,12 +131,6 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
     }
 
-    fn invalidate_future_done_receiver(&mut self, name: &str) {
-        let prefix = format!("{name}.");
-        self.future_done_receivers
-            .retain(|p| p != name && !p.starts_with(&prefix));
-    }
-
     fn note_loop_handle_binding(&mut self, name: &str, value: &Expr) {
         use super::loop_guards::{expr_is_get_event_loop, expr_is_get_running_loop};
         if expr_is_get_running_loop(value) {
@@ -166,9 +159,18 @@ impl<'a, 'db> CallCollector<'a, 'db> {
     /// guards must remain active.
     pub(crate) fn analyze_lambda_body(&mut self, lambda: &'a ast::ExprLambda) {
         let prev_in = self.in_lambda;
+        let prev_done = self.future_done_receivers.clone();
+        // This body executes at the call site, so captured receivers keep their
+        // proofs. Lambda parameters instead name new, potentially pending values.
+        if let Some(parameters) = &lambda.parameters {
+            for param in parameters.iter_non_variadic_params() {
+                self.invalidate_future_done_receiver(param.parameter.name.as_str());
+            }
+        }
         self.in_lambda = false;
         self.visit_expr(&lambda.body);
         self.in_lambda = prev_in;
+        self.future_done_receivers = prev_done;
     }
 
     pub(crate) fn ensure_lambda_fact(&mut self, lam: &'a ast::ExprLambda) -> FunctionId {
@@ -218,6 +220,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         let prev = self.current_fn;
         let prev_params = std::mem::take(&mut self.current_param_names);
         let prev_in = self.in_lambda;
+        let prev_done = std::mem::take(&mut self.future_done_receivers);
         let depths = self.take_enclosing_depths();
         let prev_guards = std::mem::take(&mut self.active_param_guards);
         self.current_fn = Some(id);
@@ -227,6 +230,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         self.in_lambda = prev_in;
         self.current_fn = prev;
         self.current_param_names = prev_params;
+        self.future_done_receivers = prev_done;
         self.active_param_guards = prev_guards;
         self.restore_enclosing_depths(depths);
         id

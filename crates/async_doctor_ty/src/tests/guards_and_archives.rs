@@ -45,6 +45,62 @@ fn p1_off_loop_thread_and_done_guards() {
             report.findings
         );
     }
+    let proof_findings: std::collections::BTreeSet<_> = names
+        .iter()
+        .copied()
+        .filter(|name| name.starts_with("proof_"))
+        .collect();
+    assert_eq!(
+        proof_findings,
+        std::collections::BTreeSet::from([
+            "proof_custom_if_blocks",
+            "proof_custom_and_blocks",
+            "proof_custom_ternary_blocks",
+            "proof_overridden_done_blocks",
+            "proof_overridden_result_blocks",
+            "proof_deferred_parameter_blocks",
+            "proof_deferred_closure_blocks",
+            "proof_attribute_rebind_blocks",
+            "proof_annotated_attribute_rebind_blocks",
+            "proof_nested_rebind_blocks",
+            "proof_walrus_rebind_blocks",
+            "proof_test_rebind_blocks",
+            "proof_positive_or_blocks",
+            "proof_conditional_return_blocks",
+            "proof_fallthrough_blocks",
+            "proof_unrelated_receiver_blocks",
+            "proof_for_rebind_blocks",
+            "proof_while_backedge_blocks",
+            "proof_zero_iterations_blocks",
+            "proof_exceptional_path_blocks",
+            "proof_handler_fallthrough_blocks",
+            "proof_finally_blocks",
+            "proof_match_sibling_blocks",
+            "proof_match_binding_blocks",
+            "proof_failed_match_guard_blocks",
+            "proof_import_rebind_blocks",
+            "proof_suppressed_exception_blocks",
+            "proof_comprehension_binding_blocks",
+            "proof_comprehension_walrus_blocks",
+        ]),
+        "only completed same-receiver Future calls may be exempt: {:?}",
+        report.findings
+    );
+    for name in [
+        "proof_custom_if_blocks",
+        "proof_custom_and_blocks",
+        "proof_custom_ternary_blocks",
+        "proof_overridden_result_blocks",
+    ] {
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.entry.name == name && f.rule == "blocking-sleep"),
+            "custom result() bodies must remain reachable: {name}"
+        );
+    }
+    assert!(report.complete && report.skipped.is_empty());
     let _ = fs::remove_dir_all(&dir);
 }
 

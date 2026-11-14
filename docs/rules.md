@@ -132,8 +132,16 @@ Threading locks, `queue.Queue`, blocking `concurrent.futures.Future.result`,
   `hass.loop_thread_id`, …) compared with `threading.get_ident()`, or
   `current_thread() is not main_thread()` (and the complementary else of an
   on-loop test). Arbitrary `owner != get_ident()` compares are not off-loop.
-- `.done()` on the same receiver (name or attribute chain) guards `.result()`
-  in `if`, `and`, and ternary forms.
+- Completion guards require the actual `concurrent.futures.Future.done` and
+  `result` methods, including inherited methods, not custom same-name methods.
+  They track the same name/attribute path in `if`/`elif`/`else`, short-circuit
+  `and`/`or`, and ternaries, including `if not future.done(): return`.
+  Explicit receiver replacement invalidates the proof; deferred functions
+  cannot inherit it, and only shared proofs survive continuing branches.
+- Completion analysis is local and structural, not a general heap/alias or
+  arbitrary-call mutation model. It does not establish completion from
+  cross-coroutine channel/portal coordination. A concurrent Future is not
+  directly awaitable; a reported wait does not establish a safe replacement.
 
 ## blocking-db
 

@@ -44,7 +44,9 @@ use serde::{Deserialize, Serialize};
 /// (conjunctive `ParamGuard`s, `else`/early-return inversion, keyword literals).
 /// v25: deferred generator/context/callback edges and coroutine classification;
 /// literal bindings include proven caller-parameter forwarding (`param:N`).
-pub const CACHE_SCHEMA_VERSION: u32 = 25;
+/// v26: concurrent Future guards use actual method identities and local
+/// completion proofs that do not survive explicit receiver replacement.
+pub const CACHE_SCHEMA_VERSION: u32 = 26;
 
 /// Tool version embedded in the cache path (from this crate's Cargo.toml).
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");

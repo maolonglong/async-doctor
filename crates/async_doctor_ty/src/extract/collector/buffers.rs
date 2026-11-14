@@ -1,11 +1,10 @@
-//! In-memory buffer / archive receivers and `.done()`-guarded Future.result.
+//! In-memory buffer / archive receivers.
 
 use ruff_python_ast::{self as ast, Expr};
 use ty_python_semantic::HasType;
 use ty_python_semantic::types::{Type, TypeDefinition};
 
 use super::CallCollector;
-use super::thread_guards::expr_attr_path;
 use crate::extract::helpers::{
     NarrowFact, is_archive_ctor_qual, is_disk_touching_archive_method, is_in_memory_buffer_type,
     is_pure_in_memory_archive_method, module_of_definition,
@@ -204,19 +203,6 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             None | Some(Expr::NoneLiteral(_)) => true,
             Some(expr) => self.expr_is_in_memory_buffer(expr),
         }
-    }
-
-    pub(crate) fn call_is_done_guarded_future_result(&self, call: &ast::ExprCall) -> bool {
-        let Expr::Attribute(attr) = call.func.as_ref() else {
-            return false;
-        };
-        if attr.attr.as_str() != "result" {
-            return false;
-        }
-        let Some(path) = expr_attr_path(&attr.value) else {
-            return false;
-        };
-        self.future_done_receivers.contains(&path)
     }
 
     pub(super) fn note_buffer_binding(&mut self, name: &str, value: &Expr) {

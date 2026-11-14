@@ -142,6 +142,11 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         // on a Pipeline instance) must key off the *receiver* so Pipeline
         // buffering is not mistaken for Redis IO.
         if let Expr::Attribute(attr) = func {
+            // Future completion guards and sink identity must use the same
+            // actual method, including inherited result() on project subclasses.
+            if attr.attr.as_str() == "result" && self.is_concurrent_future_method(attr) {
+                return Some("concurrent.futures.Future.result".to_string());
+            }
             // Prefer bindings from `async with r.pipeline() as pipe`.
             if let Expr::Name(n) = attr.value.as_ref()
                 && let Some(recv) = self.async_with_receivers.get(n.id.as_str())

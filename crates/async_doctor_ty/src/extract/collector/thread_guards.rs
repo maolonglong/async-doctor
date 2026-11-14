@@ -1,4 +1,4 @@
-//! Off-loop thread-identity guards and Future.done() structural matching.
+//! Off-loop thread-identity guards and structural receiver paths.
 
 use ruff_python_ast::{self as ast, Expr};
 
@@ -123,33 +123,5 @@ pub(super) fn expr_attr_path(expr: &Expr) -> Option<String> {
             Some(format!("{base}.{}", a.attr.as_str()))
         }
         _ => None,
-    }
-}
-
-/// Receivers proven `.done()` in a test / conjunct (`if fut.done():`, `a.b.done() and …`).
-pub(super) fn futures_proven_done_in_test(test: &Expr) -> Vec<String> {
-    let mut out = Vec::new();
-    collect_done_receivers(test, &mut out);
-    out
-}
-
-fn collect_done_receivers(test: &Expr, out: &mut Vec<String>) {
-    match test {
-        Expr::BoolOp(b) if matches!(b.op, ast::BoolOp::And) => {
-            for v in &b.values {
-                collect_done_receivers(v, out);
-            }
-        }
-        Expr::Call(c) => {
-            if let Expr::Attribute(a) = c.func.as_ref()
-                && a.attr.as_str() == "done"
-                && c.arguments.args.is_empty()
-                && c.arguments.keywords.is_empty()
-                && let Some(path) = expr_attr_path(&a.value)
-            {
-                out.push(path);
-            }
-        }
-        _ => {}
     }
 }

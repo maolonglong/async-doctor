@@ -7,21 +7,30 @@ use ruff_text_size::Ranged;
 
 use super::super::loop_guards::except_is_runtime_error;
 use super::CallCollector;
+use crate::extract::constants::body_always_exits;
 
 impl<'a, 'db> CallCollector<'a, 'db> {
     pub(crate) fn visit_try(&mut self, try_stmt: &'a ast::StmtTry) {
         self.maybe_record_swallowed_cancelled_error(try_stmt);
+        let before = self.future_done_receivers.clone();
+        let mut continuations = Vec::new();
         // Any try/except/else/finally path is guarded — not unconditional.
         let prev_saw = self.try_saw_get_loop;
         self.try_saw_get_loop = false;
         self.branch_depth += 1;
         self.visit_body_seq(&try_stmt.body);
+        let normal = self.future_done_receivers.clone();
         let saw_get_loop = self.try_saw_get_loop;
         self.branch_depth -= 1;
         for handler in &try_stmt.handlers {
+            self.future_done_receivers.clone_from(&before);
+            self.invalidate_future_writes_in_body(&try_stmt.body);
             let ast::ExceptHandler::ExceptHandler(h) = handler;
             if let Some(type_) = &h.type_ {
                 self.visit_expr(type_);
+            }
+            if let Some(name) = &h.name {
+                self.invalidate_future_done_receiver(name.as_str());
             }
             let runtime_error = saw_get_loop && except_is_runtime_error(h.type_.as_deref());
             self.branch_depth += 1;
@@ -33,12 +42,35 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 self.no_running_loop_depth -= 1;
             }
             self.branch_depth -= 1;
+            if !body_always_exits(&h.body) {
+                continuations.push(self.future_done_receivers.clone());
+            }
         }
         self.try_saw_get_loop = prev_saw;
+        self.future_done_receivers = normal;
         self.branch_depth += 1;
         self.visit_body_seq(&try_stmt.orelse);
         self.branch_depth -= 1;
+        if !body_always_exits(&try_stmt.body) && !body_always_exits(&try_stmt.orelse) {
+            continuations.push(self.future_done_receivers.clone());
+        }
+        self.future_done_receivers = continuations.pop().unwrap_or_default();
+        for branch in continuations {
+            self.future_done_receivers
+                .retain(|path| branch.contains(path));
+        }
         // finally always runs, but keep conservative (still a try-related path).
+        if !try_stmt.finalbody.is_empty() {
+            // It also runs before an exception is caught or a return completes.
+            // A proof established only on normal completion is insufficient.
+            self.future_done_receivers = before;
+            self.invalidate_future_writes_in_body(&try_stmt.body);
+            for handler in &try_stmt.handlers {
+                let ast::ExceptHandler::ExceptHandler(h) = handler;
+                self.invalidate_future_writes_in_body(&h.body);
+            }
+            self.invalidate_future_writes_in_body(&try_stmt.orelse);
+        }
         self.branch_depth += 1;
         self.visit_body_seq(&try_stmt.finalbody);
         self.branch_depth -= 1;
@@ -46,11 +78,27 @@ impl<'a, 'db> CallCollector<'a, 'db> {
 
     pub(crate) fn visit_match(&mut self, match_stmt: &'a ast::StmtMatch) {
         self.visit_expr(&match_stmt.subject);
+        let mut remaining = self.future_done_receivers.clone();
+        let mut after = remaining.clone();
         for case in &match_stmt.cases {
+            self.future_done_receivers.clone_from(&remaining);
+            self.invalidate_future_writes_in_pattern(&case.pattern);
+            if let Some(guard) = &case.guard {
+                self.visit_expr(guard);
+                // Pattern/guard writes persist even if this guard rejects it.
+                remaining.retain(|path| self.future_done_receivers.contains(path));
+                after.retain(|path| self.future_done_receivers.contains(path));
+                self.future_done_receivers
+                    .extend(self.futures_proven_done_in_test(guard, true));
+            }
             self.branch_depth += 1;
             self.visit_body_seq(&case.body);
             self.branch_depth -= 1;
+            if !body_always_exits(&case.body) {
+                after.retain(|path| self.future_done_receivers.contains(path));
+            }
         }
+        self.future_done_receivers = after;
     }
 
     pub(crate) fn visit_for(&mut self, for_stmt: &'a ast::StmtFor) {
@@ -95,10 +143,18 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             self.visit_expr(&for_stmt.iter);
         }
         self.consuming_generator = false;
+        let before = self.future_done_receivers.clone();
+        self.invalidate_future_writes_in_expr(&for_stmt.target);
+        self.invalidate_future_writes_in_body(&for_stmt.body);
         self.loop_depth += 1;
         self.visit_body_seq(&for_stmt.body);
         self.loop_depth -= 1;
+        self.future_done_receivers
+            .retain(|path| before.contains(path));
+        let before_else = self.future_done_receivers.clone();
         self.visit_body_seq(&for_stmt.orelse);
+        self.future_done_receivers
+            .retain(|path| before_else.contains(path));
     }
 
     pub(crate) fn visit_with(&mut self, with_stmt: &'a ast::StmtWith) {
@@ -228,7 +284,13 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         if let Some(caller) = self.current_fn {
             self.maybe_record_taskgroup_shared_session(caller, with_stmt);
         }
+        let before = self.future_done_receivers.clone();
         self.visit_body_seq(&with_stmt.body);
+        let normal = std::mem::replace(&mut self.future_done_receivers, before);
+        // __exit__/__aexit__ may suppress an exception before a body-only proof.
+        self.invalidate_future_writes_in_body(&with_stmt.body);
+        self.future_done_receivers
+            .retain(|path| normal.contains(path));
     }
 
     pub(crate) fn visit_comprehension_like(
@@ -237,6 +299,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         key: Option<&'a Expr>,
         generators: &'a [ast::Comprehension],
     ) {
+        let before = self.future_done_receivers.clone();
         let has_filter = generators.iter().any(|g| !g.ifs.is_empty());
         if has_filter {
             self.branch_depth += 1;
@@ -277,5 +340,18 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         if has_filter {
             self.branch_depth -= 1;
         }
+        // Comprehension targets do not rebind outer locals; named expressions
+        // do. Preserve that distinction when leaving the synthetic scope.
+        self.future_done_receivers = before;
+        for comp in generators {
+            self.invalidate_future_writes_in_expr(&comp.iter);
+            for test in &comp.ifs {
+                self.invalidate_future_writes_in_expr(test);
+            }
+        }
+        if let Some(k) = key {
+            self.invalidate_future_writes_in_expr(k);
+        }
+        self.invalidate_future_writes_in_expr(elt);
     }
 }

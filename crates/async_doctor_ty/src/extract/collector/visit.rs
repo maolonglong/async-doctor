@@ -7,7 +7,7 @@ use ruff_python_ast::{self as ast, Expr, Stmt};
 use super::CallCollector;
 use super::concurrency_anti_patterns::nonlocal_or_global_names;
 use super::loop_guards::collect_idle_loop_helpers;
-use super::thread_guards::futures_proven_done_in_test;
+use super::thread_guards::expr_attr_path;
 use crate::extract::ctx::scope_qualname;
 
 impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
@@ -17,6 +17,7 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
         }
         match stmt {
             Stmt::FunctionDef(func) => {
+                self.invalidate_future_done_receiver(func.name.as_str());
                 let qualname =
                     scope_qualname(&self.class_stack, &self.fn_stack, func.name.as_str());
                 let fid = self.qual_get(&(self.ctx.module.clone(), qualname));
@@ -30,6 +31,7 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 let prev_event_loop = std::mem::take(&mut self.event_loop_locals);
                 let prev_async_with = std::mem::take(&mut self.async_with_receivers);
                 let prev_narrowed = std::mem::take(&mut self.narrowed_locals);
+                let prev_future_done = std::mem::take(&mut self.future_done_receivers);
                 let prev_ephemeral_clients = std::mem::take(&mut self.local_ephemeral_clients);
                 let prev_nonlocal_globals = std::mem::replace(
                     &mut self.nonlocal_or_global_names,
@@ -99,6 +101,7 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 self.event_loop_locals = prev_event_loop;
                 self.async_with_receivers = prev_async_with;
                 self.narrowed_locals = prev_narrowed;
+                self.future_done_receivers = prev_future_done;
                 self.local_ephemeral_clients = prev_ephemeral_clients;
                 self.nonlocal_or_global_names = prev_nonlocal_globals;
                 self.local_stateful_sessions = prev_stateful_sessions;
@@ -129,6 +132,19 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 walk_stmt(self, stmt);
             }
             Stmt::AnnAssign(ann) => {
+                if ann.value.is_none() {
+                    // An annotation without a value does not replace the target.
+                    self.visit_annotation(&ann.annotation);
+                    match ann.target.as_ref() {
+                        Expr::Attribute(a) => self.visit_expr(&a.value),
+                        Expr::Subscript(s) => {
+                            self.visit_expr(&s.value);
+                            self.visit_expr(&s.slice);
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
                 if let (Expr::Name(n), Some(value)) = (ann.target.as_ref(), ann.value.as_ref()) {
                     self.note_local_binding(n.id.as_str(), value);
                 }
@@ -139,16 +155,25 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 self.visit_for(for_stmt);
             }
             Stmt::While(while_stmt) => {
+                let before = self.future_done_receivers.clone();
+                self.invalidate_future_writes_in_body(&while_stmt.body);
                 self.loop_depth += 1;
                 self.visit_expr(&while_stmt.test);
                 self.visit_body_seq(&while_stmt.body);
                 self.loop_depth -= 1;
+                // The body may never execute; body-only proofs cannot escape.
+                self.future_done_receivers
+                    .retain(|path| before.contains(path));
+                let before_else = self.future_done_receivers.clone();
                 self.visit_body_seq(&while_stmt.orelse);
+                self.future_done_receivers
+                    .retain(|path| before_else.contains(path));
             }
             Stmt::With(with_stmt) => self.visit_with(with_stmt),
             Stmt::Try(try_stmt) => self.visit_try(try_stmt),
             Stmt::Match(match_stmt) => self.visit_match(match_stmt),
             Stmt::Import(_) | Stmt::ImportFrom(_) => {
+                self.invalidate_future_writes_in_body(std::slice::from_ref(stmt));
                 super::imports::note_if_import(self, stmt);
                 walk_stmt(self, stmt);
             }
@@ -164,6 +189,16 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
     fn visit_expr(&mut self, expr: &'a Expr) {
         if self.skip_lambda_body {
             return;
+        }
+        let context = match expr {
+            Expr::Name(n) => Some(n.ctx),
+            Expr::Attribute(a) => Some(a.ctx),
+            _ => None,
+        };
+        if context.is_some_and(|ctx| !matches!(ctx, ast::ExprContext::Load))
+            && let Some(path) = expr_attr_path(expr)
+        {
+            self.invalidate_future_done_receiver(&path);
         }
         match expr {
             Expr::Lambda(lambda) => {
@@ -188,36 +223,38 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 let is_offload = self.handle_call(call, false);
                 self.walk_call_children(call, is_offload);
             }
-            // `fut.done() and fut.result()` / `self.x.done() and self.x.result()`:
-            // accumulate done-proven receivers across And conjuncts left→right.
-            Expr::BoolOp(b) if matches!(b.op, ast::BoolOp::And) => {
-                let prev = self.future_done_receivers.clone();
+            // Continue `and` on true and `or` on false; every short-circuit
+            // exit participates in the join so receiver writes cannot disappear.
+            Expr::BoolOp(b) => {
+                let truth = matches!(b.op, ast::BoolOp::And);
+                let mut exits = Vec::new();
                 for v in &b.values {
                     self.visit_expr(v);
-                    for path in futures_proven_done_in_test(v) {
-                        self.future_done_receivers.insert(path);
-                    }
+                    let mut exit = self.future_done_receivers.clone();
+                    exit.extend(self.futures_proven_done_in_test(v, !truth));
+                    exits.push(exit);
+                    self.future_done_receivers
+                        .extend(self.futures_proven_done_in_test(v, truth));
                 }
-                self.future_done_receivers = prev;
+                for exit in exits {
+                    self.future_done_receivers
+                        .retain(|path| exit.contains(path));
+                }
             }
-            // `X.result() if X.done() else None`
+            // Either polarity can establish completion, but the other branch
+            // must start with its own receiver state.
             Expr::If(ifexp) => {
                 self.visit_expr(&ifexp.test);
-                let proven = futures_proven_done_in_test(&ifexp.test);
-                let prev = if !proven.is_empty() {
-                    let prev = self.future_done_receivers.clone();
-                    for path in &proven {
-                        self.future_done_receivers.insert(path.clone());
-                    }
-                    Some(prev)
-                } else {
-                    None
-                };
+                let before = self.future_done_receivers.clone();
+                self.future_done_receivers
+                    .extend(self.futures_proven_done_in_test(&ifexp.test, true));
                 self.visit_expr(&ifexp.body);
-                if let Some(prev) = prev {
-                    self.future_done_receivers = prev;
-                }
+                let body = std::mem::replace(&mut self.future_done_receivers, before);
+                self.future_done_receivers
+                    .extend(self.futures_proven_done_in_test(&ifexp.test, false));
                 self.visit_expr(&ifexp.orelse);
+                self.future_done_receivers
+                    .retain(|path| body.contains(path));
             }
             Expr::Attribute(attr) => {
                 if !self.in_callee_position {

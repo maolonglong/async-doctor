@@ -12,9 +12,7 @@ use ty_python_core::definition::DefinitionKind;
 use ty_python_semantic::{ImportAliasResolution, definitions_for_name};
 
 use super::CallCollector;
-use super::thread_guards::{
-    futures_proven_done_in_test, is_off_loop_thread_test, is_on_loop_thread_test,
-};
+use super::thread_guards::{is_off_loop_thread_test, is_on_loop_thread_test};
 use crate::extract::constants::{
     EarlyExitKind, ModuleConst, body_always_exits, cache_hit_storage_operand,
     cache_miss_storage_operand, param_guards_from_test,
@@ -280,6 +278,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         );
         let mut live_fallthrough_guards: Vec<(HashSet<String>, HashSet<String>, HashSet<String>)> =
             Vec::new();
+        let mut live_future_proofs = Vec::new();
         let mut has_else = false;
 
         let dead = self.is_dead_branch_test(&if_stmt.test);
@@ -293,9 +292,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         let mut saw_running_loop_test = !dead && self.is_running_loop_test_ctx(&if_stmt.test);
         let mut saw_on_loop_thread_test = on_loop_thread;
         let done_names = if dead {
-            Vec::new()
+            HashSet::new()
         } else {
-            futures_proven_done_in_test(&if_stmt.test)
+            self.futures_proven_done_in_test(&if_stmt.test, true)
         };
         let (if_guards, if_exact) = if dead {
             (Vec::new(), false)
@@ -308,15 +307,10 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         } else {
             self.visit_expr(&if_stmt.test);
         }
-        let prev_done = if !dead && !done_names.is_empty() {
-            let prev = self.future_done_receivers.clone();
-            for n in &done_names {
-                self.future_done_receivers.insert(n.clone());
-            }
-            Some(prev)
-        } else {
-            None
-        };
+        let after_test_proofs = self.future_done_receivers.clone();
+        let mut remaining_future_proofs = after_test_proofs.clone();
+        remaining_future_proofs.extend(self.futures_proven_done_in_test(&if_stmt.test, false));
+        self.future_done_receivers.extend(done_names);
         if !dead {
             self.branch_depth += 1;
             if cache_miss {
@@ -345,9 +339,6 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         if !dead && if_exact && if_guards.len() == 1 {
             negated_prior.push(if_guards[0].inverted());
         }
-        if let Some(prev) = prev_done {
-            self.future_done_receivers = prev;
-        }
         if !dead {
             if off_loop {
                 self.off_loop_thread_depth -= 1;
@@ -363,6 +354,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         if dead {
             self.dead_depth -= 1;
         } else if !body_always_exits(&if_stmt.body) {
+            live_future_proofs.push(self.future_done_receivers.clone());
             live_fallthrough_guards.push((
                 self.in_memory_sqlite_vars.clone(),
                 self.nonblocking_socket_vars.clone(),
@@ -371,6 +363,8 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
 
         for clause in &if_stmt.elif_else_clauses {
+            self.future_done_receivers
+                .clone_from(&remaining_future_proofs);
             self.in_memory_sqlite_vars.clone_from(&pre_local_guards.0);
             self.nonblocking_socket_vars.clone_from(&pre_local_guards.1);
             self.in_memory_archive_receivers
@@ -421,12 +415,12 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 false
             };
             let elif_done = if elif_dead {
-                Vec::new()
+                HashSet::new()
             } else {
                 clause
                     .test
                     .as_ref()
-                    .map(futures_proven_done_in_test)
+                    .map(|t| self.futures_proven_done_in_test(t, true))
                     .unwrap_or_default()
             };
             let (elif_guards, elif_exact) = match clause.test.as_ref() {
@@ -437,16 +431,10 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 self.dead_depth += 1;
             } else if let Some(test) = &clause.test {
                 self.visit_expr(test);
+                remaining_future_proofs = self.future_done_receivers.clone();
+                remaining_future_proofs.extend(self.futures_proven_done_in_test(test, false));
             }
-            let prev_done = if !elif_dead && !elif_done.is_empty() {
-                let prev = self.future_done_receivers.clone();
-                for n in &elif_done {
-                    self.future_done_receivers.insert(n.clone());
-                }
-                Some(prev)
-            } else {
-                None
-            };
+            self.future_done_receivers.extend(elif_done);
             // else / elif always counts as a branch when live — never unconditional.
             if !elif_dead {
                 self.branch_depth += 1;
@@ -480,9 +468,6 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             if !elif_dead && elif_exact && elif_guards.len() == 1 {
                 negated_prior.push(elif_guards[0].inverted());
             }
-            if let Some(prev) = prev_done {
-                self.future_done_receivers = prev;
-            }
             if !elif_dead {
                 if elif_off_loop {
                     self.off_loop_thread_depth -= 1;
@@ -498,6 +483,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             if elif_dead {
                 self.dead_depth -= 1;
             } else if !body_always_exits(&clause.body) {
+                live_future_proofs.push(self.future_done_receivers.clone());
                 live_fallthrough_guards.push((
                     self.in_memory_sqlite_vars.clone(),
                     self.nonblocking_socket_vars.clone(),
@@ -507,8 +493,17 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
 
         if !has_else && !always {
+            live_future_proofs.push(remaining_future_proofs);
             live_fallthrough_guards.push(pre_local_guards.clone());
         }
+        self.future_done_receivers = if let Some(mut proven) = live_future_proofs.pop() {
+            for branch in live_future_proofs {
+                proven.retain(|path| branch.contains(path));
+            }
+            proven
+        } else {
+            after_test_proofs
+        };
         if let Some((mut sql, mut sock, mut arch)) = live_fallthrough_guards.pop() {
             for (s, k, a) in &live_fallthrough_guards {
                 sql.retain(|v| s.contains(v));

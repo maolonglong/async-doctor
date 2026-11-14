@@ -316,10 +316,8 @@ pub(crate) fn cache_hit_storage_operand(test: &Expr) -> Option<&Expr> {
 }
 
 pub(crate) fn body_always_exits(body: &[Stmt]) -> bool {
-    !body.is_empty()
-        && body
-            .iter()
-            .all(|s| matches!(s, Stmt::Return(_) | Stmt::Raise(_)))
+    body.last()
+        .is_some_and(|s| matches!(s, Stmt::Return(_) | Stmt::Raise(_)))
 }
 
 #[derive(Debug, Clone, Copy)]

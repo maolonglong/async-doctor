@@ -81,9 +81,10 @@ without cross-worker eviction, and runs in coordinated 2,500-file waves where
 all workers share one `Storage` per wave and drop it to refcount 0 between
 waves, with a shared read-only pass-1 function slice and pre-indexed
 `SiteRootIndex`), per-file `CallCollector` (`extract/collector/`, including
-`llm_advice.rs`, local deferred-generator consumption in `generators.rs`, and
-typed asyncio callback binding in `calls/callbacks.rs`), and third-party follow
-with budget (`follow.rs`).
+`llm_advice.rs`, local deferred-generator consumption in `generators.rs`,
+typed asyncio callback binding in `calls/callbacks.rs`, and local concurrent
+Future completion proofs in `future_guards.rs`), and third-party follow with
+budget (`follow.rs`).
 Package cache: `cache.rs` / `cache/`. Whole-scan report cache: `scan_cache.rs`.
 Site-packages helpers: `sitepkgs/`. See
 [docs/notes/2026-11-salsa-fresh-empty-rss.md](docs/notes/2026-11-salsa-fresh-empty-rss.md).
@@ -104,6 +105,12 @@ under parallel tests — pass an explicit cache dir instead.
 - Named function and synthetic lambda bodies reset execution depths and parameter
   guards; call-site edges carry the enclosing conditions. Dead definitions
   retain their dead status.
+- Future completion guards require the actual concurrent Future `done` and
+  `result` methods. Proofs follow local true/false branches, intersect at live
+  continuations, and invalidate on explicit receiver writes; deferred functions
+  do not inherit them. Direct inline lambdas keep call-site capture proofs,
+  excluding shadowing parameters. This is not heap/alias, arbitrary-call
+  mutation, or cross-coroutine completion analysis.
 - Local generator-origin and parameter-forwarding proofs use ty's use-def map,
   not IDE name navigation (which includes non-reaching bindings). Only a unique
   binding owned by the current function/lambda is followed; rebinding or
@@ -142,7 +149,7 @@ persists `item_spans` while `scan_input_fingerprint_with_python` recomputes
 `ignore_candidate_files` (`Option<Vec<PathBuf>>`) and restores both onto `Report`
 (`#[serde(skip)]` on JSON output) so warm `--changed` and unused-suppression
 checks match cold scans without process-global state. Package-cache schema is
-`CACHE_SCHEMA_VERSION` 25 (including the corrected execution-edge semantics):
+`CACHE_SCHEMA_VERSION` 26 (including the corrected Future completion semantics):
 it persists cross-package `follow_targets` referenced by analyzed edges alongside
 `is_bound_call`, `is_eager_offload_arg`, `constructed_receiver`,
 `positional_externals`, `positional_constructed_receivers`, decorator qualnames,
