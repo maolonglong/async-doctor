@@ -165,6 +165,45 @@ pub(super) enum ParamVerdict {
     Unknown,
 }
 
+/// Follow only proven parameter forwarding, toward earlier edges on this path.
+/// A rebind or an unknown expression has no `Param` fact and stops the proof.
+fn literal_on_path(
+    facts: &ProjectFacts,
+    path: &PathToEntry,
+    mut fn_id: FunctionId,
+    mut index: u32,
+) -> Option<LiteralArg> {
+    let mut end = path.edges.len();
+    loop {
+        let pos = path.edges[..end].iter().rposition(
+            |&i| matches!(facts.edges[i].callee, CalleeRef::Project(id) if id == fn_id),
+        )?;
+        let edge = &facts.edges[path.edges[pos]];
+        let name = facts.function(fn_id).param_names.get(index as usize)?;
+        let binding = if let Some((_, lit)) = edge.keyword_literals.iter().find(|(k, _)| k == name)
+        {
+            *lit
+        } else {
+            let arg_index = if edge.is_bound_call {
+                index.checked_sub(1)?
+            } else {
+                index
+            };
+            edge.positional_literals
+                .get(arg_index as usize)
+                .copied()
+                .flatten()
+        }?;
+        if let LiteralArg::Param(param) = binding {
+            fn_id = edge.caller;
+            index = param;
+            end = pos;
+        } else {
+            return Some(binding);
+        }
+    }
+}
+
 pub(super) fn evaluate_param_guards(
     facts: &ProjectFacts,
     path: &PathToEntry,
@@ -180,47 +219,7 @@ pub(super) fn evaluate_param_guards(
         if fn_id == path.entry {
             continue;
         }
-        // Find the edge on the path that calls into the guarded callee.
-        let call_edge = path.edges.iter().find_map(|&eidx| {
-            let e = &facts.edges[eidx];
-            match e.callee {
-                CalleeRef::Project(id) if id == fn_id => Some(e),
-                _ => None,
-            }
-        });
-        let Some(edge) = call_edge else {
-            // No caller on this path — cannot prove; demote.
-            any_unknown = true;
-            continue;
-        };
-        let param_name = facts
-            .function(fn_id)
-            .param_names
-            .get(guard.index as usize)
-            .map(String::as_str);
-        let kw_binding = param_name.and_then(|name| {
-            edge.keyword_literals
-                .iter()
-                .find(|(k, _)| k == name)
-                .map(|(_, lit)| *lit)
-        });
-        let lit = if let Some(kw_lit) = kw_binding {
-            kw_lit
-        } else {
-            let arg_idx = if edge.is_bound_call {
-                guard.index.checked_sub(1)
-            } else {
-                Some(guard.index)
-            };
-            let Some(arg_idx) = arg_idx else {
-                any_unknown = true;
-                continue;
-            };
-            edge.positional_literals
-                .get(arg_idx as usize)
-                .copied()
-                .flatten()
-        };
+        let lit = literal_on_path(facts, path, fn_id, guard.index);
         match (lit, guard.inverted) {
             (Some(LiteralArg::True), false)
             | (Some(LiteralArg::False), true)

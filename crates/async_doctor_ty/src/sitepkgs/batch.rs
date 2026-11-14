@@ -371,6 +371,7 @@ fn literal_str(lit: LiteralArg) -> String {
         LiteralArg::True => "true".to_string(),
         LiteralArg::False => "false".to_string(),
         LiteralArg::None => "none".to_string(),
+        LiteralArg::Param(index) => format!("param:{index}"),
     }
 }
 

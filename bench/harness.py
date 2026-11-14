@@ -57,17 +57,44 @@ def run_timed(bin_path: str, scan_path: str, out_json: str, venv_dir: str) -> No
     if peak_kib == 0:
         peak_kib = after_kib
 
-    Path(out_json).write_text(proc.stdout)
-    try:
-        report = json.loads(proc.stdout) if proc.stdout.strip() else {}
-    except json.JSONDecodeError:
-        report = {}
-    findings = len(report.get("findings", []))
-    candidates = len(report.get("candidates", []))
+    Path(out_json).write_text(proc.stdout, encoding="utf-8")
     if proc.returncode not in (0, 1):
         sys.stderr.write(proc.stderr)
         sys.stderr.write(f"async-doctor exited {proc.returncode}\n")
         sys.exit(proc.returncode)
+    try:
+        # Envelope checks only, not the complete JSON report schema.
+        report = json.loads(proc.stdout)
+        strict = os.environ.get("BENCH_STRICT") == "1"
+        if not isinstance(report, dict):
+            raise ValueError("JSON report is not an object")
+        for field in (
+            "findings", "candidates", "advice", "locationLessCandidates", "skipped",
+            "sinkSites", "unusedSuppressions", "unresolvedSummary",
+        ):
+            if strict or field in ("findings", "candidates") or field in report:
+                if not isinstance(report.get(field), list):
+                    raise ValueError(f"JSON report missing {field} array")
+        for field in ("findings", "candidates", "advice", "locationLessCandidates"):
+            for item in report.get(field, []):
+                if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"]:
+                    raise ValueError(f"invalid {field} item/id")
+        if strict:
+            if type(report.get("schemaVersion")) is not int or report["schemaVersion"] != 2:
+                raise ValueError("strict mode requires schemaVersion 2")
+            if report.get("complete") is not True or report["skipped"]:
+                raise ValueError("strict mode requires complete=true and empty skipped")
+            # Presence/type only; does not prove interpreter or dependency health.
+            if not isinstance(report.get("environment"), dict):
+                raise ValueError("strict mode requires an environment object")
+            for field in ("omittedFindings", "omittedCandidates", "omittedAdvice"):
+                if type(report.get(field)) is not int or report[field] != 0:
+                    raise ValueError(f"strict mode requires {field}=0 (integer)")
+    except ValueError as exc:
+        sys.stderr.write(proc.stderr)
+        raise SystemExit(f"invalid async-doctor report in {out_json}: {exc}") from exc
+    findings = len(report["findings"])
+    candidates = len(report["candidates"])
     print(f"{elapsed:.3f}|{peak_kib}|{findings}|{candidates}")
 
 

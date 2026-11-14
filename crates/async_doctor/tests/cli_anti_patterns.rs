@@ -170,6 +170,12 @@ fn explain_supports_all_async_anti_pattern_rules() {
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(stdout.contains(rule));
         assert!(stdout.contains(&format!("#{rule}")));
+        if rule == "unawaited-coroutine" {
+            assert!(
+                stdout.contains("for x in await") && stdout.contains("with await"),
+                "explain must show awaiting the result before protocol use: {stdout}"
+            );
+        }
     }
 }
 

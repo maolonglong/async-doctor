@@ -374,7 +374,11 @@ fn parse_literal(s: &str) -> Option<LiteralArg> {
         "true" => Some(LiteralArg::True),
         "false" => Some(LiteralArg::False),
         "none" => Some(LiteralArg::None),
-        _ => None,
+        _ => s
+            .strip_prefix("param:")?
+            .parse()
+            .ok()
+            .map(LiteralArg::Param),
     }
 }
 

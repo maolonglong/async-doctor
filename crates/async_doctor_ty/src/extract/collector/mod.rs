@@ -9,6 +9,7 @@ mod constructors;
 mod control_flow;
 mod depends;
 mod eager_offload;
+mod generators;
 mod imports;
 mod llm_advice;
 mod locals;
@@ -75,6 +76,8 @@ pub(crate) struct CallCollector<'a, 'db> {
     pub(super) active_param_guards: Vec<ParamGuard>,
     /// True while visiting an expression that consumes a generator.
     pub(super) consuming_generator: bool,
+    /// Creation sites fully consumed by an unconditional local/awaited offload.
+    pub(super) exhausted_generators: HashSet<TextRange>,
     pub(super) in_lambda: bool,
     /// When true, the enclosing lambda was passed to an offload boundary.
     pub(super) skip_lambda_body: bool,
@@ -255,6 +258,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             try_saw_get_loop: false,
             active_param_guards: Vec::new(),
             consuming_generator: false,
+            exhausted_generators: HashSet::new(),
             in_lambda: false,
             skip_lambda_body: false,
             in_callee_position: false,

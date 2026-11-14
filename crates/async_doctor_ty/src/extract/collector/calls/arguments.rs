@@ -1,8 +1,9 @@
 //! Argument resolution, property access, imperative routes, and task spawns.
 
-use async_doctor_core::{CallKind, CalleeRef, FunctionId};
+use async_doctor_core::{CallKind, CalleeRef, FunctionId, LiteralArg};
 use ruff_python_ast::{self as ast, Expr};
 use ruff_text_size::Ranged;
+use ty_python_core::definition::DefinitionKind;
 use ty_python_semantic::definitions_for_attribute;
 
 use super::CallCollector;
@@ -11,6 +12,49 @@ use crate::extract::helpers::{
 };
 
 impl<'a, 'db> CallCollector<'a, 'db> {
+    pub(in crate::extract::collector) fn call_arg_literal(
+        &self,
+        expr: &Expr,
+    ) -> Option<LiteralArg> {
+        match expr {
+            Expr::BooleanLiteral(b) => {
+                return Some(if b.value {
+                    LiteralArg::True
+                } else {
+                    LiteralArg::False
+                });
+            }
+            Expr::NoneLiteral(_) => return Some(LiteralArg::None),
+            _ => {}
+        }
+        let Expr::Name(name) = expr else { return None };
+        let index = self
+            .current_param_names
+            .iter()
+            .position(|p| p == name.id.as_str())?;
+        let def = self.local_definition_at_use(name)?;
+        matches!(
+            def.kind(self.model.db()),
+            DefinitionKind::Parameter(_) | DefinitionKind::LambdaParameter(_)
+        )
+        .then_some(LiteralArg::Param(index as u32))
+    }
+
+    pub(in crate::extract::collector) fn call_keyword_literals(
+        &self,
+        keywords: &[ast::Keyword],
+    ) -> Vec<(String, Option<LiteralArg>)> {
+        keywords
+            .iter()
+            .filter_map(|kw| {
+                Some((
+                    kw.arg.as_ref()?.as_str().to_string(),
+                    self.call_arg_literal(&kw.value),
+                ))
+            })
+            .collect()
+    }
+
     pub(crate) fn clear_pending_call_args(&mut self) {
         self.pending_literals.clear();
         self.pending_keyword_literals.clear();

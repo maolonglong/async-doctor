@@ -9,9 +9,12 @@ use async_doctor_core::{CallEdge, CallKind, CalleeRef, FunctionId, OffloadKind, 
 use async_doctor_rules::BuiltinSinkTable;
 use ruff_db::files::FilePath;
 use ruff_db::parsed::parsed_module;
-use ruff_python_ast::Expr;
-use ruff_text_size::TextRange;
-use ty_python_core::definition::DefinitionKind;
+use ruff_python_ast::{self as ast, Expr};
+use ruff_text_size::{Ranged, TextRange};
+use ty_python_core::ast_ids::HasScopedUseId;
+use ty_python_core::definition::{Definition, DefinitionKind};
+use ty_python_core::scope::NodeWithScopeKind;
+use ty_python_core::use_def_map;
 use ty_python_semantic::types::{Type, TypeDefinition};
 use ty_python_semantic::{
     HasType, ImportAliasResolution, definitions_for_attribute, definitions_for_name,
@@ -85,11 +88,40 @@ fn external_occurrence_key(qualname: &str) -> String {
 }
 
 use super::CallCollector;
+use crate::extract::constants::body_has_yield;
 use crate::extract::ctx::DefKey;
 use crate::extract::helpers::is_getattr_call;
 use crate::extract::path::relative_display;
 
 impl<'a, 'db> CallCollector<'a, 'db> {
+    /// IDE name navigation includes all scope bindings, not just the bindings
+    /// reaching this expression. Execution proofs need the actual use-def map.
+    pub(super) fn local_definition_at_use(&self, name: &ast::ExprName) -> Option<Definition<'db>> {
+        let db = self.model.db();
+        let scope = self
+            .model
+            .scope(name.into())?
+            .to_scope_id(db, self.model.program_file());
+        let use_def = use_def_map(db, scope);
+        let mut bindings =
+            use_def.bindings_at_use(name.scoped_use_id(db, self.model.program_file()));
+        let def = bindings.next()?.binding.definition()?;
+        if bindings.next().is_some() || def.file(db) != self.model.file() {
+            return None;
+        }
+        let parsed = parsed_module(db, def.python_file(db)).load(db);
+        let start = match def.scope(db).node(db) {
+            NodeWithScopeKind::Function(f) => f.node(&parsed).name.range.start(),
+            NodeWithScopeKind::Lambda(l) => l.node(&parsed).range.start(),
+            _ => return None,
+        };
+        let key = DefKey {
+            file: self.ctx.rel.clone(),
+            name_start: u32::from(start),
+        };
+        (self.def_get(&key) == self.current_fn).then_some(def)
+    }
+
     pub(crate) fn push_edge(
         &mut self,
         caller: FunctionId,
@@ -104,14 +136,17 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         if let CalleeRef::Project(id) = &callee
             && self.function(*id).is_generator
             && !self.consuming_generator
-            && !matches!(kind, CallKind::GeneratorConsume | CallKind::WithEnter)
+            && !matches!(
+                kind,
+                CallKind::GeneratorConsume | CallKind::ForIter | CallKind::WithEnter
+            )
         {
             return;
         }
 
-        // Project callees always know async-ness from FunctionFact.
+        // Coroutine and async-generator definitions have different call results.
         let callee_is_coroutine = match &callee {
-            CalleeRef::Project(id) => Some(self.function(*id).is_async),
+            CalleeRef::Project(id) => Some(self.function(*id).is_coroutine()),
             _ => callee_is_coroutine,
         };
 
@@ -230,11 +265,11 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         true
     }
 
-    /// Resolve whether `func` is an `async def` via ty definitions (MRO / `super`
-    /// included). `None` when the definition cannot be recovered.
+    /// Resolve whether `func` is a coroutine function, excluding async generators
+    /// (MRO / `super` included). `None` when the definition cannot be recovered.
     pub(crate) fn resolve_callee_is_coroutine(&self, func: &Expr) -> Option<bool> {
         if let Some(fid) = self.resolve_project_function(func) {
-            return Some(self.function(fid).is_async);
+            return Some(self.function(fid).is_coroutine());
         }
         if !self.resolve_project_constructors(func).is_empty() {
             return Some(false);
@@ -259,7 +294,8 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             };
             let parsed = parsed_module(self.model.db(), def.python_file(self.model.db()))
                 .load(self.model.db());
-            return Some(fdef.node(&parsed).is_async);
+            let node = fdef.node(&parsed);
+            return Some(node.is_async && !body_has_yield(&node.body));
         }
         // Type-based FunctionLiteral / BoundMethod → definition.
         let ty = func.inferred_type(self.model)?;
@@ -274,7 +310,8 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         };
         let parsed =
             parsed_module(self.model.db(), def.python_file(self.model.db())).load(self.model.db());
-        Some(fdef.node(&parsed).is_async)
+        let node = fdef.node(&parsed);
+        Some(node.is_async && !body_has_yield(&node.body))
     }
 
     pub(crate) fn is_offload_callee(&mut self, func: &Expr) -> Option<OffloadKind> {
@@ -305,8 +342,51 @@ impl<'a, 'db> CallCollector<'a, 'db> {
 
     pub(crate) fn resolve_dunder(&self, expr: &Expr, dunder: &str) -> Option<CalleeRef> {
         let ty = expr.inferred_type(self.model)?;
-        let env = self.model.program_environment();
-        let _ = (ty, env, dunder);
+        if ty.as_union().is_none()
+            && !matches!(
+                ty,
+                Type::ClassLiteral(_) | Type::SubclassOf(_) | Type::GenericAlias(_)
+            )
+        {
+            // The IDE lookup uses ty's MRO and only infers the real receiver;
+            // the synthetic attribute itself need not be in the parsed tree.
+            let attr = ast::ExprAttribute {
+                node_index: ast::AtomicNodeIndex::NONE,
+                range: expr.range(),
+                value: Box::new(expr.clone()),
+                attr: ast::Identifier::new(dunder, expr.range()),
+                ctx: ast::ExprContext::Load,
+            };
+            let mut targets = Vec::new();
+            for resolved in definitions_for_attribute(self.model, &attr) {
+                let Some(def) = resolved.definition() else {
+                    targets.clear();
+                    break;
+                };
+                let DefinitionKind::Function(fdef) = def.kind(self.model.db()) else {
+                    // Instance assignments and dynamic attribute hooks are not
+                    // implicit special-method calls on the receiver's type.
+                    targets.clear();
+                    break;
+                };
+                let parsed = parsed_module(self.model.db(), def.python_file(self.model.db()))
+                    .load(self.model.db());
+                let Some(fid) = self.def_from_definition(def).filter(|&fid| {
+                    fdef.node(&parsed).name.as_str() == dunder
+                        && !self.function(fid).is_installed_third_party()
+                        && (!self.function(fid).is_generator || dunder == "__iter__")
+                }) else {
+                    targets.clear();
+                    break;
+                };
+                if !targets.contains(&fid) {
+                    targets.push(fid);
+                }
+            }
+            if let [fid] = targets.as_slice() {
+                return Some(CalleeRef::Project(*fid));
+            }
+        }
         // Synthesize type-based external name `{type}.{dunder}` when the receiver type is known.
         let type_name = self.type_instance_qualname(expr)?;
         Some(CalleeRef::External {

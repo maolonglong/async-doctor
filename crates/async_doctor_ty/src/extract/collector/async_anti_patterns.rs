@@ -1,7 +1,7 @@
 //! Detection of async protocol & statement anti-patterns during pass-2 AST collection:
 //! - `sync-with-async-cm`: sync `with` entering an async-only context manager
 //! - `sync-for-async-iterable`: sync `for` / sync comprehension over async-only iterable
-//! - `unawaited-coroutine`: bare `Stmt::Expr` calling a proven coroutine function without `await`
+//! - `unawaited-coroutine`: discarded calls or coroutine objects used as protocols
 //! - `dangling-task`: see `coroutine_proof` submodule.
 
 mod coroutine_proof;
@@ -18,6 +18,7 @@ use ty_python_semantic::HasType;
 use ty_python_semantic::types::{Type, TypeDefinition};
 
 use super::CallCollector;
+use crate::extract::constants::body_has_yield;
 use crate::extract::functions::decorator_is_route;
 use crate::extract::helpers::module_of_definition;
 
@@ -125,9 +126,7 @@ fn is_known_async_only_iterable_call_qual(qualname: &str) -> bool {
 fn is_known_async_only_iterable_type_qual(qualname: &str) -> bool {
     matches!(
         qualname,
-        "builtins.coroutine"
-            | "types.CoroutineType"
-            | "builtins.async_generator"
+        "builtins.async_generator"
             | "types.AsyncGeneratorType"
             | "typing.AsyncIterator"
             | "typing.AsyncIterable"
@@ -191,13 +190,45 @@ pub(super) fn return_annotation_mentions_async_iter(
 }
 
 impl<'a, 'db> CallCollector<'a, 'db> {
+    /// Coroutine objects must be awaited in both sync and async protocols.
+    /// Only actual async iterators/context managers admit an `async` rewrite.
+    pub(crate) fn maybe_record_protocol_misuse(
+        &mut self,
+        caller: FunctionId,
+        expr: &Expr,
+        kind: CallKind,
+        is_async: bool,
+    ) -> bool {
+        if self.dead_depth > 0
+            || self.in_lambda
+            || self.off_loop_thread_depth > 0
+            || self.function(caller).is_installed_third_party()
+        {
+            return false;
+        }
+        let rule = if self.expr_is_proven_coroutine(expr) {
+            RULE_UNAWAITED_COROUTINE
+        } else if !is_async {
+            match kind {
+                CallKind::WithEnter if self.is_sync_with_async_cm(expr) => RULE_SYNC_WITH_ASYNC_CM,
+                CallKind::ForIter | CallKind::GeneratorConsume
+                    if self.is_sync_for_async_iterable(expr) =>
+                {
+                    RULE_SYNC_FOR_ASYNC_ITERABLE
+                }
+                _ => return false,
+            }
+        } else {
+            return false;
+        };
+        self.push_async_protocol_edge(caller, expr, kind, rule);
+        true
+    }
+
     /// True when `expr` inside a sync `with` item is proven to be an async-only
     /// context manager (raises `TypeError` at runtime when entered via `with`).
-    pub(crate) fn is_sync_with_async_cm(&mut self, expr: &Expr) -> bool {
+    fn is_sync_with_async_cm(&mut self, expr: &Expr) -> bool {
         if let Expr::Call(call) = expr {
-            if self.callee_is_unwrapped_async_def(&call.func) {
-                return true;
-            }
             if self.expr_resolves_to_project_class_matching(&call.func, |c| {
                 Self::class_node_is_async_only_cm(c)
             }) {
@@ -229,27 +260,33 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         false
     }
 
-    pub(crate) fn push_sync_with_async_cm_edge(&mut self, caller: FunctionId, expr: &Expr) {
+    fn push_async_protocol_edge(
+        &mut self,
+        caller: FunctionId,
+        expr: &Expr,
+        kind: CallKind,
+        rule: &str,
+    ) {
         let targets = self.async_protocol_target_fids(expr);
         self.clear_pending_call_args();
         self.pending_callables = targets.into_iter().map(Some).collect();
         self.push_edge(
             caller,
             CalleeRef::External {
-                qualname: RULE_SYNC_WITH_ASYNC_CM.to_string(),
+                qualname: rule.to_string(),
             },
             expr.range(),
-            CallKind::WithEnter,
+            kind,
             false,
             Some(false),
         );
     }
 
     /// True when `expr` in a sync `for` loop or sync comprehension is proven to
-    /// be an async-only iterable / coroutine (`TypeError` at runtime).
-    pub(crate) fn is_sync_for_async_iterable(&mut self, expr: &Expr) -> bool {
+    /// be an async-only iterable (`TypeError` at runtime).
+    fn is_sync_for_async_iterable(&mut self, expr: &Expr) -> bool {
         if let Expr::Call(call) = expr {
-            if self.callee_is_unwrapped_async_def(&call.func) {
+            if self.callee_is_unwrapped_async_def(&call.func, true) {
                 return true;
             }
             if self.expr_resolves_to_project_class_matching(&call.func, |c| {
@@ -269,27 +306,6 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         };
         let env = self.model.program_environment();
         self.type_is_async_only_iterable(ty, &env)
-    }
-
-    pub(crate) fn push_sync_for_async_iterable_edge(
-        &mut self,
-        caller: FunctionId,
-        expr: &Expr,
-        kind: CallKind,
-    ) {
-        let targets = self.async_protocol_target_fids(expr);
-        self.clear_pending_call_args();
-        self.pending_callables = targets.into_iter().map(Some).collect();
-        self.push_edge(
-            caller,
-            CalleeRef::External {
-                qualname: RULE_SYNC_FOR_ASYNC_ITERABLE.to_string(),
-            },
-            expr.range(),
-            kind,
-            false,
-            Some(false),
-        );
     }
 
     fn type_is_async_only_iterable(
@@ -353,24 +369,20 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         if !self.call_returns_proven_coroutine(call) {
             return;
         }
-        let targets = self.async_protocol_target_fids(expr_stmt.value.as_ref());
-        self.clear_pending_call_args();
-        self.pending_callables = targets.into_iter().map(Some).collect();
-        self.push_edge(
+        self.push_async_protocol_edge(
             caller,
-            CalleeRef::External {
-                qualname: RULE_UNAWAITED_COROUTINE.to_string(),
-            },
-            call.range(),
+            expr_stmt.value.as_ref(),
             CallKind::Call,
-            false,
-            Some(false),
+            RULE_UNAWAITED_COROUTINE,
         );
     }
 
-    /// True when `func` resolves exclusively to `async def` functions with no
-    /// return-altering decorators (covers both coroutines and async generators).
-    pub(in crate::extract::collector) fn callee_is_unwrapped_async_def(&self, func: &Expr) -> bool {
+    /// Unwrapped `async def`s; iteration additionally requires generator bodies.
+    pub(in crate::extract::collector) fn callee_is_unwrapped_async_def(
+        &self,
+        func: &Expr,
+        generator_only: bool,
+    ) -> bool {
         if !self.resolve_project_constructors(func).is_empty() {
             return false;
         }
@@ -386,6 +398,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                     .load(self.model.db());
                 let node = fdef.node(&parsed);
                 node.is_async
+                    && (!generator_only || body_has_yield(&node.body))
                     && node
                         .decorator_list
                         .iter()

@@ -136,11 +136,13 @@ fn keyword_literals_and_multi_guards_preserve_package_cache_cold_warm_parity() {
             (
                 ".venv/lib/python3.12/site-packages/guardpkg/api.py",
                 "from . import fetch, run_fallback\n\n\
+                 def forward(sync_mode: bool, verbose: bool) -> None:\n    \
+                     fetch('https://example.com', sync_mode=sync_mode, verbose=verbose)\n\n\
                  def pkg_kw_clean() -> None:\n    \
-                     fetch('https://example.com', sync_mode=False, verbose=True)\n    \
+                     forward(False, True)\n    \
                      run_fallback(use_async=True)\n\n\
                  def pkg_kw_blocks() -> None:\n    \
-                     fetch('https://example.com', sync_mode=True, verbose=True)\n",
+                     forward(True, True)\n",
             ),
             (
                 "app.py",

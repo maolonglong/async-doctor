@@ -24,6 +24,7 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 let prev_params = std::mem::take(&mut self.current_param_names);
                 let prev_lambdas = std::mem::take(&mut self.local_lambdas);
                 let prev_genexprs = std::mem::take(&mut self.local_genexprs);
+                let prev_exhausted = std::mem::take(&mut self.exhausted_generators);
                 let prev_idle_locals = std::mem::take(&mut self.idle_loop_locals);
                 let prev_running_loop = std::mem::take(&mut self.running_loop_locals);
                 let prev_event_loop = std::mem::take(&mut self.event_loop_locals);
@@ -92,6 +93,7 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 self.current_param_names = prev_params;
                 self.local_lambdas = prev_lambdas;
                 self.local_genexprs = prev_genexprs;
+                self.exhausted_generators = prev_exhausted;
                 self.idle_loop_locals = prev_idle_locals;
                 self.running_loop_locals = prev_running_loop;
                 self.event_loop_locals = prev_event_loop;
@@ -177,6 +179,7 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 if let Expr::Call(call) = await_expr.value.as_ref() {
                     let is_offload = self.handle_call(call, true);
                     self.walk_call_children(call, is_offload);
+                    self.note_offloaded_generator_consumption(call, is_offload.flatten());
                 } else {
                     self.visit_expr(&await_expr.value);
                 }
@@ -230,6 +233,7 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 walk_expr(self, expr);
             }
             Expr::YieldFrom(yf) => {
+                self.consume_named_generator(&yf.value, false);
                 self.consuming_generator = true;
                 self.visit_expr(&yf.value);
                 self.consuming_generator = false;

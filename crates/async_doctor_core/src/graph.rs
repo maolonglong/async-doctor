@@ -55,12 +55,14 @@ impl ConditionTag {
     }
 }
 
-/// Proven constant value of a positional call argument (when known).
+/// Proven literal value, or a caller parameter whose literal binding can be
+/// resolved along the concrete call path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LiteralArg {
     True,
     False,
     None,
+    Param(u32),
 }
 
 /// What a call resolves to.
@@ -149,9 +151,9 @@ pub struct CallEdge {
     /// When true, this edge is an offload *wrapper* call (e.g. `to_thread(...)`).
     /// The wrapper itself is not a blocking sink; callable args are not edges.
     pub is_offload_wrapper: bool,
-    /// Positional argument literals when known (`None` = unknown / non-literal).
+    /// Positional literals / caller parameters (`None` = unknown).
     pub positional_literals: Vec<Option<LiteralArg>>,
-    /// Keyword argument literals by parameter name (`None` = passed non-literal).
+    /// Keyword literals / caller parameters by name (`None` = unknown).
     pub keyword_literals: Vec<(String, Option<LiteralArg>)>,
     /// Positional arguments that resolve to project/followed functions (higher-order).
     pub positional_callables: Vec<Option<FunctionId>>,
@@ -175,7 +177,8 @@ pub struct CallEdge {
     /// Awaited *async* APIs are not sync-IO sinks; awaited *sync* sinks still
     /// run on the event loop before `await` and must be reported.
     pub is_awaited: bool,
-    /// Whether the resolved callee definition is an `async def` (coroutine).
+    /// Whether the resolved callee is a coroutine function (`async def` without
+    /// `yield`), not an async-generator function.
     /// `Some(true)` / `Some(false)` from ty (including through MRO / `super`);
     /// `None` when unresolved — name-based async-counterpart rules are the
     /// fallback only in that case.
@@ -267,6 +270,11 @@ pub struct FunctionFact {
 }
 
 impl FunctionFact {
+    /// Calling an async generator returns an iterator, not a coroutine object.
+    pub fn is_coroutine(&self) -> bool {
+        self.is_async && !self.is_generator
+    }
+
     /// Installed site-/dist-packages follow — not outside-editable follow-only.
     ///
     /// Outside editables are `is_third_party` (never entries) but keep first-party

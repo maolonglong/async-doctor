@@ -1,6 +1,6 @@
 //! Try/match/for/with statement walkers for `CallCollector`.
 
-use async_doctor_core::CallKind;
+use async_doctor_core::{CallKind, CalleeRef};
 use ruff_python_ast::visitor::Visitor;
 use ruff_python_ast::{self as ast, Expr};
 use ruff_text_size::Ranged;
@@ -57,29 +57,31 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         // Record __iter__/__aiter__ edge when cheap to resolve.
         if let Some(caller) = self.current_fn
             && self.dead_depth == 0
-            && !for_stmt.is_async
         {
-            if !self.in_lambda
-                && self.off_loop_thread_depth == 0
-                && !self.function(caller).is_installed_third_party()
-                && self.is_sync_for_async_iterable(&for_stmt.iter)
+            let invalid = self.maybe_record_protocol_misuse(
+                caller,
+                &for_stmt.iter,
+                CallKind::ForIter,
+                for_stmt.is_async,
+            );
+            if !invalid
+                && !for_stmt.is_async
+                && let Some(callee) = self.resolve_dunder(&for_stmt.iter, "__iter__")
             {
-                self.push_sync_for_async_iterable_edge(caller, &for_stmt.iter, CallKind::ForIter);
-            } else {
-                let dunder = "__iter__";
-                if let Some(callee) = self.resolve_dunder(&for_stmt.iter, dunder) {
-                    self.push_edge(
-                        caller,
-                        callee,
-                        for_stmt.iter.range(),
-                        CallKind::ForIter,
-                        false,
-                        None,
-                    );
-                }
+                self.push_edge(
+                    caller,
+                    callee,
+                    for_stmt.iter.range(),
+                    CallKind::ForIter,
+                    false,
+                    None,
+                );
             }
         }
         // `async for x in call(...)`: the iter Call is an async use of that one call.
+        if !for_stmt.is_async {
+            self.consume_named_generator(&for_stmt.iter, false);
+        }
         self.consuming_generator = true;
         if for_stmt.is_async {
             if let Expr::Call(call) = for_stmt.iter.as_ref() {
@@ -105,8 +107,12 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             && !with_stmt.is_async
         {
             for item in &with_stmt.items {
-                if self.is_sync_with_async_cm(&item.context_expr) {
-                    self.push_sync_with_async_cm_edge(caller, &item.context_expr);
+                if self.maybe_record_protocol_misuse(
+                    caller,
+                    &item.context_expr,
+                    CallKind::WithEnter,
+                    false,
+                ) {
                     if let Expr::Call(call) = &item.context_expr {
                         self.walk_call_children(call, None);
                     }
@@ -120,7 +126,13 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                     let is_offload = self.handle_call(call, false);
                     self.pending_with_enter = false;
                     self.walk_call_children(call, is_offload);
-                } else if let Some(callee) = self.resolve_dunder(&item.context_expr, "__enter__") {
+                }
+                if let Some(callee) = self.resolve_dunder(&item.context_expr, "__enter__")
+                    && (!matches!(item.context_expr, Expr::Call(_))
+                        || matches!(callee, CalleeRef::Project(_)))
+                {
+                    self.clear_pending_call_args();
+                    self.pending_is_bound_call = matches!(callee, CalleeRef::Project(_));
                     self.push_edge(
                         caller,
                         callee,
@@ -131,6 +143,8 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                     );
                 }
                 if let Some(callee) = self.resolve_dunder(&item.context_expr, "__exit__") {
+                    self.clear_pending_call_args();
+                    self.pending_is_bound_call = matches!(callee, CalleeRef::Project(_));
                     self.push_edge(
                         caller,
                         callee,
@@ -146,6 +160,17 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             // `async with call(...) as x`: mark that one call awaited; bind asyncio receivers.
             if with_stmt.is_async {
                 if let Some(caller) = self.current_fn {
+                    if self.maybe_record_protocol_misuse(
+                        caller,
+                        &item.context_expr,
+                        CallKind::WithEnter,
+                        true,
+                    ) {
+                        if let Expr::Call(call) = &item.context_expr {
+                            self.walk_call_children(call, None);
+                        }
+                        continue;
+                    }
                     self.maybe_record_async_with_ephemeral_client(caller, item);
                     self.maybe_record_useless_local_async_lock(caller, item);
                 }
@@ -156,6 +181,28 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                     self.walk_call_children(call, is_offload);
                 } else {
                     self.visit_expr(&item.context_expr);
+                }
+                if let Some(caller) = self.current_fn {
+                    for (dunder, kind) in [
+                        ("__aenter__", CallKind::WithEnter),
+                        ("__aexit__", CallKind::WithExit),
+                    ] {
+                        if let Some(callee @ CalleeRef::Project(_)) =
+                            self.resolve_dunder(&item.context_expr, dunder)
+                        {
+                            self.clear_pending_call_args();
+                            self.pending_is_bound_call = true;
+                            self.pending_is_awaited = true;
+                            self.push_edge(
+                                caller,
+                                callee,
+                                item.context_expr.range(),
+                                kind,
+                                false,
+                                None,
+                            );
+                        }
+                    }
                 }
                 self.note_async_with_receiver(item);
                 self.note_async_with_stateful_session(item);
@@ -195,19 +242,16 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             self.branch_depth += 1;
         }
         for comp in generators {
-            if !comp.is_async
-                && self.dead_depth == 0
-                && !self.in_lambda
-                && self.off_loop_thread_depth == 0
-                && let Some(caller) = self.current_fn
-                && !self.function(caller).is_installed_third_party()
-                && self.is_sync_for_async_iterable(&comp.iter)
-            {
-                self.push_sync_for_async_iterable_edge(
+            if let Some(caller) = self.current_fn {
+                self.maybe_record_protocol_misuse(
                     caller,
                     &comp.iter,
                     CallKind::GeneratorConsume,
+                    comp.is_async,
                 );
+            }
+            if !comp.is_async {
+                self.consume_named_generator(&comp.iter, false);
             }
             self.consuming_generator = true;
             if comp.is_async {

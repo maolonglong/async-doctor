@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use async_doctor_core::{LiteralArg, ParamGuard};
+use async_doctor_core::ParamGuard;
 use ruff_python_ast::visitor::{Visitor, walk_expr, walk_stmt};
 use ruff_python_ast::{self as ast, Expr, Stmt};
 
@@ -15,33 +15,41 @@ pub(crate) enum ModuleConst {
     Empty,
 }
 
-pub(crate) fn body_has_yield(body: &[Stmt]) -> bool {
-    struct YieldFinder {
-        found: bool,
-    }
-    impl<'a> Visitor<'a> for YieldFinder {
-        fn visit_expr(&mut self, expr: &'a Expr) {
-            if self.found {
-                return;
-            }
-            match expr {
-                Expr::Yield(_) | Expr::YieldFrom(_) => {
-                    self.found = true;
+struct YieldFinder {
+    found: bool,
+}
+
+impl<'a> Visitor<'a> for YieldFinder {
+    fn visit_expr(&mut self, expr: &'a Expr) {
+        if self.found {
+            return;
+        }
+        match expr {
+            Expr::Yield(_) | Expr::YieldFrom(_) => self.found = true,
+            // Defaults execute now; the nested lambda body has its own status.
+            Expr::Lambda(lambda) => {
+                if let Some(parameters) = &lambda.parameters {
+                    self.visit_parameters(parameters);
                 }
-                _ => walk_expr(self, expr),
             }
-        }
-        fn visit_stmt(&mut self, stmt: &'a Stmt) {
-            if self.found {
-                return;
-            }
-            // Nested function defs have their own generator status.
-            if matches!(stmt, Stmt::FunctionDef(_)) {
-                return;
-            }
-            walk_stmt(self, stmt);
+            _ => walk_expr(self, expr),
         }
     }
+    fn visit_stmt(&mut self, stmt: &'a Stmt) {
+        if self.found || matches!(stmt, Stmt::FunctionDef(_)) {
+            return;
+        }
+        walk_stmt(self, stmt);
+    }
+}
+
+pub(crate) fn expr_has_yield(expr: &Expr) -> bool {
+    let mut v = YieldFinder { found: false };
+    v.visit_expr(expr);
+    v.found
+}
+
+pub(crate) fn body_has_yield(body: &[Stmt]) -> bool {
     let mut v = YieldFinder { found: false };
     for s in body {
         v.visit_stmt(s);
@@ -182,32 +190,6 @@ pub(crate) fn collect_module_constants(suite: &[Stmt]) -> HashMap<String, Module
 
     values.retain(|k, _| assign_count.get(k).copied().unwrap_or(0) == 1 && !globals.contains(k));
     values
-}
-
-/// Named keyword arguments with their constant literal values (`None` = non-literal).
-pub(crate) fn keyword_literals(
-    keywords: &[ruff_python_ast::Keyword],
-) -> Vec<(String, Option<LiteralArg>)> {
-    keywords
-        .iter()
-        .filter_map(|k| {
-            k.arg
-                .as_ref()
-                .map(|a| (a.as_str().to_string(), literal_arg(&k.value)))
-        })
-        .collect()
-}
-
-pub(crate) fn literal_arg(expr: &Expr) -> Option<LiteralArg> {
-    match expr {
-        Expr::BooleanLiteral(b) => Some(if b.value {
-            LiteralArg::True
-        } else {
-            LiteralArg::False
-        }),
-        Expr::NoneLiteral(_) => Some(LiteralArg::None),
-        _ => None,
-    }
 }
 
 pub(crate) fn is_generator_consumer(func: &Expr) -> bool {

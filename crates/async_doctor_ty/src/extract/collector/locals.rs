@@ -5,6 +5,7 @@ use ruff_python_ast::visitor::Visitor;
 use ruff_python_ast::{self as ast, Expr};
 
 use super::CallCollector;
+use crate::extract::constants::expr_has_yield;
 use crate::extract::ctx::DefKey;
 
 impl<'a, 'db> CallCollector<'a, 'db> {
@@ -200,7 +201,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             module: self.ctx.module.clone(),
             qualname,
             is_async: false,
-            is_generator: false,
+            is_generator: expr_has_yield(&lam.body),
             label: EntryLabel::Other,
             is_sync_route: false,
             async_twins: Vec::new(),
@@ -219,6 +220,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         let prev_params = std::mem::take(&mut self.current_param_names);
         let prev_in = self.in_lambda;
         let depths = self.take_enclosing_depths();
+        let prev_guards = std::mem::take(&mut self.active_param_guards);
         self.current_fn = Some(id);
         self.current_param_names = self.function(id).param_names.clone();
         self.in_lambda = false;
@@ -226,6 +228,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         self.in_lambda = prev_in;
         self.current_fn = prev;
         self.current_param_names = prev_params;
+        self.active_param_guards = prev_guards;
         self.restore_enclosing_depths(depths);
         id
     }

@@ -114,6 +114,26 @@ Same-host comparison before (`40bd0ba`) vs after audit remediation + v21 cache s
 
 All +650 newly recalled `litellm` findings trace to bound higher-order credential callbacks (`self._get_or_set_cached_credentials(..., lambda: ...)`) calling synchronous `boto3`/`botocore` STS, file `read()`, `httpx.Client`, and `Future.result()` sinks across 19 sink sites, with zero lost baseline `(entry, sink)` sites across all five corpora.
 
+### Execution-semantics audit (14 Nov 2026, Linux arm64)
+
+Compared release binaries from `37b664c` and the execution-semantics changes on
+the three smaller pinned corpora above, using the manifest's editable installs
+with Python 3.11 and isolated caches. Findings stayed HTTPX **0 → 0**,
+Starlette **2 → 2**, and FastAPI **0 → 0**. Candidates and advice were unchanged;
+each corpus retained one location-less missing-import candidate for uninstalled
+optional modules. All reports were complete and untruncated, and candidate
+cold/warm JSON was byte-identical. The full `BENCH_STRICT=1` runner passed for
+this subset; this does not establish optional-dependency completeness.
+
+Twelve existing execution-related fixture groups had no diagnostic changes.
+The new `python_execution` fixture changed from **6 → 38** findings: 30 newly
+followed blocking paths, two newly detected coroutine protocol errors, and
+three incorrect protocol-rewrite diagnoses replaced by `unawaited-coroutine`.
+No other findings, candidate, or advice payloads changed. See the
+[completed plan](plans/completed/2026-11-14-python-execution-semantics.md).
+This was a correctness audit, not a performance comparison; the historical
+timing tables are unchanged. Large `litellm` / `open-webui` audits were not run.
+
 ## Reproduce
 
 ```bash
@@ -130,6 +150,26 @@ Optional:
 ```bash
 BENCH_ONLY=httpx,fastapi ./bench/run.sh   # subset
 BENCH_FORCE_INSTALL=1 ./bench/run.sh      # re-run uv installs
+BENCH_STRICT=1 ./bench/run.sh             # fail closed on validation/parity
 ASYNC_DOCTOR_TIMING=1 …                  # phase spans on stderr
 ASYNC_DOCTOR_PASS2_BATCH=N|locality      # lower peak RSS (slower cold)
 ```
+
+All modes reject empty, malformed, or non-report output rather than counting it
+as zero diagnostics. Strict mode additionally re-runs dependency preparation
+instead of trusting an install stamp, requires scan exit 0/1, a schema-2 report
+envelope with `complete=true`, empty `skipped`, zero omitted diagnostic counts,
+and byte-identical cold/warm output. An empty corpus selection fails too.
+Envelope checks are not full JSON-schema or dependency-health validation.
+
+For release corpus comparisons, `scripts/audit_compare.py run ... --strict`
+or `diff <baseline-dir> <candidate-dir> --strict` also rejects missing reports
+in either direction, duplicate labels/IDs, and changes to findings, candidates,
+location-less candidates, or advice (including same-ID payload changes).
+Array order alone is ignored. `run` checks process status, missing scans and
+explicit venv directories, empty jobs, and stale reports; `diff` checks an
+existing `.exit` sidecar but cannot recover an unrecorded process status.
+Normal mode keeps manual comparison permissive for intentional differences.
+Review those differences and update the baseline explicitly; strict mode has
+no approval manifest. Script regressions run with
+`python3 -m unittest discover -s scripts/tests -v`.

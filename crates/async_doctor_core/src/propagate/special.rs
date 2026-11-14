@@ -44,7 +44,7 @@ pub(super) fn special_finding_hit(qualname: &str, caller_is_installed_tp: bool) 
                 sink_qualname: RULE_SYNC_FOR_ASYNC_ITERABLE,
                 fix_hint: "Use `async for ... in ...:` (or `[x async for x in ...]`) instead of \
                            sync iteration — this object only implements the async iterator protocol \
-                           (`__aiter__` / `__anext__`) or is an unawaited coroutine.",
+                           (`__aiter__` / `__anext__`).",
                 candidate_only: false,
                 candidate_reason: None,
                 with_only: false,
@@ -55,10 +55,11 @@ pub(super) fn special_finding_hit(qualname: &str, caller_is_installed_tp: bool) 
             return Some(SinkHit {
                 rule: RULE_UNAWAITED_COROUTINE,
                 sink_qualname: RULE_UNAWAITED_COROUTINE,
-                fix_hint: "Calling an `async def` without `await` constructs a coroutine object \
-                           and immediately discards it — the coroutine body never runs. Use \
-                           `await fn(...)` or schedule it explicitly with `asyncio.TaskGroup` / \
-                           `asyncio.create_task(...)`.",
+                fix_hint: "Calling a coroutine function without `await` constructs a coroutine \
+                           object, not its result. Await it before using the result in a loop or \
+                           context manager; `async for` / `async with` do not await the object for \
+                           you. For discarded calls, use `await fn(...)` or schedule explicitly \
+                           with `asyncio.TaskGroup` / `asyncio.create_task(...)`.",
                 candidate_only: false,
                 candidate_reason: None,
                 with_only: false,
@@ -112,7 +113,7 @@ pub(super) struct SpecialFindingCtx<'a> {
     pub emitted: &'a mut HashSet<String>,
 }
 
-/// Emit `offload-coroutine` findings for offload sites whose target is `async def`.
+/// Emit `offload-coroutine` findings for coroutine targets, not async generators.
 pub(super) fn collect_offload_coroutine_findings(ctx: &mut SpecialFindingCtx<'_>) -> Vec<Finding> {
     let facts = ctx.facts;
     let reverse = ctx.reverse;
@@ -135,7 +136,7 @@ pub(super) fn collect_offload_coroutine_findings(ctx: &mut SpecialFindingCtx<'_>
             .get(idx)
             .copied()
             .flatten()
-            .map(|fid| facts.function(fid).is_async)
+            .map(|fid| facts.function(fid).is_coroutine())
             .or(edge.callee_is_coroutine)
             .unwrap_or(false);
         if !is_coro {

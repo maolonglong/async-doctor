@@ -1,6 +1,7 @@
 //! Call / await / property / lambda / task edge recording.
 
 mod arguments;
+mod callbacks;
 
 use async_doctor_core::{CallKind, CalleeRef, OffloadKind};
 use ruff_db::files::FilePath;
@@ -10,7 +11,7 @@ use ruff_text_size::Ranged;
 use ty_python_semantic::{ImportAliasResolution, definitions_for_attribute, definitions_for_name};
 
 use super::CallCollector;
-use crate::extract::constants::{is_generator_consumer, keyword_literals, literal_arg};
+use crate::extract::constants::is_generator_consumer;
 use crate::extract::helpers::{
     is_asyncio_redis_type, is_callable_ref, is_getattr_call, is_path_or_file_open_qual,
     normalize_asyncio_redis_type, qualname_from_definition,
@@ -82,6 +83,12 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 self.in_eager_offload_arg = prev_eager;
             }
         } else if consumer {
+            if call.arguments.args.len() == 1
+                && call.arguments.keywords.is_empty()
+                && self.is_exhaustive_generator_consumer(&call.func)
+            {
+                self.consume_named_generator(&call.arguments.args[0], true);
+            }
             self.consuming_generator = true;
             for arg in &call.arguments.args {
                 self.visit_expr(arg);
@@ -290,8 +297,15 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             return Some(None);
         }
 
-        self.pending_literals = call.arguments.args.iter().map(literal_arg).collect();
-        self.pending_keyword_literals = keyword_literals(&call.arguments.keywords);
+        self.maybe_record_asyncio_callback(caller, call);
+        self.pending_is_awaited = is_awaited;
+        self.pending_literals = call
+            .arguments
+            .args
+            .iter()
+            .map(|a| self.call_arg_literal(a))
+            .collect();
+        self.pending_keyword_literals = self.call_keyword_literals(&call.arguments.keywords);
         self.pending_callables = self.resolve_positional_callables(call.arguments.args.as_ref());
         self.pending_externals.clear();
         self.pending_constructed_receivers.clear();

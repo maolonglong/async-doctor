@@ -68,7 +68,9 @@ without cross-worker eviction, and runs in coordinated 2,500-file waves where
 all workers share one `Storage` per wave and drop it to refcount 0 between
 waves, with a shared read-only pass-1 function slice and pre-indexed
 `SiteRootIndex`), per-file `CallCollector` (`extract/collector/`, including
-`llm_advice.rs`), and third-party follow with budget (`follow.rs`).
+`llm_advice.rs`, local deferred-generator consumption in `generators.rs`, and
+typed asyncio callback binding in `calls/callbacks.rs`), and third-party follow
+with budget (`follow.rs`).
 Package cache: `cache.rs` / `cache/`. Whole-scan report cache: `scan_cache.rs`.
 Site-packages helpers: `sitepkgs/`. See
 [docs/notes/2026-11-salsa-fresh-empty-rss.md](docs/notes/2026-11-salsa-fresh-empty-rss.md).
@@ -86,9 +88,19 @@ under parallel tests — pass an explicit cache dir instead.
   reachable, never finding entries. Reverse propagation stops at third-party
   async. Awaited *sync* sinks still seed (sync body runs on the loop before
   `await`); awaited known-async APIs do not.
-- Named function bodies reset definition-site execution depths and parameter
+- Named function and synthetic lambda bodies reset execution depths and parameter
   guards; call-site edges carry the enclosing conditions. Dead definitions
   retain their dead status.
+- Local generator-origin and parameter-forwarding proofs use ty's use-def map,
+  not IDE name navigation (which includes non-reaching bindings). Only a unique
+  binding owned by the current function/lambda is followed; rebinding or
+  ambiguity stops proof. Generator bodies attach to consumption, not creation;
+  unconditional exhaustive consumption records that source as exhausted.
+- Coroutine classification excludes async-generator bodies and nested lambda
+  yields. Protocol misuse distinguishes a coroutine needing `await` from an
+  actual async-only iterator/context manager. Implicit project context methods
+  resolve through ty's MRO; asyncio callback edges require actual loop/Future
+  method definitions, never a same-name-method heuristic.
 - Outside-scan-root editables are follow-only (never entry sources). Scanning a
   package directory (one containing a Python package init module) adds its
   parent for self-imports.
@@ -117,11 +129,12 @@ persists `item_spans` while `scan_input_fingerprint_with_python` recomputes
 `ignore_candidate_files` (`Option<Vec<PathBuf>>`) and restores both onto `Report`
 (`#[serde(skip)]` on JSON output) so warm `--changed` and unused-suppression
 checks match cold scans without process-global state. Package-cache schema is
-`CACHE_SCHEMA_VERSION` 24:
+`CACHE_SCHEMA_VERSION` 25 (including the corrected execution-edge semantics):
 it persists cross-package `follow_targets` referenced by analyzed edges alongside
 `is_bound_call`, `is_eager_offload_arg`, `constructed_receiver`,
 `positional_externals`, `positional_constructed_receivers`, decorator qualnames,
-literal-`True` keyword args, multi-guard `param_guards`, and `keyword_literals`
+literal-`True` keyword args, multi-guard `param_guards`, and positional/keyword
+literal bindings (including proven caller-parameter references as `param:N`)
 so warm runs match cold runs bit-for-bit; a whole-scan cache hit preserves
 `environment.followBudgetSkipped` and `environment.unresolvedThirdPartyModules`
 while re-detecting the rest of `environment`.
@@ -146,6 +159,12 @@ non-blocking advice (`advice.rs`: offload-has-async-twin;
 ephemeral-async-client, shared-async-session, offload-stateful-session,
 useless-local-async-lock, swallowed-cancelled-error).
 
+Inferred wrappers retain their ordinary caller-to-wrapper edge alongside worker
+target metadata; only the worker edge cuts propagation. Offload-decorated
+function bodies remain whole-body cuts. `LiteralArg::Param` is plain provenance
+for guard evaluation along an existing concrete path; rebinding/unknown values
+stop the proof, and each step shortens the path prefix (not general taint).
+
 **Architecture invariant:** this crate must not depend on ty or ruff.
 
 **API boundary:** `analyze` / `analyze_with_options` / `analyze_owned` plus the
@@ -167,14 +186,17 @@ analysis logic.
 
 Repo checks and corpus comparison: `scripts/check_rust_file_length.sh` (≤800
 lines under `crates/`), `scripts/check_docs.py` (doc links, budgets,
-plan/decision structure), `scripts/audit_compare.py` (audit corpus finding-ID
-and location diff).
+plan/decision structure), `scripts/audit_compare.py` (finding/candidate/advice
+ID, location, and payload diff; optional strict gate), and `scripts/tests/`
+(standard-library subprocess regressions for audit/benchmark contracts).
 
 ### `bench/`
 
 Public-corpus cold/warm harness (`bench/run.sh`, `bench/repos.toml`). Clones
 land under a gitignored directory inside `bench/` (see `bench/run.sh`).
-Numbers live in `docs/benchmark.md`.
+`BENCH_STRICT=1` rejects failed preparation, incomplete/truncated report
+envelopes, and cold/warm mismatches. Numbers and validation limits live in
+`docs/benchmark.md`.
 
 ### `fixtures/`
 
@@ -196,7 +218,8 @@ Repo agent skills (`codebase-design`, `agent-docs-workflow`,
 ### `.github/`
 
 CI (`ci.yml`: parallel `lint` + `test` jobs; main-only `stress` for concurrent
-cold-cache; `check_docs.py` on lint) and the maturin/PyPI release workflow.
+cold-cache; docs and Python script regressions on lint) and the maturin/PyPI
+release workflow.
 Strategy: [docs/quality.md](docs/quality.md) (CI / test strategy).
 
 ## Cross-cutting concerns

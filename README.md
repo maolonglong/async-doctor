@@ -74,6 +74,8 @@ hidden dirs are skipped (`--include-non-production` to include).
   boto3 client/resource calls, sync OpenAI/Anthropic, and more — async twins
   never fire as findings
 - Higher-order / offload: `asyncio.to_thread`, executors, inferred wrappers
+  (without hiding their loop-side pre/postamble), typed asyncio callbacks,
+  local generator consumption, and project context-manager methods
 - **Advice** (`offload-has-async-twin`, `dangling-task`, `ephemeral-async-client`,
   `shared-async-session`, `offload-stateful-session`, `useless-local-async-lock`,
   `swallowed-cancelled-error`): offload cuts with an installed same-package async
@@ -85,12 +87,14 @@ hidden dirs are skipped (`--include-non-production` to include).
   capped unless `--expand`)
 - **Errors:** `nested-event-loop` (`asyncio.run` / … from async without offload;
   loop-state guards like `if loop is None` / early-return `if loop is not None:
-  return` are dropped), `offload-coroutine` (offload target is `async def`),
+  return` are dropped), `offload-coroutine` (offload target is a coroutine
+  function, not an async generator),
   `sync-with-async-cm` (sync `with` on an async-only context manager),
   `sync-for-async-iterable` (sync `for` or comprehension on an async-only
   iterable), `eager-offload-call` (`to_thread(fn(...))` where `fn(...)` runs on
-  the loop and returns a non-callable), and `unawaited-coroutine` (bare `fn(...)`
-  statement discarding a proven coroutine)
+  the loop and returns a non-callable), and `unawaited-coroutine` (discarded
+  coroutine calls, or coroutine objects used directly as iteration/context
+  protocols instead of awaiting their result)
 
 ## GitHub Actions & pre-commit
 

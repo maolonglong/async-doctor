@@ -8,6 +8,7 @@
 #   ./bench/run.sh
 #   ASYNC_DOCTOR_BIN=./target/release/async-doctor ./bench/run.sh
 #   BENCH_ONLY=httpx,fastapi ./bench/run.sh
+#   BENCH_STRICT=1 ./bench/run.sh
 #
 # Clones land under bench/.repos/ (gitignored). Nothing under that tree is
 # committed.
@@ -24,6 +25,7 @@ CACHE_PARENT="${CLONE_ROOT}/.cache"
 ASYNC_DOCTOR_BIN="${ASYNC_DOCTOR_BIN:-${ROOT}/target/release/async-doctor}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 BENCH_ONLY="${BENCH_ONLY:-}"
+BENCH_STRICT="${BENCH_STRICT:-0}"
 
 if [[ ! -x "${ASYNC_DOCTOR_BIN}" ]]; then
   echo "error: missing release binary at ${ASYNC_DOCTOR_BIN}" >&2
@@ -40,10 +42,15 @@ done
 
 mkdir -p "${CLONE_ROOT}"
 
+# A process substitution would hide a manifest parser failure from set -e.
+REPO_LIST="$(mktemp)"
+trap 'rm -f "${REPO_LIST}"' EXIT
+"${PYTHON_BIN}" "${HARNESS}" parse "${REPOS_TOML}" >"${REPO_LIST}"
 REPO_BLOBS=()
 while IFS= read -r -d '' blob; do
   REPO_BLOBS+=("${blob}")
-done < <("${PYTHON_BIN}" "${HARNESS}" parse "${REPOS_TOML}")
+done <"${REPO_LIST}"
+rm -f "${REPO_LIST}"
 
 clone_repo() {
   local name="$1" url="$2" commit="$3"
@@ -75,20 +82,26 @@ ensure_venv() {
   if [[ ! -d "${dest}/.venv" ]]; then
     uv venv "${dest}/.venv"
   fi
-  if [[ -f "${stamp}" && "${BENCH_FORCE_INSTALL:-}" != "1" ]]; then
+  # Strict runs recheck dependency preparation rather than trusting an old stamp.
+  if [[ -f "${stamp}" && "${BENCH_FORCE_INSTALL:-}" != "1" && "${BENCH_STRICT}" != "1" ]]; then
     return 0
   fi
+  rm -f "${stamp}"
   if ((${#install_cmd[@]})); then
     set +e
     (
-      cd "${dest}"
+      cd "${dest}" || exit $?
       # shellcheck disable=SC1091
-      source "${dest}/.venv/bin/activate"
+      source "${dest}/.venv/bin/activate" || exit $?
       uv --no-config "${install_cmd[@]}"
     )
     local rc=$?
     set -e
     if [[ ${rc} -ne 0 ]]; then
+      if [[ "${BENCH_STRICT}" == "1" ]]; then
+        echo "error: dependency setup failed for $(basename "${dest}") (rc=${rc})" >&2
+        return "${rc}"
+      fi
       echo "warning: uv install failed for $(basename "${dest}") (rc=${rc}); continuing with partial/empty site-packages" >&2
     else
       : >"${stamp}"
@@ -99,6 +112,7 @@ ensure_venv() {
 }
 
 RESULTS=()
+strict_failed=0
 
 for blob in "${REPO_BLOBS[@]}"; do
   [[ -z "${blob}" ]] && continue
@@ -157,12 +171,22 @@ for blob in "${REPO_BLOBS[@]}"; do
     identical="yes"
   else
     identical="no"
+    if [[ "${BENCH_STRICT}" == "1" ]]; then
+      echo "error: ${name} cold/warm reports differ" >&2
+      strict_failed=1
+    fi
   fi
 
   RESULTS+=("${name}|${commit}|${scan}|${files}|${findings}|${candidates}|${cold_s}|${warm_s}|${peak_rss_kib}|${identical}")
   echo "    files=${files} findings=${findings} candidates=${candidates} cold=${cold_s}s warm=${warm_s}s rss=${peak_rss_kib}KiB identical=${identical}" >&2
 done
 
+if [[ "${BENCH_STRICT}" == "1" && ${#RESULTS[@]} -eq 0 ]]; then
+  echo "error: strict benchmark selected no corpora" >&2
+  exit 2
+fi
+
 RESULTS_TSV="${CLONE_ROOT}/results.tsv"
 printf '%s\n' "${RESULTS[@]}" >"${RESULTS_TSV}"
 "${PYTHON_BIN}" "${HARNESS}" emit "${RESULTS_JSON}" "${RESULTS_TSV}"
+exit "${strict_failed}"

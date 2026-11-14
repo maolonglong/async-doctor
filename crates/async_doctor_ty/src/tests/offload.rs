@@ -213,6 +213,7 @@ fn offload_lambda_returning_coroutine_emits_offload_coroutine() {
         "lam_coro.py",
         r#"
 import asyncio
+import functools
 import time
 
 async def async_fn() -> int:
@@ -237,6 +238,14 @@ async def sync_lambda_ok():
 
 async def async_gen_lambda_not_coro():
     await asyncio.to_thread(lambda: async_gen())
+
+async def async_gen_direct_not_coro():
+    rows = await asyncio.to_thread(async_gen)
+    return [row async for row in rows]
+
+async def async_gen_partial_not_coro():
+    rows = await asyncio.to_thread(functools.partial(async_gen))
+    return [row async for row in rows]
 "#,
     )]);
     let report = scan_path(&dir).unwrap();
@@ -252,15 +261,20 @@ async def async_gen_lambda_not_coro():
             report.findings
         );
     }
-    assert!(
-        !report.findings.iter().any(
-            |f| f.entry.name == "sync_lambda_ok" || f.entry.name == "async_gen_lambda_not_coro"
-        ),
-        "sync lambda and async-generator lambda must not emit offload-coroutine: {:?}",
-        report.findings
-    );
+    for good in [
+        "sync_lambda_ok",
+        "async_gen_lambda_not_coro",
+        "async_gen_direct_not_coro",
+        "async_gen_partial_not_coro",
+    ] {
+        assert!(
+            !report.findings.iter().any(|f| f.entry.name == good),
+            "{good} must not emit offload-coroutine: {:?}",
+            report.findings
+        );
+    }
     assert_eq!(
-        report.async_entry_count, 6,
+        report.async_entry_count, 8,
         "synthetic lambda facts must not inflate async_entry_count"
     );
 }

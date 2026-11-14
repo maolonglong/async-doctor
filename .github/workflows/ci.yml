@@ -49,6 +49,9 @@ jobs:
       - name: check docs
         run: python3 scripts/check_docs.py
 
+      - name: Python script regressions
+        run: python3 -m unittest discover -s scripts/tests -v
+
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 

@@ -249,7 +249,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
     }
 
     fn call_arg_returns_provably_non_callable(&self, arg: &Expr, inner: &ast::ExprCall) -> bool {
-        if self.callee_is_unwrapped_async_def(&inner.func) {
+        if self.callee_is_unwrapped_async_def(&inner.func, false) {
             return true;
         }
         if self.expr_resolves_to_project_class_matching(&inner.func, |c| {

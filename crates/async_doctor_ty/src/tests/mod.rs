@@ -11,6 +11,7 @@ mod constants;
 mod corpus_gaps;
 mod db_resets;
 mod entries;
+mod execution_semantics;
 mod extraction_regressions;
 mod follow_and_cache;
 mod guards_and_archives;

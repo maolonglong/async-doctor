@@ -19,6 +19,45 @@ use super::{decorator_preserves_coroutine, return_annotation_mentions_async_iter
 use crate::extract::constants::body_has_yield;
 
 impl<'a, 'db> CallCollector<'a, 'db> {
+    pub(super) fn expr_is_proven_coroutine(&self, expr: &Expr) -> bool {
+        if let Expr::Call(call) = expr
+            && self.call_returns_proven_coroutine(call)
+        {
+            return true;
+        }
+        expr.inferred_type(self.model)
+            .is_some_and(|ty| self.type_is_proven_coroutine(ty))
+    }
+
+    fn type_is_proven_coroutine(&self, ty: Type<'db>) -> bool {
+        if let Some(union) = ty.as_union() {
+            let elements = union.elements(self.model.db());
+            let mut live = elements
+                .iter()
+                .copied()
+                .filter(|ty| !matches!(ty, Type::Never))
+                .peekable();
+            return live.peek().is_some() && live.all(|ty| self.type_is_proven_coroutine(ty));
+        }
+        if matches!(
+            ty,
+            Type::ClassLiteral(_) | Type::SubclassOf(_) | Type::GenericAlias(_)
+        ) {
+            return false;
+        }
+        let env = self.model.program_environment();
+        self.type_to_instance_qualname(ty, &env).is_some_and(|q| {
+            matches!(
+                q.as_str(),
+                "builtins.coroutine"
+                    | "types.CoroutineType"
+                    | "typing.Coroutine"
+                    | "collections.abc.Coroutine"
+                    | "_collections_abc.Coroutine"
+            )
+        })
+    }
+
     /// True when `call` is proven to return a coroutine object (not an async
     /// generator, not `@asynccontextmanager`, not `@async_to_sync`).
     pub(crate) fn call_returns_proven_coroutine(&self, call: &ast::ExprCall) -> bool {

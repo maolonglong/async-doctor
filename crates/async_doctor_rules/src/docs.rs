@@ -207,12 +207,14 @@ remain findings with normal branch conditions.",
     },
     RuleDoc {
         id: "offload-coroutine",
-        title: "Offload of async def",
-        summary: "Offload target is an `async def` — the coroutine never runs.",
+        title: "Offload of a coroutine function",
+        summary: "Offload target creates a coroutine object instead of executing its body in the worker.",
         body: "\
 `to_thread` / `run_in_executor` / similar APIs invoke a sync callable in a worker.\n\
-Passing an `async def` creates a coroutine object that is never awaited, so the\n\
-work does not execute.",
+Passing a coroutine function (`async def` without `yield`) only creates a coroutine\n\
+object; the offload does not await it. Async-generator functions are excluded:\n\
+they create async iterators whose bodies execute during later async iteration,\n\
+not during offload.",
         fix: "\
 - Await the coroutine directly from async code.\n\
 - Or pass a sync function into the offload.",
@@ -225,7 +227,9 @@ work does not execute.",
 Async-only context managers (`httpx.AsyncClient`, `aiohttp.ClientSession`,\n\
 `asyncio.Lock` / `Semaphore` / `TaskGroup` / `timeout`, `AsyncSession`, or classes\n\
 that implement `__aenter__` without `__enter__`) do not implement the synchronous\n\
-context protocol and raise `TypeError` at runtime when entered with `with`.",
+context protocol and raise `TypeError` at runtime when entered with `with`.\n\
+A coroutine returning a context manager must instead be awaited first; that\n\
+case reports `unawaited-coroutine`, not this protocol-rewrite rule.",
         fix: "\
 - Use `async with ...:` instead of `with ...:`.",
     },
@@ -237,7 +241,8 @@ context protocol and raise `TypeError` at runtime when entered with `with`.",
 Async generators (`async def` with `yield`), async streams (`httpx.Response.aiter_*`,\n\
 `redis.asyncio.Redis.scan_iter`, `aiohttp.StreamReader`, `aiokafka.AIOKafkaConsumer`),\n\
 and classes implementing `__aiter__` without `__iter__` or `__getitem__` cannot be\n\
-iterated synchronously and raise `TypeError` at runtime.",
+iterated synchronously and raise `TypeError` at runtime. Coroutine objects must\n\
+instead be awaited to obtain the iterable; they report `unawaited-coroutine`.",
         fix: "\
 - Use `async for ... in ...:` (or an async comprehension `[... async for ... in ...]`).",
     },
@@ -257,15 +262,19 @@ event loop and then passes its non-callable return value to the worker, raising\
     },
     RuleDoc {
         id: "unawaited-coroutine",
-        title: "Unawaited coroutine call",
-        summary: "Bare coroutine call discards the returned coroutine without awaiting or scheduling it.",
+        title: "Unawaited coroutine object",
+        summary: "A coroutine is discarded or used directly as an iteration/context protocol without awaiting its result.",
         body: "\
 Calling an `async def` coroutine function as a standalone statement only constructs\n\
 a coroutine object and immediately drops it. The body never executes, and Python\n\
-emits `RuntimeWarning: coroutine '...' was never awaited` when garbage-collected.",
+emits `RuntimeWarning: coroutine '...' was never awaited` when garbage-collected.\n\
+Using that object directly in a loop, comprehension, or `with` raises `TypeError`.\n\
+`async for` / `async with` do not await a coroutine to obtain its result; choose\n\
+the returned value's protocol only after awaiting it.",
         fix: "\
-- Prefix the call with `await`: `await coro(...)`.\n\
-- Or schedule it explicitly with `asyncio.TaskGroup` / `asyncio.create_task` (keeping a reference).",
+- Await before protocol use: `[x for x in await get_rows()]` or `with await get_resource():`.\n\
+- For discarded calls, `await coro(...)`, or schedule explicitly with\n\
+  `asyncio.TaskGroup` / `asyncio.create_task` (keeping a reference).",
     },
     RuleDoc {
         id: "dangling-task",

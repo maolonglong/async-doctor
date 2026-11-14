@@ -103,17 +103,10 @@ fn materialize_higher_order_in_place(out: &mut ProjectFacts) {
         out.functions[fid.index()].offload_decorator = Some(kind);
     }
 
-    // Index edges by caller once — avoid O(E²) scans.
-    let mut by_caller: Vec<Vec<usize>> = vec![Vec::new(); out.functions.len()];
-    for (i, edge) in out.edges.iter().enumerate() {
-        let c = edge.caller.index();
-        if c < by_caller.len() {
-            by_caller[c].push(i);
-        }
-    }
-
-    // Mark call edges to offload-decorated functions and inferred offload
-    // wrappers as offload cuts.
+    // A decorated function's body is offloaded. An inferred wrapper still
+    // executes its own pre/postamble on the caller's loop: retain that project
+    // edge alongside the offload-target metadata used by special findings/advice.
+    let mut local_wrapper_edges = Vec::new();
     for edge in &mut out.edges {
         if let CalleeRef::Project(fid) = edge.callee {
             let f = &out.functions[fid.index()];
@@ -126,7 +119,7 @@ fn materialize_higher_order_in_place(out: &mut ProjectFacts) {
                 // call args are merely forwarded to it. Drop them so
                 // `offload-coroutine` and twin advice read the decorated
                 // function, not an argument.
-                edge.callee_is_coroutine = Some(f.is_async);
+                edge.callee_is_coroutine = Some(f.is_coroutine());
                 edge.positional_literals.clear();
                 edge.keyword_literals.clear();
                 edge.positional_callables = vec![Some(fid)];
@@ -139,6 +132,7 @@ fn materialize_higher_order_in_place(out: &mut ProjectFacts) {
             if !f.is_offload_wrapper {
                 continue;
             }
+            local_wrapper_edges.push(edge.clone());
             edge.is_offload_wrapper = true;
             edge.callee = CalleeRef::Offload(OffloadKind::AsyncioToThread);
             let has_receiver_param = matches!(
@@ -193,8 +187,16 @@ fn materialize_higher_order_in_place(out: &mut ProjectFacts) {
                 .first()
                 .copied()
                 .flatten()
-                .map(|id| out.functions[id.index()].is_async);
+                .map(|id| out.functions[id.index()].is_coroutine());
         }
+    }
+    out.edges.extend(local_wrapper_edges);
+
+    // Index edges after retaining wrapper bodies, before assigning call-context
+    // indices to higher-order edges. Original edge indices stay unchanged.
+    let mut by_caller: Vec<Vec<usize>> = vec![Vec::new(); out.functions.len()];
+    for (i, edge) in out.edges.iter().enumerate() {
+        by_caller[edge.caller.index()].push(i);
     }
 
     // Resolve ParamInvoke via caller's positional_callables / keyword_callables.

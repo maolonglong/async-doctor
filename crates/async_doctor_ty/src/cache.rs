@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// Bump when the on-disk JSON shape / key layout changes incompatibly.
+/// Bump when the on-disk shape, keys, or extracted execution semantics change.
 ///
 /// v4–v19: structural async-def gate, redis MRO keys, whole-scan content-hash
 /// report cache, offload boundaries, report schemaVersion 2, class MRO /
@@ -42,7 +42,9 @@ use serde::{Deserialize, Serialize};
 /// after all waves materialize; sub-second mtime & unpackaged subdir fingerprints.
 /// v24: `CachedEdge` persists multi-guard `param_guards` + `keyword_literals`
 /// (conjunctive `ParamGuard`s, `else`/early-return inversion, keyword literals).
-pub const CACHE_SCHEMA_VERSION: u32 = 24;
+/// v25: deferred generator/context/callback edges and coroutine classification;
+/// literal bindings include proven caller-parameter forwarding (`param:N`).
+pub const CACHE_SCHEMA_VERSION: u32 = 25;
 
 /// Tool version embedded in the cache path (from this crate's Cargo.toml).
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -136,9 +138,9 @@ pub struct CachedEdge {
     pub text: String,
     pub conditions: Vec<String>,
     pub occurrence: u32,
-    /// Positional literals: `true` / `false` / `none` / omitted (`null`).
+    /// Positional bindings: `true` / `false` / `none` / `param:N` / `null`.
     pub positional_literals: Vec<Option<String>>,
-    /// Keyword argument literals (`true` / `false` / `none` / `null` for non-literal).
+    /// Keyword bindings (same encoding as positional bindings).
     #[serde(default)]
     pub keyword_literals: Vec<(String, Option<String>)>,
     /// Positional callable External/full quals when known.

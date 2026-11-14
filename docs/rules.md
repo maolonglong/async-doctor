@@ -3,6 +3,33 @@
 Stable rule ids for findings, candidates, and advice. Use `async-doctor explain <rule-id>`
 for the same text in the terminal. Inline suppressions: `# async-doctor: ignore[<rule-id>]: <reason>`.
 
+**Execution model:** findings follow where Python executes a body, not merely
+where it creates a callable or deferred object.
+
+- An inferred offload wrapper still runs its own pre/postamble on the loop;
+  only its worker target is cut. Offload-decorated function bodies stay cut.
+- For named sync generators, unambiguous local assignments and aliases are
+  followed at sync loop/comprehension, `yield from`, or proven builtin
+  `list` / `tuple` / `set` / `frozenset` / `sorted` consumption. Creating the
+  generator on a worker does not offload later iteration. An unconditional,
+  awaited worker exhaustion prevents replaying the body in a later loop-side
+  consumption; partial consumption does not. Ambiguous origins, global/nonlocal
+  values, named `next`, and arbitrary consumer methods are not inferred.
+- Typed asyncio loop `call_soon`, `call_later`, `call_at`, and
+  `call_soon_threadsafe`, plus asyncio Future/Task `add_done_callback`, run
+  callbacks on the loop. `threadsafe` describes submission, not offloading.
+  Project callbacks, lambdas, bound methods, and inline `functools.partial`
+  bindings are followed; coroutine/generator bodies are not run by a plain
+  callback invocation. Local partial aliases and unrelated same-name methods
+  are not guessed.
+- Project `__enter__` / `__exit__` and `__aenter__` / `__aexit__` bodies are
+  followed through the resolved type's method resolution order. Instance
+  assignments do not replace implicit special-method lookup.
+
+Offload repair hints do not promise that cancelling an await stops a running
+worker thread. Use underlying IO timeouts and keep resource ownership inside
+the worker where appropriate.
+
 ## blocking-sleep
 
 `time.sleep` (and similar) freezes every task sharing the asyncio event loop.
@@ -230,9 +257,11 @@ sites stay findings (with normal branch conditions).
 
 ## offload-coroutine
 
-An offload target resolves to an `async def`. Offload APIs expect a sync
-callable; passing a coroutine function builds a coroutine object that is never
-awaited, so the work never runs.
+An offload target resolves to a coroutine function (`async def` without
+`yield`). Offload APIs expect a sync callable; passing a coroutine function
+only builds a coroutine object rather than executing its body on the worker.
+Async-generator functions are excluded: calling one creates an async iterator,
+whose body executes during later async iteration, not during the offload.
 
 **Fix:** await the coroutine directly, or pass a sync function to the offload.
 
@@ -254,11 +283,13 @@ manager with sync `with` raises `TypeError` at runtime. Sync anyio timeouts
 ## sync-for-async-iterable
 
 A synchronous `for` loop or sync comprehension iterates over an async-only
-iterable (`async def` generator/coroutine call, known async stream such as
+iterable (`async def` generator call, known async stream such as
 `httpx.Response.aiter_*`, `redis.asyncio.Redis.scan_iter`,
 `redis.asyncio.PubSub.listen`, `aiohttp.StreamReader`, `asyncpg.Connection.cursor`,
 `AsyncResult`, or a base-free project class implementing `__aiter__` without
 `__iter__` or `__getitem__`). Sync iteration raises `TypeError` at runtime.
+Coroutine objects instead report `unawaited-coroutine`; they must be awaited
+before choosing the returned value's iteration protocol.
 
 **Fix:** replace `for x in ...:` with `async for x in ...:` (or `[x async for x in ...]`).
 
@@ -278,14 +309,18 @@ or wrap keyword arguments with `functools.partial(fn, key=val)`.
 
 ## unawaited-coroutine
 
-A bare expression statement calls a proven coroutine-returning `async def`
-without `await`, discarding the coroutine object immediately so the body never
-executes (`RuntimeWarning: coroutine '...' was never awaited`). Excludes async
-generators (`yield`), `@asynccontextmanager`, and custom decorators that may
-alter call semantics.
+A proven coroutine object is discarded by a bare call statement, or used
+directly as the iterable/context manager of a sync or async loop,
+comprehension, or `with` statement. Discarding it leaves the body unexecuted
+(`RuntimeWarning: coroutine '...' was never awaited`); protocol use raises
+`TypeError`. `async for` and `async with` do not implicitly await a coroutine
+to obtain its result. Excludes async generators (`yield`),
+`@asynccontextmanager`, and custom decorators that may alter call semantics.
 
-**Fix:** `await fn(...)`, or schedule explicitly with `asyncio.TaskGroup` / a
-referenced `asyncio.create_task(...)`.
+**Fix:** await the result first, then use the protocol it implements (for
+example, `[x for x in await get_rows()]` or `with await get_resource():`). For
+discarded calls, `await fn(...)`, or schedule explicitly with
+`asyncio.TaskGroup` / a referenced `asyncio.create_task(...)`.
 
 ## dangling-task
 
