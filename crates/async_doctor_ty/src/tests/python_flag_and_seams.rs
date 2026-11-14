@@ -10,13 +10,17 @@ use crate::{ScanOptions, scan_path_with_scan_options};
 
 #[test]
 fn scan_options_python_threads_through_db_cache_and_twin_resolve() {
-    let proj = temp_project(&[(
-        "app.py",
-        "import asyncio\nimport httpx\nimport requests\n\n\
-         async def run():\n    \
-         requests.get('https://example.com')\n    \
-         await asyncio.to_thread(httpx.get, 'https://example.com')\n",
-    )]);
+    let proj = temp_project(&[
+        (
+            "app.py",
+            "import asyncio\nimport httpx\nimport requests\n\n\
+             async def run():\n    \
+             requests.get('https://example.com')\n    \
+             await asyncio.to_thread(httpx.get, 'https://example.com')\n",
+        ),
+        (".venv/pyvenv.cfg", "home = /usr/bin\n"),
+        (".venv/lib/python3.12/site-packages/.keep", ""),
+    ]);
     let cache = fresh_cache_dir("scan-opts-python");
     let venv = advice_shared_venv();
 
