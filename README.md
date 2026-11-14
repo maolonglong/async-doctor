@@ -162,6 +162,20 @@ npx skills add maolonglong/async-doctor
 
 For GitHub code scanning, see the SARIF workflow above.
 
+## Development in orbs
+
+Amp runs [`.agents/setup`](.agents/setup) when preparing an orb snapshot. It
+installs native build prerequisites, the Rust toolchain and components from
+`rust-toolchain.toml`, prebuilt `cargo-nextest`, and an isolated Maturin matching
+`pyproject.toml`, then fetches dependencies from `Cargo.lock` without changing it.
+Repeated setup reuses installed tools and caches. Compilation stays on demand
+so the optimized ty/ruff dependencies do not delay orb startup.
+
+[`.agents/resume`](.agents/resume) installs nothing: this CLI needs no services
+or per-thread authentication, and installed tools and caches survive pauses.
+The lifecycle scripts take effect for new orbs once pushed to the project's
+base branch; an exact snapshot skips setup entirely.
+
 ## License
 
 MIT. Bundled typeshed stubs (via `ty_vendored`) are Apache-2.0; see

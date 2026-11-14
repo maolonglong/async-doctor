@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+SECONDS=0
+TIMEFORMAT='[setup] Step finished in %3R seconds'
+export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$HOME/.local/bin:$PATH"
+
+printf '\n[setup] Checking native build prerequisites\n'
+time {
+    missing_packages=()
+    for package in build-essential ca-certificates curl git pkg-config python3; do
+        if [[ "$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null || true)" != 'install ok installed' ]]; then
+            missing_packages+=("$package")
+        fi
+    done
+    if ((${#missing_packages[@]})); then
+        sudo apt-get update
+        sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing_packages[@]}"
+    fi
+}
+
+printf '\n[setup] Preparing Rust from rust-toolchain.toml\n'
+time {
+    if ! command -v rustup >/dev/null 2>&1; then
+        curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs |
+            sh -s -- -y --profile minimal --default-toolchain none
+    fi
+    if [[ -f "${CARGO_HOME:-$HOME/.cargo}/env" ]]; then
+        # shellcheck disable=SC1091
+        source "${CARGO_HOME:-$HOME/.cargo}/env"
+    fi
+    # With no name, rustup reads the pinned channel and components from the file.
+    rustup toolchain install --profile minimal --no-self-update
+}
+
+printf '\n[setup] Preparing cargo-nextest\n'
+time {
+    if ! command -v cargo-nextest >/dev/null 2>&1; then
+        # The official installer selects the host architecture and verifies SHA-256.
+        curl --proto '=https' --tlsv1.2 -fsSL https://get.nexte.st/install.sh | sh -s --
+    fi
+    cargo nextest --version
+}
+
+printf '\n[setup] Preparing Python packaging tools\n'
+time {
+    if ! command -v uv >/dev/null 2>&1; then
+        curl --proto '=https' --tlsv1.2 -fsSL https://astral.sh/uv/install.sh | sh
+    fi
+    maturin_requirement="$(python3 - <<'PY'
+import tomllib
+
+with open("pyproject.toml", "rb") as file:
+    requirements = tomllib.load(file)["build-system"]["requires"]
+print(next(requirement for requirement in requirements if requirement.startswith("maturin")))
+PY
+    )"
+    # Keep packaging tools outside the repo: an ancestor .venv affects scan fixtures.
+    uv tool install "$maturin_requirement"
+    uv tool update-shell
+    maturin --version
+}
+
+printf '\n[setup] Fetching Cargo.lock dependencies\n'
+# Cache sources without an expensive optimized ty/ruff build during orb startup.
+time cargo fetch --locked
+printf '\n[setup] Ready in %s seconds\n' "$SECONDS"
