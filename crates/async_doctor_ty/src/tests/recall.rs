@@ -379,3 +379,168 @@ fn pure_constructors_produce_no_findings() {
         report.candidates.len()
     );
 }
+
+#[test]
+fn contextmanager_and_asynccontextmanager_follow_body_on_with_enter() {
+    let dir = temp_project(&[
+        (".venv/pyvenv.cfg", "home = /usr/bin\n"),
+        (
+            ".venv/lib/python3.12/site-packages/cm_pkg/__init__.py",
+            concat!(
+                "import time\n",
+                "from contextlib import asynccontextmanager\n",
+                "\n",
+                "@asynccontextmanager\n",
+                "async def third_party_acm():\n",
+                "    time.sleep(1)\n",
+                "    yield 'res'\n",
+            ),
+        ),
+        (
+            "tests/cm_helpers.py",
+            concat!(
+                "import contextlib\n",
+                "import time\n",
+                "\n",
+                "@contextlib.asynccontextmanager\n",
+                "async def project_acm():\n",
+                "    time.sleep(1)\n",
+                "    yield 'conn'\n",
+            ),
+        ),
+        (
+            "cm_app.py",
+            r#"
+from contextlib import contextmanager
+import time
+import cm_pkg
+from tests.cm_helpers import project_acm
+
+@contextmanager
+def sync_cm():
+    time.sleep(1)
+    yield "lock"
+
+def bare_gen():
+    time.sleep(1)
+    yield 1
+
+async def via_sync_cm():
+    with sync_cm():
+        pass
+
+async def via_third_party_acm():
+    async with cm_pkg.third_party_acm():
+        pass
+
+async def via_project_acm():
+    async with project_acm():
+        pass
+
+async def unconsumed_cm_and_gen_clean():
+    _c = sync_cm()
+    _g = bare_gen()
+"#,
+        ),
+    ]);
+    let report = scan_path(&dir).unwrap();
+    let _ = fs::remove_dir_all(dir);
+
+    let entries: std::collections::BTreeSet<_> = report
+        .findings
+        .iter()
+        .map(|f| f.entry.name.as_str())
+        .collect();
+    assert!(
+        entries.contains("via_sync_cm"),
+        "with sync_cm() must follow @contextmanager body: {entries:?} {:?}",
+        report.findings
+    );
+    assert!(
+        entries.contains("via_third_party_acm"),
+        "async with cm_pkg.third_party_acm() must follow @asynccontextmanager body: {entries:?} {:?}",
+        report.findings
+    );
+    assert!(
+        entries.contains("via_project_acm"),
+        "async with project_acm() must follow first-party @asynccontextmanager body: {entries:?} {:?}",
+        report.findings
+    );
+    assert!(
+        !entries.contains("unconsumed_cm_and_gen_clean"),
+        "bare unconsumed generator/contextmanager call must not report: {:?}",
+        report.findings
+    );
+}
+
+#[test]
+fn pyi_stub_package_follows_sibling_py_implementation() {
+    let dir = temp_project(&[
+        (".venv/pyvenv.cfg", "home = /usr/bin\n"),
+        (
+            ".venv/lib/python3.12/site-packages/stubpkg/__init__.pyi",
+            "def run_sync_io() -> str: ...\n",
+        ),
+        (
+            ".venv/lib/python3.12/site-packages/stubpkg/__init__.py",
+            concat!(
+                "# leading implementation comments shift byte offsets vs .pyi\n",
+                "import time\n",
+                "\n",
+                "def run_sync_io() -> str:\n",
+                "    time.sleep(1)\n",
+                "    return 'done'\n",
+            ),
+        ),
+        (
+            ".venv/lib/python3.12/site-packages/stubpkg/client.pyi",
+            concat!("class Client:\n", "    def fetch(self) -> bytes: ...\n",),
+        ),
+        (
+            ".venv/lib/python3.12/site-packages/stubpkg/client.py",
+            concat!(
+                "# implementation module with extra helpers before Client\n",
+                "import time\n",
+                "\n",
+                "def _noop() -> None:\n",
+                "    return None\n",
+                "\n",
+                "class Client:\n",
+                "    def fetch(self) -> bytes:\n",
+                "        time.sleep(1)\n",
+                "        return b'ok'\n",
+            ),
+        ),
+        (
+            "app.py",
+            r#"
+import stubpkg
+from stubpkg.client import Client
+
+async def via_stub_fn() -> str:
+    return stubpkg.run_sync_io()
+
+async def via_stub_method() -> bytes:
+    return Client().fetch()
+"#,
+        ),
+    ]);
+    let report = scan_path(&dir).unwrap();
+    let _ = fs::remove_dir_all(dir);
+
+    let entries: std::collections::BTreeSet<_> = report
+        .findings
+        .iter()
+        .map(|f| f.entry.name.as_str())
+        .collect();
+    assert!(
+        entries.contains("via_stub_fn"),
+        ".pyi function must follow sibling .py implementation: {entries:?} {:?}",
+        report.findings
+    );
+    assert!(
+        entries.contains("via_stub_method"),
+        ".pyi class method must follow sibling .py implementation: {entries:?} {:?}",
+        report.findings
+    );
+}

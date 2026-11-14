@@ -184,12 +184,17 @@ pub(crate) fn collect_module_constants(suite: &[Stmt]) -> HashMap<String, Module
     values
 }
 
-/// Names of keyword arguments passed a literal `True` (`exist_ok=True`).
-pub(crate) fn keyword_true_names(keywords: &[ruff_python_ast::Keyword]) -> Vec<String> {
+/// Named keyword arguments with their constant literal values (`None` = non-literal).
+pub(crate) fn keyword_literals(
+    keywords: &[ruff_python_ast::Keyword],
+) -> Vec<(String, Option<LiteralArg>)> {
     keywords
         .iter()
-        .filter(|k| matches!(&k.value, Expr::BooleanLiteral(b) if b.value))
-        .filter_map(|k| k.arg.as_ref().map(|a| a.as_str().to_string()))
+        .filter_map(|k| {
+            k.arg
+                .as_ref()
+                .map(|a| (a.as_str().to_string(), literal_arg(&k.value)))
+        })
         .collect()
 }
 
@@ -213,66 +218,119 @@ pub(crate) fn is_generator_consumer(func: &Expr) -> bool {
         ),
         Expr::Attribute(a) => matches!(
             a.attr.as_str(),
-            "list" | "tuple" | "set" | "next" | "sorted" | "frozenset"
+            "list"
+                | "tuple"
+                | "set"
+                | "next"
+                | "sorted"
+                | "frozenset"
+                | "enter_context"
+                | "enter_async_context"
         ),
         _ => false,
     }
 }
 
-/// Detect `if flag:` / `if not flag:` where `flag` is a positional parameter.
-pub(crate) fn param_guard_from_test(test: &Expr, param_names: &[String]) -> Option<ParamGuard> {
-    let (name, inverted) = match test {
-        Expr::Name(n) => (n.id.as_str(), false),
-        Expr::UnaryOp(u) if matches!(u.op, ast::UnaryOp::Not) => match u.operand.as_ref() {
-            Expr::Name(n) => (n.id.as_str(), true),
-            _ => return None,
-        },
-        _ => return None,
-    };
-    param_names
-        .iter()
-        .position(|p| p == name)
-        .map(|index| ParamGuard {
-            index: index as u32,
-            inverted,
-        })
-}
-
-/// Cheap cache-miss tests: `x is None`, `k not in cache`.
-pub(crate) fn is_cache_miss_test(test: &Expr) -> bool {
+/// Extract conjunctive [`ParamGuard`]s required for `test` to be truthy, plus
+/// whether `test` is an *exact* single-parameter truthiness check (`flag` or
+/// `not flag`) whose negation is a single [`ParamGuard::inverted`].
+///
+/// Never inverts `a and b` (`not (a and b)` is `not a or not b`, a disjunction).
+pub(crate) fn param_guards_from_test(
+    test: &Expr,
+    param_names: &[String],
+) -> (Vec<ParamGuard>, bool) {
     match test {
-        Expr::Compare(cmp) if cmp.ops.len() == 1 => {
-            let op = cmp.ops[0];
-            match op {
-                ast::CmpOp::Is => {
-                    // `cache is None`
-                    matches!(cmp.operands.get(1), Some(Expr::NoneLiteral(_)))
-                        && matches!(cmp.operands.first(), Some(Expr::Name(_)))
-                }
-                ast::CmpOp::NotIn => {
-                    // `key not in cache`
-                    matches!(cmp.operands.get(1), Some(Expr::Name(_)))
-                }
-                _ => false,
+        Expr::Name(n) => {
+            if let Some(index) = param_names.iter().position(|p| p == n.id.as_str()) {
+                (
+                    vec![ParamGuard {
+                        index: index as u32,
+                        inverted: false,
+                    }],
+                    true,
+                )
+            } else {
+                (Vec::new(), false)
             }
         }
-        _ => false,
+        Expr::UnaryOp(u) if matches!(u.op, ast::UnaryOp::Not) => {
+            let (inner, exact) = param_guards_from_test(&u.operand, param_names);
+            if exact && inner.len() == 1 {
+                (vec![inner[0].inverted()], true)
+            } else {
+                (Vec::new(), false)
+            }
+        }
+        Expr::BoolOp(b) if matches!(b.op, ast::BoolOp::And) => {
+            let mut out = Vec::new();
+            let mut all_exact = true;
+            for v in &b.values {
+                let (sub, exact) = param_guards_from_test(v, param_names);
+                for g in sub {
+                    if !out.contains(&g) {
+                        out.push(g);
+                    }
+                }
+                all_exact &= exact;
+            }
+            let exact = all_exact && out.len() == 1;
+            (out, exact)
+        }
+        _ => (Vec::new(), false),
     }
 }
 
-/// Cache-*hit* early-exit tests: `x is not None`, `k in cache`.
-pub(crate) fn is_cache_hit_test(test: &Expr) -> bool {
-    match test {
-        Expr::Compare(cmp) if cmp.ops.len() == 1 => match cmp.ops[0] {
-            ast::CmpOp::IsNot => {
-                matches!(cmp.operands.get(1), Some(Expr::NoneLiteral(_)))
-                    && matches!(cmp.operands.first(), Some(Expr::Name(_)))
-            }
-            ast::CmpOp::In => matches!(cmp.operands.get(1), Some(Expr::Name(_))),
-            _ => false,
-        },
-        _ => false,
+/// Extract storage operand for cache-miss tests (`x is None`, `k not in cache`).
+/// Caller verifies bare `Expr::Name` targets bind to module/global state.
+pub(crate) fn cache_miss_storage_operand(test: &Expr) -> Option<&Expr> {
+    let Expr::Compare(cmp) = test else {
+        return None;
+    };
+    if cmp.ops.len() != 1 || cmp.operands.len() != 2 {
+        return None;
     }
+    let lhs = &cmp.operands[0];
+    let rhs = &cmp.operands[1];
+    let target = match cmp.ops[0] {
+        ast::CmpOp::Is => match (lhs, rhs) {
+            (target, Expr::NoneLiteral(_)) | (Expr::NoneLiteral(_), target) => target,
+            _ => return None,
+        },
+        ast::CmpOp::NotIn => rhs,
+        _ => return None,
+    };
+    matches!(
+        target,
+        Expr::Name(_) | Expr::Attribute(_) | Expr::Subscript(_)
+    )
+    .then_some(target)
+}
+
+/// Extract storage operand for cache-*hit* early-exit tests (`x is not None`, `k in cache`).
+/// Caller verifies bare `Expr::Name` targets bind to module/global state.
+pub(crate) fn cache_hit_storage_operand(test: &Expr) -> Option<&Expr> {
+    let Expr::Compare(cmp) = test else {
+        return None;
+    };
+    if cmp.ops.len() != 1 || cmp.operands.len() != 2 {
+        return None;
+    }
+    let lhs = &cmp.operands[0];
+    let rhs = &cmp.operands[1];
+    let target = match cmp.ops[0] {
+        ast::CmpOp::IsNot => match (lhs, rhs) {
+            (target, Expr::NoneLiteral(_)) | (Expr::NoneLiteral(_), target) => target,
+            _ => return None,
+        },
+        ast::CmpOp::In => rhs,
+        _ => return None,
+    };
+    matches!(
+        target,
+        Expr::Name(_) | Expr::Attribute(_) | Expr::Subscript(_)
+    )
+    .then_some(target)
 }
 
 pub(crate) fn body_always_exits(body: &[Stmt]) -> bool {

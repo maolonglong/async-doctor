@@ -10,12 +10,21 @@ use std::path::{Path, PathBuf};
 
 use async_doctor_rules::twin_resolution_symbols;
 
-use crate::scan_cache::{resolve_venv_prefix, site_packages_roots_for_prefix};
+use crate::env_discovery::discover_site_packages_for_path;
 
 /// Populate `resolved_symbols` for every twin / needs entry that exists in the
-/// active venv (or in-project `.venv` / `venv` under `scan_root`).
+/// active Python environment for `scan_root`.
+#[cfg(test)]
 pub fn collect_resolved_twin_symbols(scan_root: &Path) -> BTreeSet<String> {
-    let site_roots = site_packages_roots(scan_root);
+    collect_resolved_twin_symbols_with_python(scan_root, None)
+}
+
+/// Populate `resolved_symbols` using an optional explicit `--python` environment.
+pub fn collect_resolved_twin_symbols_with_python(
+    scan_root: &Path,
+    python: Option<&Path>,
+) -> BTreeSet<String> {
+    let site_roots = site_packages_roots(scan_root, python);
     let mut out = BTreeSet::new();
     if site_roots.is_empty() {
         return out;
@@ -28,13 +37,8 @@ pub fn collect_resolved_twin_symbols(scan_root: &Path) -> BTreeSet<String> {
     out
 }
 
-fn site_packages_roots(scan_root: &Path) -> Vec<PathBuf> {
-    // Prefer a single active prefix (same policy as scan_cache): VIRTUAL_ENV,
-    // else in-project `.venv`/`venv`. Do not union multiple venvs — that would
-    // let a foreign VIRTUAL_ENV satisfy `needs` for an isolated fixture.
-    resolve_venv_prefix(scan_root)
-        .map(|prefix| site_packages_roots_for_prefix(&prefix))
-        .unwrap_or_default()
+fn site_packages_roots(scan_root: &Path, python: Option<&Path>) -> Vec<PathBuf> {
+    discover_site_packages_for_path(scan_root, python).2
 }
 
 fn symbol_available(site_roots: &[PathBuf], symbol: &str) -> bool {
@@ -42,7 +46,7 @@ fn symbol_available(site_roots: &[PathBuf], symbol: &str) -> bool {
     if parts.is_empty() {
         return false;
     }
-    // Package-only needs (e.g. `aiohttp`): directory or module file exists.
+    // Package-only needs (e.g. `aiohttp`): directory, `.py`/`.pyi`, or compiled extension.
     if parts.len() == 1 {
         return package_root(site_roots, parts[0]).is_some();
     }
@@ -60,22 +64,46 @@ fn symbol_available(site_roots: &[PathBuf], symbol: &str) -> bool {
     name_exported_in(&parent_path, needle, 0)
 }
 
-fn package_root(site_roots: &[PathBuf], name: &str) -> Option<PathBuf> {
-    for root in site_roots {
-        let dir = root.join(name);
-        if dir.is_dir() {
-            return Some(dir);
+fn find_module_in_dir(dir: &Path, name: &str) -> Option<PathBuf> {
+    let sub = dir.join(name);
+    if sub.is_dir() {
+        return Some(sub);
+    }
+    let py = dir.join(format!("{name}.py"));
+    if py.is_file() {
+        return Some(py);
+    }
+    let pyi = dir.join(format!("{name}.pyi"));
+    if pyi.is_file() {
+        return Some(pyi);
+    }
+    for ext in ["so", "pyd"] {
+        let exact = dir.join(format!("{name}.{ext}"));
+        if exact.is_file() {
+            return Some(exact);
         }
-        let py = root.join(format!("{name}.py"));
-        if py.is_file() {
-            return Some(py);
+    }
+    let prefix = format!("{name}.");
+    let entries = fs::read_dir(dir).ok()?;
+    for ent in entries.flatten() {
+        let p = ent.path();
+        if !p.is_file() {
+            continue;
         }
-        let pyi = root.join(format!("{name}.pyi"));
-        if pyi.is_file() {
-            return Some(pyi);
+        let Some(fname) = p.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if fname.starts_with(&prefix) && (fname.ends_with(".so") || fname.ends_with(".pyd")) {
+            return Some(p);
         }
     }
     None
+}
+
+fn package_root(site_roots: &[PathBuf], name: &str) -> Option<PathBuf> {
+    site_roots
+        .iter()
+        .find_map(|root| find_module_in_dir(root, name))
 }
 
 fn walk_module_path(site_roots: &[PathBuf], parts: &[&str]) -> Option<PathBuf> {
@@ -87,16 +115,7 @@ fn walk_module_path(site_roots: &[PathBuf], parts: &[&str]) -> Option<PathBuf> {
         if cur.is_file() {
             return None;
         }
-        let next_dir = cur.join(part);
-        if next_dir.is_dir() {
-            cur = next_dir;
-            continue;
-        }
-        let next_py = cur.join(format!("{part}.py"));
-        if next_py.is_file() {
-            return Some(next_py);
-        }
-        return None;
+        cur = find_module_in_dir(&cur, part)?;
     }
     Some(cur)
 }
@@ -125,7 +144,27 @@ fn name_exported_in(parent: &Path, name: &str, depth: u8) -> bool {
 
 fn init_and_sibling_py_files(parent: &Path) -> Vec<PathBuf> {
     if parent.is_file() {
-        return vec![parent.to_path_buf()];
+        let ext = parent.extension().and_then(|e| e.to_str());
+        if matches!(ext, Some("py" | "pyi")) {
+            let mut out = vec![parent.to_path_buf()];
+            if ext == Some("py") {
+                let stub = parent.with_extension("pyi");
+                if stub.is_file() {
+                    out.push(stub);
+                }
+            }
+            return out;
+        }
+        if let Some(dir) = parent.parent()
+            && let Some(fname) = parent.file_name().and_then(|n| n.to_str())
+            && let Some((stem, _)) = fname.split_once('.')
+        {
+            let stub = dir.join(format!("{stem}.pyi"));
+            if stub.is_file() {
+                return vec![stub];
+            }
+        }
+        return Vec::new();
     }
     let mut files = Vec::new();
     for candidate in [parent.join("__init__.py"), parent.join("__init__.pyi")] {
@@ -133,12 +172,12 @@ fn init_and_sibling_py_files(parent: &Path) -> Vec<PathBuf> {
             files.push(candidate);
         }
     }
-    // Shallow sibling modules (httpx/_client.py) — definitions, not every import.
+    // Shallow sibling modules (httpx/_client.py, _client.pyi) — definitions, not every import.
     if let Ok(entries) = fs::read_dir(parent) {
         for ent in entries.flatten() {
             let p = ent.path();
             let ext = p.extension().and_then(|e| e.to_str());
-            if matches!(ext, Some("py") | Some("pyi")) {
+            if matches!(ext, Some("py") | Some("pyi")) && !files.contains(&p) {
                 files.push(p);
             }
         }
@@ -263,12 +302,18 @@ fn resolve_relative_module(from_file: &Path, module_path: &str) -> Option<PathBu
         }
         return walk_from_base(&base, body);
     }
-    // Absolute within site-packages: walk up to site-packages then down.
+    // Absolute within site-/dist-packages or PDM __pypackages__/<ver>/lib.
     let mut cur = parent_dir.to_path_buf();
     loop {
-        if cur.file_name().and_then(|s| s.to_str()) == Some("site-packages")
-            || cur.file_name().and_then(|s| s.to_str()) == Some("dist-packages")
-        {
+        let fname = cur.file_name().and_then(|s| s.to_str());
+        let is_pdm_lib = fname == Some("lib")
+            && cur
+                .parent()
+                .and_then(Path::parent)
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                == Some("__pypackages__");
+        if matches!(fname, Some("site-packages" | "dist-packages")) || is_pdm_lib {
             return walk_from_base(&cur, module_path);
         }
         if !cur.pop() {
@@ -281,16 +326,10 @@ fn resolve_relative_module(from_file: &Path, module_path: &str) -> Option<PathBu
 fn walk_from_base(base: &Path, dotted: &str) -> Option<PathBuf> {
     let mut cur = base.to_path_buf();
     for part in dotted.split('.').filter(|p| !p.is_empty()) {
-        let next_dir = cur.join(part);
-        if next_dir.is_dir() {
-            cur = next_dir;
-            continue;
+        if cur.is_file() {
+            return None;
         }
-        let next_py = cur.join(format!("{part}.py"));
-        if next_py.is_file() {
-            return Some(next_py);
-        }
-        return None;
+        cur = find_module_in_dir(&cur, part)?;
     }
     Some(cur)
 }
@@ -419,6 +458,83 @@ mod tests {
         let resolved = collect_resolved_twin_symbols(&dir);
         assert!(resolved.contains("elasticsearch.AsyncElasticsearch"));
         assert!(!resolved.contains("aiohttp"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detects_pyi_stubs_compiled_extensions_and_rejects_missing_leaf_in_submodule_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "async-doctor-twin-ext-stub-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let sp = dir
+            .join(".venv")
+            .join("lib")
+            .join("python3.12")
+            .join("site-packages");
+        fs::create_dir_all(&sp).unwrap();
+
+        // 1. Top-level compiled extension (.so / .pyd) satisfies package need (`aiohttp`).
+        fs::write(sp.join("aiohttp.cpython-312-darwin.so"), b"\x7fELFstub").unwrap();
+        // 2. Stub-only subpackage (`grpc/aio/__init__.pyi`) satisfies `grpc.aio`.
+        fs::create_dir_all(sp.join("grpc").join("aio")).unwrap();
+        fs::write(sp.join("grpc").join("__init__.pyi"), "").unwrap();
+        fs::write(
+            sp.join("grpc").join("aio").join("__init__.pyi"),
+            "class Channel: ...\n",
+        )
+        .unwrap();
+        // 3. Re-export pointing at a `.pyi` stub alongside a `.pyd` extension.
+        fs::create_dir_all(sp.join("httpx")).unwrap();
+        fs::write(
+            sp.join("httpx").join("__init__.pyi"),
+            "from ._accel import AsyncClient as AsyncClient\n",
+        )
+        .unwrap();
+        fs::write(
+            sp.join("httpx").join("_accel.cp312-win_amd64.pyd"),
+            b"MZstub",
+        )
+        .unwrap();
+        fs::write(
+            sp.join("httpx").join("_accel.pyi"),
+            "class AsyncClient: ...\n",
+        )
+        .unwrap();
+        // 4. Multi-part symbol where intermediate `sqlalchemy/ext/asyncio.py` is a file
+        //    that does NOT define `AsyncSession` — must NOT falsely report `AsyncSession`!
+        fs::create_dir_all(sp.join("sqlalchemy").join("ext")).unwrap();
+        fs::write(sp.join("sqlalchemy").join("__init__.py"), "").unwrap();
+        fs::write(sp.join("sqlalchemy").join("ext").join("__init__.py"), "").unwrap();
+        fs::write(
+            sp.join("sqlalchemy").join("ext").join("asyncio.py"),
+            "class SomethingElse: pass\n",
+        )
+        .unwrap();
+
+        let resolved = collect_resolved_twin_symbols(&dir);
+        assert!(
+            resolved.contains("aiohttp"),
+            "compiled .so package should resolve: {resolved:?}"
+        );
+        assert!(
+            resolved.contains("grpc.aio"),
+            "pyi subpackage should resolve: {resolved:?}"
+        );
+        assert!(
+            resolved.contains("httpx.AsyncClient"),
+            "re-export from .pyi + .pyd should resolve: {resolved:?}"
+        );
+        assert!(
+            !resolved.contains("sqlalchemy.ext.asyncio.AsyncSession"),
+            "submodule file missing AsyncSession must NOT resolve: {resolved:?}"
+        );
+
         let _ = fs::remove_dir_all(&dir);
     }
 }

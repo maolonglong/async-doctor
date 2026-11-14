@@ -47,6 +47,14 @@ pub struct ScanEnvironment {
     pub unresolved_third_party: u32,
     /// Distinct top-level third-party modules that resolved successfully.
     pub resolved_third_party: u32,
+    /// Up to [`Self::MAX_UNRESOLVED_THIRD_PARTY_MODULES`] sorted top-level
+    /// third-party module names that failed to import (omitted when empty).
+    #[serde(
+        rename = "unresolvedThirdPartyModules",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub unresolved_third_party_modules: Vec<String>,
     /// Short advisory when resolution may be degraded (empty when fine).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
@@ -64,6 +72,9 @@ impl ScanEnvironment {
     /// (unresolved + resolved) third-party heads, while a venv is active.
     pub const UNRESOLVED_RATIO_THRESHOLD: f64 = 0.25;
 
+    /// Maximum number of unresolved third-party module names surfaced in reports.
+    pub const MAX_UNRESOLVED_THIRD_PARTY_MODULES: usize = 10;
+
     pub fn none() -> Self {
         Self {
             kind: EnvironmentKind::None,
@@ -74,6 +85,7 @@ impl ScanEnvironment {
             frameworks: Vec::new(),
             unresolved_third_party: 0,
             resolved_third_party: 0,
+            unresolved_third_party_modules: Vec::new(),
             note: String::new(),
             follow_budget_skipped: 0,
         }
@@ -179,6 +191,7 @@ mod tests {
             frameworks: Vec::new(),
             unresolved_third_party: 98,
             resolved_third_party: 50,
+            unresolved_third_party_modules: Vec::new(),
             note: String::new(),
             follow_budget_skipped: 0,
         };
@@ -206,6 +219,7 @@ mod tests {
             frameworks: Vec::new(),
             unresolved_third_party: 2,
             resolved_third_party: 40,
+            unresolved_third_party_modules: Vec::new(),
             note: String::new(),
             follow_budget_skipped: 0,
         };

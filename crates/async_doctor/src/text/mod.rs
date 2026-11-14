@@ -17,7 +17,7 @@ use crate::paths::display_fs_path;
 use style::Palette;
 
 /// Default number of advice items shown before `--expand`.
-const TOP_ADVICE_SHOWN: usize = 10;
+pub(crate) const TOP_ADVICE_SHOWN: usize = 10;
 
 #[derive(Default)]
 pub struct TextOptions {
@@ -36,6 +36,21 @@ pub fn write_report(report: &Report, opts: TextOptions) -> anyhow::Result<()> {
     let stdout = std::io::stdout();
     let mut out = std::io::BufWriter::with_capacity(64 * 1024, stdout.lock());
     write_environment_banner(&mut out, &report.environment, &pal)?;
+    if !report.complete {
+        let warn = pal.rule_candidate;
+        if report.skipped.is_empty() {
+            writeln!(
+                out,
+                "{warn}warning: incomplete analysis (complete=false) — results may omit findings{warn:#}"
+            )?;
+        } else {
+            writeln!(
+                out,
+                "{warn}warning: incomplete analysis (complete=false; {} skipped) — results may omit findings{warn:#}",
+                report.skipped.len()
+            )?;
+        }
+    }
     if let Some(msg) = &report.message {
         writeln!(out, "{msg}")?;
     } else if report.findings.is_empty() {
@@ -155,7 +170,15 @@ pub fn write_report(report: &Report, opts: TextOptions) -> anyhow::Result<()> {
         }
     }
     if !note.is_empty() {
-        writeln!(out, "\nnote: {note}")?;
+        if report.environment.unresolved_third_party_modules.is_empty() {
+            writeln!(out, "\nnote: {note}")?;
+        } else {
+            writeln!(
+                out,
+                "\nnote: {note} (missing: {})",
+                report.environment.unresolved_third_party_modules.join(", ")
+            )?;
+        }
     }
     let skipped = report.environment.follow_budget_skipped;
     if skipped > 0 {

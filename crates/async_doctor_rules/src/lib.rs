@@ -28,6 +28,9 @@ pub const RULE_UNAWAITED_COROUTINE: &str = "unawaited-coroutine";
 pub const RULE_DANGLING_TASK: &str = "dangling-task";
 pub const RULE_EPHEMERAL_ASYNC_CLIENT: &str = "ephemeral-async-client";
 pub const RULE_SHARED_ASYNC_SESSION: &str = "shared-async-session";
+pub const RULE_OFFLOAD_STATEFUL_SESSION: &str = "offload-stateful-session";
+pub const RULE_USELESS_LOCAL_ASYNC_LOCK: &str = "useless-local-async-lock";
+pub const RULE_SWALLOWED_CANCELLED_ERROR: &str = "swallowed-cancelled-error";
 
 use async_doctor_core::SinkHit;
 
@@ -38,6 +41,7 @@ pub const RULE_BLOCKING_SUBPROCESS: &str = "blocking-subprocess";
 pub const RULE_BLOCKING_FILE: &str = "blocking-file";
 pub const RULE_BLOCKING_LOCK: &str = "blocking-lock";
 pub const RULE_BLOCKING_DB: &str = "blocking-db";
+pub const RULE_BLOCKING_CPU: &str = "blocking-cpu";
 
 pub fn blocking_sleep_fix_hint() -> &'static str {
     "Replace `time.sleep(...)` with `await asyncio.sleep(...)` \

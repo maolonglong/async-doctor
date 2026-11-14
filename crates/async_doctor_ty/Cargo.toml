@@ -28,4 +28,6 @@ ty_python_core = { workspace = true }
 ty_python_semantic = { workspace = true }
 ty_site_packages = { workspace = true }
 ty_vendored = { workspace = true }
+
+[dev-dependencies]
 tempfile = "3"

@@ -33,14 +33,17 @@ manifest-path = "crates/async_doctor/Cargo.toml"
 module-name = "async_doctor"
 # Console script name matches [[bin]] name = "async-doctor" in the crate.
 strip = true
-# rust-toolchain.toml is required so sdist builds pin the same toolchain.
-include = [{ path = "rust-toolchain.toml", format = "sdist" }]
+# rust-toolchain.toml and SKILL.md (bundled via include_str! in skill_cmd.rs)
+# are required so PyPI sdist builds compile cleanly.
+include = [
+    { path = "rust-toolchain.toml", format = "sdist" },
+    { path = "skills/async-doctor/SKILL.md", format = "sdist" },
+]
 exclude = [
     "fixtures/**",
     "target/**",
     "docs/**",
     "bench/**",
-    "skills/**",
     ".agents/**",
     ".claude/**",
     ".github/**",

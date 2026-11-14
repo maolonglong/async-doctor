@@ -437,3 +437,235 @@ fn scan_fingerprint_invalidates_on_outside_extra_path_and_pth_changes() {
 
     let _ = fs::remove_dir_all(&ws);
 }
+
+#[test]
+fn warm_package_cache_preserves_zero_edge_init_and_dist_packages_file_paths() {
+    let venv = fresh_cache_dir("zero-edge-file-venv");
+    let sp = venv.join("lib/python3.12/site-packages");
+    let dp = venv.join("lib/python3.12/dist-packages");
+    fs::create_dir_all(sp.join("zeropkg")).unwrap();
+    fs::create_dir_all(sp.join("zeropkg-1.0.0.dist-info")).unwrap();
+    fs::create_dir_all(dp.join("distpkg")).unwrap();
+    fs::create_dir_all(dp.join("distpkg-1.0.0.dist-info")).unwrap();
+    fs::write(venv.join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+
+    fs::write(
+        sp.join("zeropkg/__init__.py"),
+        "def noop():\n    return 1\n",
+    )
+    .unwrap();
+    fs::write(
+        sp.join("zeropkg-1.0.0.dist-info/METADATA"),
+        "Name: zeropkg\nVersion: 1.0.0\n",
+    )
+    .unwrap();
+    fs::write(
+        sp.join("zeropkg-1.0.0.dist-info/RECORD"),
+        "zeropkg/__init__.py,,\n",
+    )
+    .unwrap();
+
+    fs::write(
+        dp.join("distpkg/__init__.py"),
+        "def noop():\n    return 2\n",
+    )
+    .unwrap();
+    fs::write(
+        dp.join("distpkg-1.0.0.dist-info/METADATA"),
+        "Name: distpkg\nVersion: 1.0.0\n",
+    )
+    .unwrap();
+    fs::write(
+        dp.join("distpkg-1.0.0.dist-info/RECORD"),
+        "distpkg/__init__.py,,\n",
+    )
+    .unwrap();
+
+    let proj1 = temp_project(&[(
+        "app.py",
+        "import zeropkg, distpkg\nasync def h():\n    zeropkg.noop()\n    distpkg.noop()\n",
+    )]);
+    let proj2 = temp_project(&[(
+        "app.py",
+        "# warm pkg cache\nimport zeropkg, distpkg\nasync def h2():\n    zeropkg.noop()\n    distpkg.noop()\n",
+    )]);
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&venv, proj1.join(".venv")).unwrap();
+        std::os::unix::fs::symlink(&venv, proj2.join(".venv")).unwrap();
+    }
+
+    let cache = fresh_cache_dir("zero-edge-file-cache");
+    let cold = crate::extract_path_with_cache(&proj1, Some(&cache)).unwrap();
+    let warm = crate::extract_path_with_cache(&proj2, Some(&cache)).unwrap();
+
+    for (label, facts) in [("cold", &cold), ("warm", &warm)] {
+        let z = facts
+            .functions
+            .iter()
+            .find(|f| f.module == "zeropkg" && f.qualname == "noop")
+            .unwrap();
+        let d = facts
+            .functions
+            .iter()
+            .find(|f| f.module == "distpkg" && f.qualname == "noop")
+            .unwrap();
+        assert_eq!(
+            z.file, "site-packages/zeropkg/__init__.py",
+            "{label} zeropkg file"
+        );
+        assert_eq!(
+            d.file, "dist-packages/distpkg/__init__.py",
+            "{label} distpkg file"
+        );
+    }
+
+    let _ = fs::remove_dir_all(&proj1);
+    let _ = fs::remove_dir_all(&proj2);
+    let _ = fs::remove_dir_all(&venv);
+    let _ = fs::remove_dir_all(&cache);
+}
+
+#[test]
+fn warm_package_cache_resolves_cross_package_callbacks_independent_of_pkg_order() {
+    let venv = fresh_cache_dir("cb-order-venv");
+    let sp = venv.join("lib/python3.12/site-packages");
+    for d in [
+        "ahop",
+        "ahop-1.0.0.dist-info",
+        "liba",
+        "liba-1.0.0.dist-info",
+        "libb",
+        "libb-1.0.0.dist-info",
+    ] {
+        fs::create_dir_all(sp.join(d)).unwrap();
+    }
+    fs::write(venv.join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+
+    fs::write(
+        sp.join("ahop/__init__.py"),
+        "import liba\ndef hop():\n    liba.trigger()\n",
+    )
+    .unwrap();
+    fs::write(
+        sp.join("ahop-1.0.0.dist-info/METADATA"),
+        "Name: ahop\nVersion: 1.0.0\n",
+    )
+    .unwrap();
+    fs::write(
+        sp.join("ahop-1.0.0.dist-info/RECORD"),
+        "ahop/__init__.py,,\n",
+    )
+    .unwrap();
+
+    fs::write(
+        sp.join("liba/__init__.py"),
+        concat!(
+            "from libb import sync_pos, sync_kw\n",
+            "def run_cbs(pos_cb, *, kw_cb=None):\n",
+            "    pos_cb()\n",
+            "    if kw_cb is not None:\n",
+            "        kw_cb()\n",
+            "def trigger():\n",
+            "    run_cbs(sync_pos, kw_cb=sync_kw)\n",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        sp.join("liba-1.0.0.dist-info/METADATA"),
+        "Name: liba\nVersion: 1.0.0\n",
+    )
+    .unwrap();
+    fs::write(
+        sp.join("liba-1.0.0.dist-info/RECORD"),
+        "liba/__init__.py,,\n",
+    )
+    .unwrap();
+
+    fs::write(
+        sp.join("libb/__init__.py"),
+        concat!(
+            "import time\n",
+            "def sync_pos():\n    time.sleep(0.1)\n",
+            "def sync_kw():\n    open('x.txt')\n",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        sp.join("libb-1.0.0.dist-info/METADATA"),
+        "Name: libb\nVersion: 1.0.0\n",
+    )
+    .unwrap();
+    fs::write(
+        sp.join("libb-1.0.0.dist-info/RECORD"),
+        "libb/__init__.py,,\n",
+    )
+    .unwrap();
+
+    // Seed: Wave 0 extracts ahop.hop + libb.sync_pos + libb.sync_kw; Wave 1 extracts liba.trigger (seeing libb in def_map!).
+    let seed_proj = temp_project(&[(
+        "app.py",
+        concat!(
+            "import ahop, libb\n",
+            "async def seed_b():\n    libb.sync_pos()\n    libb.sync_kw()\n",
+            "async def seed_a():\n    ahop.hop()\n",
+        ),
+    )]);
+    // Warm: Wave 0 materializes liba BEFORE libb (`"liba" < "libb"`).
+    let warm_proj = temp_project(&[(
+        "app.py",
+        concat!(
+            "import liba, libb\n",
+            "async def route_a():\n    liba.trigger()\n",
+            "async def route_b():\n    libb.sync_pos()\n    libb.sync_kw()\n",
+        ),
+    )]);
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&venv, seed_proj.join(".venv")).unwrap();
+        std::os::unix::fs::symlink(&venv, warm_proj.join(".venv")).unwrap();
+    }
+
+    let cache = fresh_cache_dir("cb-order-cache");
+    let seeded = scan_path_with_cache(&seed_proj, Some(&cache)).unwrap();
+    let seed_a_rules: Vec<&str> = seeded
+        .findings
+        .iter()
+        .filter(|f| f.entry.name == "seed_a")
+        .map(|f| f.rule.as_str())
+        .collect();
+    assert!(
+        seed_a_rules.contains(&"blocking-sleep"),
+        "seed_a findings={seeded:?}"
+    );
+
+    let warm = scan_path_with_cache(&warm_proj, Some(&cache)).unwrap();
+    let route_a_findings: Vec<&str> = warm
+        .findings
+        .iter()
+        .filter(|f| f.entry.name == "route_a")
+        .map(|f| f.rule.as_str())
+        .collect();
+    assert!(
+        route_a_findings.contains(&"blocking-sleep"),
+        "warm positional callback must survive liba < libb order: {:?}",
+        warm.findings
+    );
+    let route_a_cands: Vec<&str> = warm
+        .candidates
+        .iter()
+        .filter(|c| c.entry.name == "route_a")
+        .map(|c| c.rule.as_str())
+        .collect();
+    assert!(
+        !route_a_cands.is_empty() || route_a_findings.len() >= 2,
+        "warm keyword callback must survive liba < libb order: findings={:?} candidates={:?}",
+        warm.findings,
+        warm.candidates
+    );
+
+    let _ = fs::remove_dir_all(&seed_proj);
+    let _ = fs::remove_dir_all(&warm_proj);
+    let _ = fs::remove_dir_all(&venv);
+    let _ = fs::remove_dir_all(&cache);
+}

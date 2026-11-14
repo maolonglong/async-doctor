@@ -15,11 +15,13 @@ use crate::graph::{
 use crate::id::{FindingIdParts, fix_group_id};
 use crate::report::{Advice, AdviceCategory, ChainStep, Entry, Fix};
 
+use super::SinkTable;
 use super::anti_pattern_advice::collect_anti_pattern_advice;
 use super::grade::{
-    chain_step_for, resolution_for_edge, shortest_paths_to_async_entries, unique_site_finding_id,
+    ClassInitIndex, ItemSpanMap, chain_step_for, collect_item_spans, resolution_for_edge,
+    shortest_paths_to_async_entries, unique_site_finding_id,
 };
-use super::{AsyncTwinHit, SinkTable};
+use super::sync_callers::{SyncCallerIndex, twin_lookup_key, twin_resolves};
 
 pub(super) const RULE_OFFLOAD_HAS_ASYNC_TWIN: &str = "offload-has-async-twin";
 
@@ -28,12 +30,12 @@ pub(super) fn collect_offload_twin_advice(
     facts: &ProjectFacts,
     sinks: &dyn SinkTable,
     reverse: &[Vec<usize>],
+    sync_callers: &SyncCallerIndex,
     include_non_production: bool,
+    class_inits: &ClassInitIndex,
+    item_spans: &mut ItemSpanMap,
 ) -> Vec<Advice> {
-    let edges_by_caller = build_edges_by_caller(facts);
-    let callers_of = build_callee_index(facts);
-    let async_reachable = functions_reachable_from_async_entries(facts, &edges_by_caller);
-    let sync_only_callers = sync_non_async_reachable_callers(facts, &async_reachable);
+    let edges_by_caller = sync_callers.edges_by_caller();
 
     let mut advice = Vec::new();
     let mut emitted = HashSet::new();
@@ -45,7 +47,7 @@ pub(super) fn collect_offload_twin_advice(
         };
         if !edge.is_offload_wrapper {
             continue;
-        }
+        };
         // Eager `to_thread(f())` is a finding path, not a cut of `f`.
         if edge.is_eager_offload_arg {
             continue;
@@ -62,12 +64,13 @@ pub(super) fn collect_offload_twin_advice(
 
         // Sync-caller exemption: target also invoked from sync code that is
         // not async-reachable — switching to an async twin would break it.
-        if target_has_sync_only_caller(facts, &target, &sync_only_callers, edge_idx, &callers_of) {
+        if let OffloadTarget::Project(target_id) = &target
+            && sync_callers.has_sync_only_caller(facts, *target_id, Some(edge_idx))
+        {
             continue;
         }
 
-        let Some(reached) =
-            unconditional_sinks_from_target(facts, sinks, &edges_by_caller, &target)
+        let Some(reached) = unconditional_sinks_from_target(facts, sinks, edges_by_caller, &target)
         else {
             continue;
         };
@@ -158,6 +161,10 @@ pub(super) fn collect_offload_twin_advice(
             ) else {
                 continue;
             };
+            item_spans.insert(
+                id.clone(),
+                collect_item_spans(facts, class_inits, &path, edge),
+            );
 
             let target_desc = match &target {
                 OffloadTarget::Project(fid) => facts.function(*fid).full_qualname(),
@@ -202,6 +209,8 @@ pub(super) fn collect_offload_twin_advice(
         facts,
         reverse,
         include_non_production,
+        class_inits,
+        item_spans,
         &mut advice,
         &mut emitted_sites,
         &mut emitted,
@@ -260,125 +269,6 @@ fn resolve_offload_target(
     None
 }
 
-fn twin_resolves(facts: &ProjectFacts, twin: &AsyncTwinHit) -> bool {
-    if !facts.resolved_symbols.contains(twin.symbol) {
-        return false;
-    }
-    if !twin
-        .needs
-        .iter()
-        .all(|n| facts.resolved_symbols.contains(*n))
-    {
-        return false;
-    }
-    twin.any_needs.is_empty()
-        || twin
-            .any_needs
-            .iter()
-            .any(|n| facts.resolved_symbols.contains(*n))
-}
-
-/// Index: caller → non-offload edge indices.
-fn build_edges_by_caller(facts: &ProjectFacts) -> HashMap<FunctionId, Vec<usize>> {
-    let mut index: HashMap<FunctionId, Vec<usize>> = HashMap::new();
-    for (idx, edge) in facts.edges.iter().enumerate() {
-        if edge.is_offload_wrapper {
-            continue;
-        }
-        index.entry(edge.caller).or_default().push(idx);
-    }
-    index
-}
-
-/// Index: callee FunctionId → edge indices that invoke it (non-offload).
-fn build_callee_index(facts: &ProjectFacts) -> HashMap<FunctionId, Vec<usize>> {
-    let mut index: HashMap<FunctionId, Vec<usize>> = HashMap::new();
-    for (idx, edge) in facts.edges.iter().enumerate() {
-        if edge.is_offload_wrapper {
-            continue;
-        }
-        if let CalleeRef::Project(fid) = edge.callee {
-            index.entry(fid).or_default().push(idx);
-        }
-        for fid in edge.positional_callables.iter().flatten() {
-            index.entry(*fid).or_default().push(idx);
-        }
-    }
-    index
-}
-
-fn functions_reachable_from_async_entries(
-    facts: &ProjectFacts,
-    edges_by_caller: &HashMap<FunctionId, Vec<usize>>,
-) -> HashSet<FunctionId> {
-    let mut reach = HashSet::new();
-    let mut queue = VecDeque::new();
-    for f in &facts.functions {
-        if f.is_async && !f.is_sync_route && !f.is_third_party && reach.insert(f.id) {
-            queue.push_back(f.id);
-        }
-    }
-    while let Some(id) = queue.pop_front() {
-        let Some(edges) = edges_by_caller.get(&id) else {
-            continue;
-        };
-        for &eidx in edges {
-            let CalleeRef::Project(callee) = facts.edges[eidx].callee else {
-                continue;
-            };
-            if reach.insert(callee) {
-                queue.push_back(callee);
-            }
-        }
-    }
-    reach
-}
-
-fn sync_non_async_reachable_callers(
-    facts: &ProjectFacts,
-    async_reachable: &HashSet<FunctionId>,
-) -> HashSet<FunctionId> {
-    let mut out = HashSet::new();
-    for f in &facts.functions {
-        if f.is_async || f.is_third_party {
-            continue;
-        }
-        if !async_reachable.contains(&f.id) {
-            out.insert(f.id);
-        }
-    }
-    out
-}
-
-fn target_has_sync_only_caller(
-    facts: &ProjectFacts,
-    target: &OffloadTarget,
-    sync_only: &HashSet<FunctionId>,
-    offload_edge_idx: usize,
-    callers_of: &HashMap<FunctionId, Vec<usize>>,
-) -> bool {
-    let OffloadTarget::Project(target_id) = target else {
-        // External direct offload — no project body shared with sync callers.
-        return false;
-    };
-    let Some(edge_idxs) = callers_of.get(target_id) else {
-        return false;
-    };
-    for &idx in edge_idxs {
-        if idx == offload_edge_idx {
-            continue;
-        }
-        let edge = &facts.edges[idx];
-        if edge.is_offload_wrapper {
-            continue;
-        }
-        if sync_only.contains(&edge.caller) {
-            return true;
-        }
-    }
-    false
-}
-
 /// Forward walk from the offload target collecting unconditional External sinks.
 ///
 /// Returns `None` when a non-twin-eligible / excluded sink is reached, or when
@@ -423,7 +313,7 @@ fn unconditional_sinks_from_target(
                     if edge.conditions.iter().any(|c| c.is_branch_like()) {
                         continue;
                     }
-                    if edge.param_guard.is_some() {
+                    if !edge.param_guards.is_empty() {
                         continue;
                     }
                     match &edge.callee {
@@ -474,30 +364,4 @@ fn unconditional_sinks_from_target(
     }
 
     Some(sink_quals)
-}
-
-/// Qualname to use for twin lookup: prefer the concrete call site, else the
-/// canonical sink qualname from the sink table.
-///
-/// When `constructed_receiver` is a known sync client (e.g. `openai.AzureOpenAI`),
-/// prefer that over a shared `openai.resources.*` key so the hint names the
-/// matching async client (`AsyncAzureOpenAI`).
-fn twin_lookup_key(
-    sinks: &dyn SinkTable,
-    qualname: &str,
-    constructed_receiver: Option<&str>,
-) -> Option<String> {
-    if let Some(recv) = constructed_receiver
-        && sinks.async_twin(recv).is_some()
-    {
-        return Some(recv.to_string());
-    }
-    if sinks.async_twin(qualname).is_some() {
-        return Some(qualname.to_string());
-    }
-    let hit = sinks.lookup(qualname)?;
-    if sinks.async_twin(hit.sink_qualname).is_some() {
-        return Some(hit.sink_qualname.to_string());
-    }
-    None
 }

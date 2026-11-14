@@ -363,3 +363,181 @@ async def handler() -> None:
         facts.unresolved_third_party_modules
     );
 }
+
+#[test]
+fn bare_param_is_not_none_does_not_tag_cache_miss_dependent() {
+    let dir = temp_project(&[(
+        "cache_guard.py",
+        r#"
+import time
+
+_GLOBAL_CACHE = None
+_DICT_CACHE: dict[str, int | None] = {}
+
+class Holder:
+    def __init__(self) -> None:
+        self._cache: int | None = None
+
+    async def attr_cache_hit(self) -> int:
+        if self._cache is not None:
+            return self._cache
+        time.sleep(1)
+        self._cache = 1
+        return 1
+
+def load_with_param(token: str | None) -> str:
+    if token is not None:
+        return token
+    time.sleep(1)
+    return "loaded"
+
+async def param_early_return_not_cache(v: str | None) -> str:
+    return load_with_param(v)
+
+async def global_cache_hit() -> int:
+    if _GLOBAL_CACHE is not None:
+        return _GLOBAL_CACHE
+    time.sleep(1)
+    return 1
+
+async def subscript_cache_hit(k: str) -> int:
+    val = _DICT_CACHE.get(k)
+    if _DICT_CACHE[k] is not None:
+        return val or 1
+    time.sleep(1)
+    return 1
+"#,
+    )]);
+    let report = scan_path(&dir).unwrap();
+    let _ = fs::remove_dir_all(&dir);
+
+    let param_finding = report
+        .findings
+        .iter()
+        .find(|f| f.entry.name == "param_early_return_not_cache")
+        .expect("param_early_return_not_cache finding");
+    assert!(
+        !param_finding
+            .conditions
+            .iter()
+            .any(|c| c == "cache_miss_dependent"),
+        "ordinary parameter `if token is not None: return` must NOT tag cache_miss_dependent: {:?}",
+        param_finding.conditions
+    );
+    assert!(
+        param_finding.conditions.iter().any(|c| c == "async-branch"),
+        "expected async-branch on parameter early return: {:?}",
+        param_finding.conditions
+    );
+
+    for cache_entry in [
+        "Holder.attr_cache_hit",
+        "global_cache_hit",
+        "subscript_cache_hit",
+    ] {
+        let finding = report
+            .findings
+            .iter()
+            .find(|f| f.entry.name == cache_entry)
+            .unwrap_or_else(|| panic!("missing finding for {cache_entry}: {:?}", report.findings));
+        assert!(
+            finding
+                .conditions
+                .iter()
+                .any(|c| c == "cache_miss_dependent"),
+            "{cache_entry} must retain cache_miss_dependent: {:?}",
+            finding.conditions
+        );
+    }
+}
+
+#[test]
+fn ephemeral_async_openai_and_anthropic_emit_advice() {
+    let dir = temp_project(&[
+        (".venv/pyvenv.cfg", "home = /usr/bin\n"),
+        (
+            ".venv/lib/python3.12/site-packages/openai/__init__.py",
+            concat!(
+                "class AsyncOpenAI:\n",
+                "    def __init__(self, *, http_client=None, api_key=None):\n",
+                "        pass\n",
+                "    async def __aenter__(self):\n",
+                "        return self\n",
+                "    async def __aexit__(self, *args):\n",
+                "        pass\n",
+                "    async def close(self):\n",
+                "        pass\n",
+            ),
+        ),
+        (
+            ".venv/lib/python3.12/site-packages/anthropic/__init__.py",
+            concat!(
+                "class AsyncAnthropic:\n",
+                "    def __init__(self, *, http_client=None, api_key=None):\n",
+                "        pass\n",
+                "    async def __aenter__(self):\n",
+                "        return self\n",
+                "    async def __aexit__(self, *args):\n",
+                "        pass\n",
+                "    async def close(self):\n",
+                "        pass\n",
+            ),
+        ),
+        (
+            "routes.py",
+            r#"
+import anthropic
+import openai
+
+class App:
+    def get(self, path: str):
+        def deco(fn):
+            return fn
+        return deco
+
+app = App()
+
+@app.get("/openai")
+async def openai_with_route():
+    async with openai.AsyncOpenAI() as client:
+        _ = client
+
+@app.get("/anthropic")
+async def anthropic_close_route():
+    client = anthropic.AsyncAnthropic()
+    await client.close()
+
+@app.get("/shared")
+async def shared_http_client_ok(shared):
+    async with openai.AsyncOpenAI(http_client=shared) as c1:
+        _ = c1
+    c2 = anthropic.AsyncAnthropic(http_client=shared)
+    await c2.close()
+"#,
+        ),
+    ]);
+    let report = scan_path(&dir).unwrap();
+    let _ = fs::remove_dir_all(&dir);
+
+    let advice_entries: std::collections::BTreeSet<_> = report
+        .advice
+        .iter()
+        .filter(|a| a.rule == "ephemeral-async-client")
+        .map(|a| a.entry.name.as_str())
+        .collect();
+    assert!(
+        advice_entries.contains("openai_with_route"),
+        "AsyncOpenAI per-route async with must emit ephemeral-async-client: {:?}",
+        report.advice
+    );
+    assert!(
+        advice_entries.contains("anthropic_close_route"),
+        "AsyncAnthropic per-route + close() must emit ephemeral-async-client: {:?}",
+        report.advice
+    );
+    assert!(
+        !advice_entries.contains("shared_http_client_ok"),
+        "http_client=shared must not emit ephemeral-async-client: {:?}",
+        report.advice
+    );
+}

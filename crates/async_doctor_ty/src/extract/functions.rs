@@ -12,6 +12,7 @@ use super::ctx::{DefKey, scope_qualname};
 pub(crate) struct Pass1Fn {
     pub(crate) name_start: u32,
     pub(crate) line: u32,
+    pub(crate) end_line: u32,
     pub(crate) qualname: String,
     pub(crate) is_async: bool,
     pub(crate) is_generator: bool,
@@ -80,9 +81,11 @@ pub(crate) fn collect_functions_standalone(index: &LineIndex, suite: &[Stmt]) ->
                         .map(|a| a.parameter.name.as_str().to_string())
                         .collect();
                     let line: OneIndexed = self.index.line_index(func.name.range.start());
+                    let end_line: OneIndexed = self.index.line_index(func.range.end());
                     self.data.functions.push(Pass1Fn {
                         name_start,
                         line: line.get() as u32,
+                        end_line: end_line.get() as u32,
                         qualname,
                         is_async: func.is_async,
                         is_generator: body_has_yield(&func.body),
@@ -178,6 +181,7 @@ pub(crate) fn merge_pass1_file_data(
             id,
             file: rel.to_string(),
             line: f.line,
+            end_line: f.end_line,
             module: module.to_string(),
             qualname: f.qualname,
             is_async: f.is_async,
@@ -253,7 +257,6 @@ pub(crate) fn decorator_is_route(expr: &Expr) -> bool {
                     | "api_route"
                     | "websocket"
                     | "websocket_route"
-                    | "on_event"
             )
         }
         Expr::Name(name) => matches!(

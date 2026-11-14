@@ -9,13 +9,57 @@ use crate::extract::ctx::DefKey;
 
 impl<'a, 'db> CallCollector<'a, 'db> {
     pub(crate) fn note_local_assign(&mut self, assign: &'a ast::StmtAssign) {
-        if assign.targets.len() != 1 {
+        if assign.targets.len() == 1
+            && let Expr::Name(n) = &assign.targets[0]
+        {
+            self.note_local_binding(n.id.as_str(), &assign.value);
             return;
         }
-        let Expr::Name(n) = &assign.targets[0] else {
-            return;
-        };
-        self.note_local_binding(n.id.as_str(), &assign.value);
+        // Unpacked or chained targets (`sock, addr = srv.accept()`, `a = b = x`)
+        // invalidate stale proven-safe local bindings on every bound name.
+        for target in &assign.targets {
+            self.invalidate_unpacked_target(target);
+        }
+    }
+
+    fn invalidate_unpacked_target(&mut self, target: &Expr) {
+        match target {
+            Expr::Name(n) => {
+                let name = n.id.as_str();
+                self.invalidate_future_done_receiver(name);
+                self.async_with_receivers.remove(name);
+                self.narrowed_locals.remove(name);
+                self.local_lambdas.remove(name);
+                self.local_genexprs.remove(name);
+                self.idle_loop_locals.remove(name);
+                self.unbounded_queues.remove(name);
+                self.boto_receivers.remove(name);
+                self.boto_session_receivers.remove(name);
+                self.aio_boto_receivers.remove(name);
+                self.running_loop_locals.remove(name);
+                self.event_loop_locals.remove(name);
+                self.buffer_locals.remove(name);
+                self.in_memory_archive_receivers.remove(name);
+                self.local_ephemeral_clients.remove(name);
+                self.local_stateful_sessions.remove(name);
+                self.in_memory_sqlite_vars.remove(name);
+                self.nonblocking_socket_vars.remove(name);
+                self.local_partials.remove(name);
+                self.context_locals.remove(name);
+            }
+            Expr::Tuple(t) => {
+                for elt in &t.elts {
+                    self.invalidate_unpacked_target(elt);
+                }
+            }
+            Expr::List(l) => {
+                for elt in &l.elts {
+                    self.invalidate_unpacked_target(elt);
+                }
+            }
+            Expr::Starred(s) => self.invalidate_unpacked_target(&s.value),
+            _ => {}
+        }
     }
 
     pub(crate) fn note_local_binding(&mut self, name: &str, value: &'a Expr) {
@@ -38,6 +82,10 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 self.in_memory_archive_receivers.remove(name);
                 self.local_ephemeral_clients.remove(name);
                 self.local_stateful_sessions.remove(name);
+                self.in_memory_sqlite_vars.remove(name);
+                self.nonblocking_socket_vars.remove(name);
+                self.local_partials.remove(name);
+                self.context_locals.remove(name);
             }
             Expr::Generator(gexpr) => {
                 self.local_genexprs
@@ -55,6 +103,10 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 self.in_memory_archive_receivers.remove(name);
                 self.local_ephemeral_clients.remove(name);
                 self.local_stateful_sessions.remove(name);
+                self.in_memory_sqlite_vars.remove(name);
+                self.nonblocking_socket_vars.remove(name);
+                self.local_partials.remove(name);
+                self.context_locals.remove(name);
             }
             other => {
                 self.local_lambdas.remove(name);
@@ -71,6 +123,10 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 self.note_archive_binding(name, other);
                 self.note_ephemeral_client_binding(name, other);
                 self.note_stateful_session_binding(name, other);
+                self.note_sqlite_binding(name, other);
+                self.note_socket_binding(name, other);
+                self.note_context_binding(name, other);
+                self.note_partial_binding(name, other);
             }
         }
     }
@@ -140,6 +196,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             id,
             file: self.ctx.rel.clone(),
             line: self.ctx.line_of(lam.range.start()),
+            end_line: self.ctx.line_of(lam.range.end()),
             module: self.ctx.module.clone(),
             qualname,
             is_async: false,

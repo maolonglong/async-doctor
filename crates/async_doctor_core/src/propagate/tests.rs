@@ -2,8 +2,12 @@
 
 use std::collections::HashSet;
 
+use super::grade::reconcile_conditions;
 use super::*;
-use crate::graph::{CallEdge, CallKind, FunctionFact, LiteralArg, ParamGuard, ProjectFacts};
+use crate::graph::{
+    CallEdge, CallKind, ConditionTag, FunctionFact, FunctionId, LiteralArg, ParamGuard,
+    ProjectFacts,
+};
 use crate::report::EntryLabel;
 
 struct TestSinks;
@@ -75,6 +79,7 @@ fn fn_fact(id: u32, name: &str, is_async: bool, file: &str, line: u32) -> Functi
         id: FunctionId(id),
         file: file.into(),
         line,
+        end_line: line,
         module: "m".into(),
         qualname: name.into(),
         is_async,
@@ -110,12 +115,12 @@ fn edge(
         occurrence: 0,
         is_offload_wrapper: false,
         positional_literals: vec![],
-        keyword_true: vec![],
+        keyword_literals: vec![],
         positional_callables: vec![],
         positional_externals: vec![],
         positional_constructed_receivers: vec![],
         keyword_callables: vec![],
-        param_guard: None,
+        param_guards: vec![],
         is_awaited: false,
         callee_is_coroutine: None,
         is_eager_offload_arg: false,
@@ -179,10 +184,10 @@ fn param_guard_unknown_becomes_candidate() {
                     "time.sleep(1)",
                     vec![ConditionTag::AsyncBranch],
                 );
-                e.param_guard = Some(ParamGuard {
+                e.param_guards = vec![ParamGuard {
                     index: 0,
                     inverted: false,
-                });
+                }];
                 e
             },
         ],
@@ -212,10 +217,10 @@ fn entry_local_param_guard_stays_finding() {
                 "time.sleep(1)",
                 vec![ConditionTag::AsyncBranch],
             );
-            e.param_guard = Some(ParamGuard {
+            e.param_guards = vec![ParamGuard {
                 index: 0,
                 inverted: false,
-            });
+            }];
             e
         }],
         complete: true,
@@ -260,10 +265,10 @@ fn param_guard_false_literal_skipped() {
                     "time.sleep(1)",
                     vec![ConditionTag::AsyncBranch],
                 );
-                e.param_guard = Some(ParamGuard {
+                e.param_guards = vec![ParamGuard {
                     index: 0,
                     inverted: false,
-                });
+                }];
                 e
             },
         ],

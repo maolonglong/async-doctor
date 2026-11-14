@@ -4,6 +4,7 @@ mod cache;
 mod db;
 mod doctor_system;
 mod encoding;
+mod env_discovery;
 mod env_info;
 mod extract;
 mod scan;
@@ -14,12 +15,12 @@ mod timing;
 mod twin_resolve;
 
 pub use db::AsyncDoctorDb;
-pub use env_info::discover_scan_environment;
+pub use env_info::{discover_scan_environment, discover_scan_environment_with_python};
 pub use extract::{discover_python_files, extract_path, extract_path_with_cache};
 pub use scan::{
-    scan_path, scan_path_with_cache, scan_path_with_options, scan_path_with_options_and_cache,
+    ScanOptions, scan_path, scan_path_with_cache, scan_path_with_options,
+    scan_path_with_options_and_cache, scan_path_with_scan_options,
 };
-pub use scan_cache::take_ignore_candidate_files;
 
 #[cfg(test)]
 mod hermetic_env;

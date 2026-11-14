@@ -2,10 +2,13 @@
 //!
 //! Zero-config: comments only, no config file. A reason is required. Unused
 //! suppressions are reported so agents do not leave dead ignores behind.
-//! Comment detection uses a whole-file Python lexical scanner so `#` inside
-//! single- or multi-line string literals is ignored, trailing ignores on the
-//! closing line of multi-line calls match the call start line, and standalone
-//! ignores above `@decorator` stacks match the decorated `async def`.
+//! Comment detection uses a whole-file Python lexical scanner (`suppress/lexer.rs`)
+//! so `#` inside single- or multi-line string literals is ignored, trailing
+//! ignores on the closing line of multi-line calls match the call start line,
+//! standalone ignores above `@decorator` stacks match the decorated `async def`,
+//! and stacked pragmas / comma-separated rule lists work out of the box.
+
+mod lexer;
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -14,14 +17,17 @@ use std::path::{Path, PathBuf};
 use async_doctor_core::{Report, UnusedSuppression};
 
 use crate::paths::{normalize_path, paths_equal};
+use lexer::{ParseResult, parse_file};
 
-/// One suppression comment in source.
+/// One suppression comment rule in source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Suppression {
     pub file: String,
     pub line: u32,
     pub rule: String,
     pub reason: String,
+    /// True when the ignore comment appeared on its own line with no code before `#`.
+    pub standalone: bool,
     /// Additional target line after skipping `@decorator` lines below a
     /// standalone ignore comment.
     pub decorated_def_line: Option<u32>,
@@ -230,378 +236,11 @@ fn matching_suppression<'a>(
 }
 
 impl Suppression {
-    fn matches_line(&self, line: u32) -> bool {
+    pub(crate) fn matches_line(&self, line: u32) -> bool {
         self.line == line
-            || self.line + 1 == line
+            || (self.standalone && self.line + 1 == line)
             || self.decorated_def_line == Some(line)
             || self.covered_lines.contains(&line)
-    }
-}
-
-#[derive(Debug, Default)]
-struct ParseResult {
-    suppressions: Vec<Suppression>,
-    missing_reason: Vec<MissingReasonIgnore>,
-}
-
-#[derive(Debug, Default, Clone)]
-struct LineScanInfo {
-    has_code_before_comment: bool,
-    is_decorator_line: bool,
-    comment_range: Option<(usize, usize)>,
-    depth_at_comment: usize,
-    stmt_start_at_comment: Option<u32>,
-    closed_open_lines: Vec<u32>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LexState {
-    Code,
-    SingleString { quote: u8 },
-    TripleString { quote: u8 },
-}
-
-fn parse_file(file: &str, source: &str) -> ParseResult {
-    let lines = scan_python_lines(source);
-    let norm_file = normalize_path(file);
-    let mut out = ParseResult::default();
-
-    for idx in 1..lines.len() {
-        let line_no = idx as u32;
-        let info = &lines[idx];
-        let Some((start, end)) = info.comment_range else {
-            continue;
-        };
-        let comment = source[start..end].trim();
-        match parse_ignore_comment(comment) {
-            IgnoreParse::Suppression { rule, reason } => {
-                let decorated_def_line = if !info.has_code_before_comment {
-                    find_decorated_target_line(&lines, idx)
-                } else {
-                    None
-                };
-                let mut covered_lines = Vec::new();
-                if info.has_code_before_comment {
-                    for &open_line in &info.closed_open_lines {
-                        if open_line < line_no && !covered_lines.contains(&open_line) {
-                            covered_lines.push(open_line);
-                        }
-                    }
-                    // Multi-line statement finishing at bracket depth 0 (e.g.
-                    // `client.users(\n...\n).fetch(\n...\n)  # ignore`): cover
-                    // the statement's starting line as well.
-                    if info.depth_at_comment == 0
-                        && info.closed_open_lines.iter().any(|&l| l < line_no)
-                        && let Some(stmt_start) = info.stmt_start_at_comment
-                    {
-                        for l in stmt_start..line_no {
-                            if !covered_lines.contains(&l) {
-                                covered_lines.push(l);
-                            }
-                        }
-                    }
-                }
-                out.suppressions.push(Suppression {
-                    file: norm_file.clone(),
-                    line: line_no,
-                    rule,
-                    reason,
-                    decorated_def_line,
-                    covered_lines,
-                });
-            }
-            IgnoreParse::MissingReason { rule } => {
-                out.missing_reason.push(MissingReasonIgnore {
-                    file: norm_file.clone(),
-                    line: line_no,
-                    rule,
-                });
-            }
-            IgnoreParse::None => {}
-        }
-    }
-    out
-}
-
-/// If standalone comment at `comment_line` is immediately followed by one or
-/// more `@decorator` lines (including multi-line `@dec(...)` spans), return the
-/// line number of the `def` / `async def` immediately after the decorator block.
-fn find_decorated_target_line(lines: &[LineScanInfo], comment_line: usize) -> Option<u32> {
-    let mut cursor = comment_line + 1;
-    let mut saw_decorator = false;
-    while cursor < lines.len() {
-        let info = &lines[cursor];
-        if info.is_decorator_line {
-            saw_decorator = true;
-            cursor += 1;
-            continue;
-        }
-        // Skip comment-only lines nestled between decorators.
-        if !info.has_code_before_comment && info.comment_range.is_some() && saw_decorator {
-            cursor += 1;
-            continue;
-        }
-        break;
-    }
-    if saw_decorator && cursor < lines.len() {
-        Some(cursor as u32)
-    } else {
-        None
-    }
-}
-
-/// Single-pass whole-file Python lexer tracking string literals across lines,
-/// bracket nesting, logical statement starts, and `@decorator` spans.
-///
-/// Returned Vec is 1-indexed (`lines[1]` is line 1).
-fn scan_python_lines(source: &str) -> Vec<LineScanInfo> {
-    let bytes = source.as_bytes();
-    let total_lines = bytes.iter().filter(|&&b| b == b'\n').count() + 2;
-    let mut lines = vec![LineScanInfo::default(); total_lines];
-
-    let mut state = LexState::Code;
-    let mut line_no: usize = 1;
-    let mut first_token_on_line = true;
-    let mut bracket_stack: Vec<(u8, u32)> = Vec::new();
-    let mut current_stmt_start: Option<u32> = None;
-    let mut in_decorator_stmt = false;
-    let mut line_continuation = false;
-
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        match state {
-            LexState::SingleString { quote } => {
-                if b == b'\\' {
-                    if i + 1 < bytes.len() {
-                        if bytes[i + 1] == b'\n' {
-                            line_no += 1;
-                            first_token_on_line = false;
-                        }
-                        i += 2;
-                    } else {
-                        i += 1;
-                    }
-                    continue;
-                }
-                if b == quote {
-                    state = LexState::Code;
-                    i += 1;
-                    continue;
-                }
-                if b == b'\n' {
-                    // Unterminated single-line string: recover at newline.
-                    state = LexState::Code;
-                    line_no += 1;
-                    first_token_on_line = true;
-                    if bracket_stack.is_empty() {
-                        current_stmt_start = None;
-                        in_decorator_stmt = false;
-                    }
-                    i += 1;
-                    continue;
-                }
-                i += 1;
-            }
-            LexState::TripleString { quote } => {
-                if b == b'\\' {
-                    if i + 1 < bytes.len() {
-                        if bytes[i + 1] == b'\n' {
-                            line_no += 1;
-                            first_token_on_line = false;
-                        }
-                        i += 2;
-                    } else {
-                        i += 1;
-                    }
-                    continue;
-                }
-                if matches_triple(bytes, i, quote) {
-                    state = LexState::Code;
-                    i += 3;
-                    continue;
-                }
-                if b == b'\n' {
-                    line_no += 1;
-                    first_token_on_line = false;
-                    i += 1;
-                    continue;
-                }
-                i += 1;
-            }
-            LexState::Code => {
-                if b == b'\n' {
-                    if !line_continuation && bracket_stack.is_empty() {
-                        current_stmt_start = None;
-                        in_decorator_stmt = false;
-                    }
-                    line_continuation = false;
-                    line_no += 1;
-                    first_token_on_line = true;
-                    if in_decorator_stmt {
-                        lines[line_no].is_decorator_line = true;
-                    }
-                    i += 1;
-                    continue;
-                }
-                if b == b' ' || b == b'\t' || b == b'\r' || b == 0x0c {
-                    i += 1;
-                    continue;
-                }
-                if b == b'\\' {
-                    line_continuation = true;
-                    i += 1;
-                    continue;
-                }
-                if b == b'#' {
-                    let start = i + 1;
-                    let mut end = start;
-                    while end < bytes.len() && bytes[end] != b'\n' {
-                        end += 1;
-                    }
-                    let trimmed_end = if end > start && bytes[end - 1] == b'\r' {
-                        end - 1
-                    } else {
-                        end
-                    };
-                    let info = &mut lines[line_no];
-                    info.comment_range = Some((start, trimmed_end));
-                    info.depth_at_comment = bracket_stack.len();
-                    info.stmt_start_at_comment = current_stmt_start;
-                    i = end;
-                    continue;
-                }
-
-                line_continuation = false;
-                lines[line_no].has_code_before_comment = true;
-                if current_stmt_start.is_none() {
-                    current_stmt_start = Some(line_no as u32);
-                }
-                if first_token_on_line {
-                    first_token_on_line = false;
-                    if b == b'@' && bracket_stack.is_empty() {
-                        in_decorator_stmt = true;
-                        lines[line_no].is_decorator_line = true;
-                    } else if in_decorator_stmt {
-                        lines[line_no].is_decorator_line = true;
-                    }
-                }
-
-                if let Some((quote_pos, quote, is_triple)) = string_start(bytes, i) {
-                    state = if is_triple {
-                        i = quote_pos + 3;
-                        LexState::TripleString { quote }
-                    } else {
-                        i = quote_pos + 1;
-                        LexState::SingleString { quote }
-                    };
-                    continue;
-                }
-
-                match b {
-                    b'(' | b'[' | b'{' => {
-                        bracket_stack.push((b, line_no as u32));
-                    }
-                    b')' | b']' | b'}' => {
-                        let expected = match b {
-                            b')' => b'(',
-                            b']' => b'[',
-                            _ => b'{',
-                        };
-                        if let Some(pos) = bracket_stack
-                            .iter()
-                            .rposition(|(open, _)| *open == expected)
-                        {
-                            let (_, open_line) = bracket_stack[pos];
-                            bracket_stack.truncate(pos);
-                            lines[line_no].closed_open_lines.push(open_line);
-                        }
-                    }
-                    b';' if bracket_stack.is_empty() => {
-                        current_stmt_start = None;
-                        in_decorator_stmt = false;
-                    }
-                    _ => {}
-                }
-                i += 1;
-            }
-        }
-    }
-
-    lines
-}
-
-fn matches_triple(bytes: &[u8], i: usize, quote: u8) -> bool {
-    i + 3 <= bytes.len() && bytes[i] == quote && bytes[i + 1] == quote && bytes[i + 2] == quote
-}
-
-fn string_start(bytes: &[u8], i: usize) -> Option<(usize, u8, bool)> {
-    let mut j = i;
-    while j < bytes.len()
-        && matches!(
-            bytes[j],
-            b'r' | b'R' | b'f' | b'F' | b'b' | b'B' | b'u' | b'U'
-        )
-    {
-        j += 1;
-    }
-    if j < bytes.len() && (bytes[j] == b'\'' || bytes[j] == b'"') {
-        if j > i && i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_') {
-            return None;
-        }
-        let q = bytes[j];
-        let triple = matches_triple(bytes, j, q);
-        return Some((j, q, triple));
-    }
-    None
-}
-
-enum IgnoreParse {
-    Suppression { rule: String, reason: String },
-    MissingReason { rule: String },
-    None,
-}
-
-fn parse_ignore_comment(comment: &str) -> IgnoreParse {
-    let rest = match comment
-        .strip_prefix("async-doctor:")
-        .or_else(|| comment.strip_prefix("async-doctor :"))
-    {
-        Some(r) => r.trim_start(),
-        None => return IgnoreParse::None,
-    };
-    let rest = match rest.strip_prefix("ignore") {
-        Some(r) => r.trim_start(),
-        None => return IgnoreParse::None,
-    };
-    if !rest.starts_with('[') {
-        return IgnoreParse::None;
-    }
-    let Some(end) = rest.find(']') else {
-        return IgnoreParse::None;
-    };
-    let rule = rest[1..end].trim();
-    if rule.is_empty() {
-        return IgnoreParse::None;
-    }
-    let after = rest[end + 1..].trim_start();
-    match after.strip_prefix(':') {
-        Some(reason) => {
-            let reason = reason.split(" # ").next().unwrap_or(reason).trim();
-            if reason.is_empty() {
-                IgnoreParse::MissingReason {
-                    rule: rule.to_string(),
-                }
-            } else {
-                IgnoreParse::Suppression {
-                    rule: rule.to_string(),
-                    reason: reason.to_string(),
-                }
-            }
-        }
-        None => IgnoreParse::MissingReason {
-            rule: rule.to_string(),
-        },
     }
 }
 
@@ -616,8 +255,8 @@ fn files_to_scan<'a>(
             set.insert(target.to_path_buf());
         }
         set
-    } else if let Some(candidates) = async_doctor_ty::take_ignore_candidate_files(root) {
-        candidates.into_iter().collect()
+    } else if let Some(candidates) = &report.ignore_candidate_files {
+        candidates.iter().cloned().collect()
     } else {
         async_doctor_ty::discover_python_files(root)?
             .into_iter()
@@ -667,55 +306,6 @@ mod tests {
     use std::process::Command;
 
     use async_doctor_core::Report;
-
-    #[test]
-    fn parse_requires_reason() {
-        let src = "time.sleep(1)  # async-doctor: ignore[blocking-sleep]\n";
-        let p = parse_file("a.py", src);
-        assert!(p.suppressions.is_empty());
-        assert_eq!(p.missing_reason.len(), 1);
-        assert_eq!(p.missing_reason[0].rule, "blocking-sleep");
-
-        let src = "time.sleep(1)  # async-doctor: ignore[blocking-sleep]: known sync boundary\n";
-        let p = parse_file("a.py", src);
-        assert_eq!(p.suppressions.len(), 1);
-        assert_eq!(p.suppressions[0].reason, "known sync boundary");
-    }
-
-    #[test]
-    fn hash_inside_string_is_not_a_comment() {
-        let src = "x = \"# async-doctor: ignore[blocking-sleep]: fake\"\ntime.sleep(1)\n";
-        let p = parse_file("a.py", src);
-        assert!(p.suppressions.is_empty(), "{p:?}");
-        assert!(p.missing_reason.is_empty());
-    }
-
-    #[test]
-    fn hash_inside_single_quotes_ignored() {
-        let src = "x = '# async-doctor: ignore[blocking-sleep]: fake'\n";
-        assert!(parse_file("a.py", src).suppressions.is_empty());
-    }
-
-    #[test]
-    fn hash_inside_multiline_triple_quotes_ignored() {
-        let src = "doc = \"\"\"\n# async-doctor: ignore[blocking-sleep]: fake\n\"\"\"\n";
-        let p = parse_file("a.py", src);
-        assert!(p.suppressions.is_empty(), "{p:?}");
-        assert!(p.missing_reason.is_empty(), "{p:?}");
-    }
-
-    #[test]
-    fn inner_multiline_dict_ignore_does_not_bleed_to_earlier_entry() {
-        let src = "d = {\n    'a': foo(),\n    'b': bar(),  # async-doctor: ignore[blocking-http]: bar only\n}\n";
-        let p = parse_file("a.py", src);
-        assert_eq!(p.suppressions.len(), 1);
-        assert!(p.suppressions[0].matches_line(3));
-        assert!(
-            !p.suppressions[0].matches_line(2),
-            "ignore on line 3 inside dict must not cover sibling line 2: {:?}",
-            p.suppressions[0]
-        );
-    }
 
     #[test]
     fn files_to_scan_skips_gitignored_py() {

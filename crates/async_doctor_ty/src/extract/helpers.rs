@@ -77,17 +77,18 @@ pub(crate) fn qualname_from_definition<'db>(
     let func_name = node.name.as_str();
     let module = module_of_definition(model, def)?;
 
-    // Enclosing class via parent scopes.
+    // Enclosing class via scope chain (starting at `def.file_scope(db)`, which
+    // for a method is the `class` body scope itself).
     let index = semantic_index(db, def.program_file(db));
-    let mut scope_id = def.file_scope(db);
+    let mut cur = Some(def.file_scope(db));
     let mut class_parts: Vec<String> = Vec::new();
-    while let Some(parent) = index.parent_scope_id(scope_id) {
-        let scope = index.scope(parent);
+    while let Some(scope_id) = cur {
+        let scope = index.scope(scope_id);
         if let Some(class_ref) = scope.node().as_class() {
             let class_node = class_ref.node(&parsed);
             class_parts.push(class_node.name.as_str().to_string());
         }
-        scope_id = parent;
+        cur = index.parent_scope_id(scope_id);
     }
     class_parts.reverse();
     if class_parts.is_empty() {
@@ -107,12 +108,13 @@ pub(crate) fn module_of_definition<'db>(
         FilePath::System(sys) => {
             let s = sys.as_str().replace('\\', "/");
             if let Some(rest) = third_party_module_path(&s) {
+                let rest = rest.strip_suffix(".pyi").unwrap_or(rest);
                 return Some(module_name_from_relative(rest));
             }
             // Best-effort: file stem when we cannot recover the package path.
-            Some(module_name_from_relative(
-                sys.file_name().unwrap_or(sys.as_str()),
-            ))
+            let fname = sys.file_name().unwrap_or(sys.as_str());
+            let fname = fname.strip_suffix(".pyi").unwrap_or(fname);
+            Some(module_name_from_relative(fname))
         }
         FilePath::Vendored(vendored) => {
             let s = vendored.as_str().replace('\\', "/");
@@ -240,9 +242,9 @@ pub(crate) fn is_in_memory_buffer_type(ty: &str) -> bool {
     let t = ty;
     t.contains("BytesIO")
         || t.contains("StringIO")
-        || t.contains("BufferedIOBase")
         || t.ends_with("bytearray")
         || t.ends_with(".memoryview")
+        || t == "memoryview"
         || t.contains("io.BytesIO")
         || t.contains("io.StringIO")
         || t.contains("_io.BytesIO")
@@ -310,10 +312,7 @@ pub(crate) fn is_pure_in_memory_archive_method(method: &str) -> bool {
 
 /// Archive ops that touch the filesystem even when the archive itself is in memory.
 pub(crate) fn is_disk_touching_archive_method(method: &str) -> bool {
-    matches!(
-        method,
-        "write" | "extract" | "extractall" | "add" | "addfile"
-    )
+    matches!(method, "write" | "extract" | "extractall" | "add")
 }
 
 pub(crate) fn is_archive_method_qual(q: &str) -> bool {

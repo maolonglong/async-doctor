@@ -2,34 +2,30 @@
 
 mod advice;
 mod anti_pattern_advice;
+mod findings;
 mod grade;
 mod higher_order;
 mod special;
+mod sync_callers;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
-use crate::graph::{
-    AnalyzeOptions, CallKind, CalleeRef, ConditionTag, FunctionId, ParamGuard, ProjectFacts,
-    is_non_production_entry_path,
-};
+use crate::graph::{AnalyzeOptions, CalleeRef, ProjectFacts, is_non_production_entry_path};
 use crate::id::{FindingIdParts, finding_id, fix_group_id};
-use crate::report::{
-    Candidate, ChainStep, Entry, Finding, Fix, Report, SCHEMA_VERSION, UnresolvedPattern,
-};
+use crate::report::{Candidate, ChainStep, Entry, Fix, Report, SCHEMA_VERSION, UnresolvedPattern};
 
 use advice::collect_offload_twin_advice;
+use findings::collect_seed_diagnostics;
 use grade::{
-    ParamVerdict, PathToEntry, async_twin_hint, chain_step_for, evaluate_param_guards, label_rank,
-    merge_file_io_findings, merge_same_line_ctor_call_findings, reconcile_conditions,
-    resolution_for_edge, shortest_paths_to_async_entries, unique_site_finding_id,
-    unresolved_pattern,
+    build_class_inits, label_rank, merge_file_io_findings, merge_same_line_ctor_call_findings,
 };
 use higher_order::{materialize_higher_order, materialize_higher_order_owned};
 use special::{
-    collect_eager_offload_findings, collect_offload_coroutine_findings, special_finding_hit,
+    SpecialFindingCtx, collect_eager_offload_findings, collect_offload_coroutine_findings,
 };
+use sync_callers::SyncCallerIndex;
 
 #[derive(Debug, Clone, Copy)]
 pub struct SinkHit {
@@ -151,6 +147,8 @@ fn analyze_materialized(
         sink_sites: Vec::new(),
         file_count,
         async_entry_count,
+        ignore_candidate_files: None,
+        item_spans: std::collections::BTreeMap::new(),
     };
 
     // Dense vec + sorted preds so reverse-graph walk order is stable across
@@ -179,415 +177,15 @@ fn analyze_materialized(
         });
     }
 
-    #[derive(Clone)]
-    struct Seed {
-        edge_idx: usize,
-        kind: SeedKind,
-    }
-    #[derive(Clone)]
-    enum SeedKind {
-        Sink(SinkHit),
-        Unresolved { reason: String },
-    }
-
-    let mut seeds = Vec::new();
-    for (idx, edge) in facts.edges.iter().enumerate() {
-        if edge.is_offload_wrapper {
-            continue;
-        }
-        match &edge.callee {
-            CalleeRef::External { qualname } => {
-                // Structural: a resolved `async def` callee never seeds as sync IO,
-                // even when its External qualname looks like a sync sink family
-                // (subclass / wrapper of AsyncClient, etc.).
-                if edge.callee_is_coroutine == Some(true) {
-                    continue;
-                }
-                // Nested event-loop APIs and first-party async anti-patterns are
-                // correctness errors when reachable from async without an offload cut.
-                let caller_is_installed_tp = facts.function(edge.caller).is_installed_third_party();
-                if let Some(hit) = special_finding_hit(qualname, caller_is_installed_tp) {
-                    if hit.with_only && !matches!(edge.kind, CallKind::WithEnter) {
-                        continue;
-                    }
-                    if hit.consume_only
-                        && !matches!(edge.kind, CallKind::GeneratorConsume | CallKind::ForIter)
-                    {
-                        continue;
-                    }
-                    seeds.push(Seed {
-                        edge_idx: idx,
-                        kind: SeedKind::Sink(hit),
-                    });
-                    continue;
-                }
-                // Name-based async-counterpart rules are only a fallback when
-                // ty could not resolve coroutine-ness. Awaited *sync* defs
-                // (e.g. `await redis.Redis().get(...)`) still seed.
-                if let Some(mut hit) = sinks.lookup(qualname) {
-                    if grade::is_cheap_path_op(qualname, edge) {
-                        hit.candidate_only = true;
-                        hit.candidate_reason = Some("cheap-path-op");
-                    }
-                    if hit.with_only && !matches!(edge.kind, CallKind::WithEnter) {
-                        continue;
-                    }
-                    if hit.consume_only
-                        && !matches!(edge.kind, CallKind::GeneratorConsume | CallKind::ForIter)
-                    {
-                        continue;
-                    }
-                    seeds.push(Seed {
-                        edge_idx: idx,
-                        kind: SeedKind::Sink(hit),
-                    });
-                }
-            }
-            CalleeRef::Unresolved { reason } => {
-                seeds.push(Seed {
-                    edge_idx: idx,
-                    kind: SeedKind::Unresolved {
-                        reason: reason.clone(),
-                    },
-                });
-            }
-            CalleeRef::Project(_) | CalleeRef::Offload(_) | CalleeRef::ParamInvoke { .. } => {}
-        }
-    }
-
-    // For unresolved aggregation: pattern → (sites, entries).
-    let mut unresolved_agg: HashMap<String, (u32, HashSet<FunctionId>)> = HashMap::new();
-
-    let mut emitted: HashSet<String> = HashSet::new();
-    // Finding id → `(entry_id, sink_file, sink_line)` for site disambiguation.
-    let mut emitted_sink_sites: HashMap<String, (FunctionId, String, u32)> = HashMap::new();
-    let mut omitted_entries: HashSet<FunctionId> = HashSet::new();
-    let mut raw_findings: Vec<Finding> = Vec::new();
-    let mut raw_candidates: Vec<Candidate> = Vec::new();
-    let mut paths_cache: HashMap<FunctionId, Vec<PathToEntry>> = HashMap::new();
-    let func_full_qualnames: Vec<String> =
-        facts.functions.iter().map(|f| f.full_qualname()).collect();
-    let mut edge_resolutions: Vec<Option<String>> = vec![None; facts.edges.len()];
-
-    for seed in seeds {
-        let seed_edge = &facts.edges[seed.edge_idx];
-        let seed_caller = seed_edge.caller;
-        let paths = paths_cache
-            .entry(seed_caller)
-            .or_insert_with(|| shortest_paths_to_async_entries(facts, &reverse, seed_caller));
-        if paths.is_empty() {
-            continue;
-        }
-        let seed_why = format!("async-doctor why {}:{}", seed_edge.file, seed_edge.line);
-        let seed_sink_meta = match &seed.kind {
-            SeedKind::Sink(hit) => {
-                let docs_anchor = format!("#{}", hit.rule);
-                let docs_url = format!(
-                    "https://github.com/maolonglong/async-doctor/blob/main/docs/rules.md{docs_anchor}"
-                );
-                Some((
-                    format!("blocking sink `{}`", hit.sink_qualname),
-                    fix_group_id(hit.rule, hit.sink_qualname),
-                    docs_anchor,
-                    docs_url,
-                ))
-            }
-            SeedKind::Unresolved { .. } => None,
-        };
-
-        for path in paths {
-            let entry_id = path.entry;
-            let entry = facts.function(entry_id);
-            if entry.is_sync_route || !entry.is_async || entry.is_third_party {
-                continue;
-            }
-
-            if !options.include_non_production && is_non_production_entry_path(&entry.file) {
-                omitted_entries.insert(entry_id);
-                continue;
-            }
-
-            let mut chain_steps: Vec<ChainStep> = Vec::new();
-            let mut chain_qualnames: Vec<String> = Vec::new();
-            let mut condition_tags: Vec<ConditionTag> = Vec::new();
-            let mut edge_param_guards: Vec<(FunctionId, ParamGuard)> = Vec::new();
-            let mut third_party_edge_guards: Vec<(FunctionId, ParamGuard)> = Vec::new();
-
-            // When the async entry *receives* a kwargs/partial callback, the
-            // reverse path stops at that receiver and would omit the call site
-            // that passed the callable. Prepend that binding hop so agents know
-            // which line to change.
-            for &edge_idx in &path.edges {
-                let e = &facts.edges[edge_idx];
-                let resolved_bind = if let Some(bi) = e.context_from_edge {
-                    facts.edges.get(bi).map(|be| (bi, be))
-                } else if let Some(binder) = e.context_from_caller {
-                    facts.edges.iter().enumerate().find(|(_, be)| {
-                        be.caller == binder
-                            && matches!(be.callee, CalleeRef::Project(id) if id == e.caller)
-                            && (!be.positional_callables.is_empty()
-                                || !be.keyword_callables.is_empty())
-                    })
-                } else {
-                    None
-                };
-                let Some((bind_idx, bind_e)) = resolved_bind else {
-                    continue;
-                };
-                if bind_e.caller == entry_id || path.edges.contains(&bind_idx) {
-                    continue;
-                }
-                let binder_fn = facts.function(bind_e.caller);
-                let res = edge_resolutions[bind_idx]
-                    .get_or_insert_with(|| resolution_for_edge(facts, bind_e))
-                    .clone();
-                chain_steps.push(chain_step_for(
-                    binder_fn,
-                    bind_e.file.clone(),
-                    bind_e.line,
-                    bind_e.text.clone(),
-                    res,
-                ));
-                condition_tags.extend(bind_e.conditions.iter().copied());
-            }
-
-            for &edge_idx in &path.edges {
-                let e = &facts.edges[edge_idx];
-                let caller_fn = facts.function(e.caller);
-                let res = edge_resolutions[edge_idx]
-                    .get_or_insert_with(|| resolution_for_edge(facts, e))
-                    .clone();
-                chain_steps.push(chain_step_for(
-                    caller_fn,
-                    e.file.clone(),
-                    e.line,
-                    e.text.clone(),
-                    res,
-                ));
-                if let CalleeRef::Project(fid) = e.callee {
-                    chain_qualnames.push(func_full_qualnames[fid.index()].clone());
-                    if grade::is_memoized(facts, fid) {
-                        condition_tags.push(ConditionTag::CacheMissDependent);
-                    }
-                }
-                condition_tags.extend(e.conditions.iter().copied());
-                if let Some(g) = e.param_guard {
-                    edge_param_guards.push((e.caller, g));
-                    if caller_fn.is_installed_third_party() {
-                        third_party_edge_guards.push((e.caller, g));
-                    }
-                }
-            }
-
-            let seed_caller_fn = facts.function(seed_caller);
-            // Seed hop resolution is finalized after we know Sink vs Unresolved.
-            let seed_res = edge_resolutions[seed.edge_idx]
-                .get_or_insert_with(|| resolution_for_edge(facts, seed_edge))
-                .clone();
-            let mut seed_step = chain_step_for(
-                seed_caller_fn,
-                seed_edge.file.clone(),
-                seed_edge.line,
-                seed_edge.text.clone(),
-                seed_res,
-            );
-            condition_tags.extend(seed_edge.conditions.iter().copied());
-            let mut seed_param_guards: Vec<(FunctionId, ParamGuard)> = Vec::new();
-            if let Some(g) = seed_edge.param_guard {
-                seed_param_guards.push((seed_caller, g));
-            }
-
-            let conditions = reconcile_conditions(&condition_tags);
-
-            // Intermediate parameter guards prune provably dead multi-hop chains;
-            // unknown runtime args on first-party intermediate hops remain normal
-            // `async-branch` findings rather than parameter-toggled sinks.
-            if evaluate_param_guards(facts, path, &edge_param_guards) == ParamVerdict::ProvablyFalse
-            {
-                continue;
-            }
-            // Parameter-controlled sink: demote unless the guarding arg is provably truthy.
-            let param_verdict = evaluate_param_guards(facts, path, &seed_param_guards);
-            if param_verdict == ParamVerdict::ProvablyFalse {
-                continue;
-            }
-            let mut force_conditional = param_verdict == ParamVerdict::Unknown
-                || evaluate_param_guards(facts, path, &third_party_edge_guards)
-                    == ParamVerdict::Unknown;
-            // Installed third-party sinks under a param/branch guard (e.g. PIL
-            // `if is_path(fp): open(...)`) are not provable for arbitrary caller
-            // args → candidates. Outside-editable follow-only code keeps
-            // first-party grading (still never an entry).
-            if seed_caller_fn.is_installed_third_party()
-                && seed_edge
-                    .conditions
-                    .iter()
-                    .any(|c| c.is_branch_like() || matches!(c, ConditionTag::AsyncBranch))
-            {
-                force_conditional = true;
-            }
-            // Nested event-loop under a proven "no running loop" guard
-            // (`if loop is None`, `except RuntimeError` after get_running_loop,
-            // `not loop.is_running()`, …) is runtime-safe when already async —
-            // drop entirely. Other conditional nested-loop sites stay findings.
-            if matches!(
-                &seed.kind,
-                SeedKind::Sink(h) if h.rule == special::RULE_NESTED_EVENT_LOOP
-            ) && condition_tags
-                .iter()
-                .any(|c| matches!(c, ConditionTag::NoRunningLoopGuard))
-            {
-                continue;
-            }
-
-            match &seed.kind {
-                SeedKind::Sink(hit) => {
-                    let (seed_resolution, seed_fix_group_id, seed_docs_anchor, seed_docs_url) =
-                        seed_sink_meta
-                            .as_ref()
-                            .expect("seed_sink_meta present for SeedKind::Sink");
-                    seed_step.resolution = seed_resolution.clone();
-                    chain_steps.push(seed_step);
-                    chain_qualnames.push(hit.sink_qualname.to_string());
-                    let chain_refs: Vec<&str> =
-                        chain_qualnames.iter().map(String::as_str).collect();
-                    let Some(id) = unique_site_finding_id(
-                        FindingIdParts {
-                            rule: hit.rule,
-                            entry_qualname: &func_full_qualnames[entry_id.index()],
-                            sink_qualname: hit.sink_qualname,
-                            chain_qualnames: &chain_refs,
-                            occurrence: seed_edge.occurrence,
-                        },
-                        entry_id,
-                        (&seed_edge.file, seed_edge.line),
-                        &mut emitted_sink_sites,
-                        &mut emitted,
-                    ) else {
-                        continue;
-                    };
-
-                    let mut hint = hit.fix_hint.to_string();
-                    // Eager offload may mark the edge into the sink's caller
-                    // (`to_thread(work())` → work → sleep) rather than the sink edge.
-                    let eager_offload = seed_edge.is_eager_offload_arg
-                        || path
-                            .edges
-                            .iter()
-                            .any(|&i| facts.edges[i].is_eager_offload_arg);
-                    if eager_offload {
-                        hint = format!(
-                            "{hint} This call runs on the event loop before offload — \
-                             pass the callable (e.g. `asyncio.to_thread(f, ...)`) \
-                             rather than calling it (`to_thread(f())`)."
-                        );
-                    }
-                    if let Some(twin) = async_twin_hint(facts, entry_id, path) {
-                        hint = format!("{hint} Async twin available: `{twin}`.");
-                    }
-
-                    let entry_out = Entry {
-                        file: entry.file.clone(),
-                        line: entry.line,
-                        name: entry.qualname.clone(),
-                        label: entry.label,
-                    };
-                    // CLI rewrites `--path` to the actual scan root after analysis.
-                    let why = seed_why.clone();
-                    let docs_anchor = seed_docs_anchor.clone();
-                    let docs_url = seed_docs_url.clone();
-                    let fix = Fix {
-                        hint,
-                        fix_group_id: seed_fix_group_id.clone(),
-                    };
-
-                    if hit.candidate_only || force_conditional {
-                        let reason = if force_conditional {
-                            "conditional"
-                        } else {
-                            hit.candidate_reason.unwrap_or("uncertain")
-                        };
-                        raw_candidates.push(Candidate {
-                            id,
-                            rule: hit.rule.to_string(),
-                            entry: entry_out,
-                            chain: chain_steps,
-                            conditions,
-                            reason: reason.to_string(),
-                            fix,
-                            why,
-                            docs_anchor,
-                            docs_url,
-                        });
-                    } else {
-                        raw_findings.push(Finding {
-                            id,
-                            rule: hit.rule.to_string(),
-                            entry: entry_out,
-                            chain: chain_steps,
-                            conditions,
-                            fix,
-                            why,
-                            docs_anchor,
-                            docs_url,
-                        });
-                    }
-                }
-                SeedKind::Unresolved { reason } => {
-                    seed_step.resolution = format!("unresolved call ({reason})");
-                    chain_steps.push(seed_step);
-                    let pattern = unresolved_pattern(reason, &seed_edge.text);
-                    let agg = unresolved_agg.entry(pattern.clone()).or_default();
-                    agg.0 += 1;
-                    agg.1.insert(entry_id);
-
-                    if !options.show_unresolved {
-                        report.hidden_unresolved_candidates += 1;
-                        continue;
-                    }
-                    let sink_key = format!("unresolved:{reason}");
-                    chain_qualnames.push(sink_key.clone());
-                    let chain_refs: Vec<&str> =
-                        chain_qualnames.iter().map(String::as_str).collect();
-                    let id = finding_id(FindingIdParts {
-                        rule: "unresolved-call",
-                        entry_qualname: &func_full_qualnames[entry_id.index()],
-                        sink_qualname: &sink_key,
-                        chain_qualnames: &chain_refs,
-                        occurrence: seed_edge.occurrence,
-                    });
-                    if !emitted.insert(id.clone()) {
-                        continue;
-                    }
-                    raw_candidates.push(Candidate {
-                        id,
-                        rule: "unresolved-call".to_string(),
-                        entry: Entry {
-                            file: entry.file.clone(),
-                            line: entry.line,
-                            name: entry.qualname.clone(),
-                            label: entry.label,
-                        },
-                        chain: chain_steps,
-                        conditions,
-                        reason: reason.clone(),
-                        fix: Fix {
-                            hint: "Could not resolve call target; inspect dynamically.".to_string(),
-                            fix_group_id: fix_group_id("unresolved-call", &sink_key),
-                        },
-                        why: seed_why.clone(),
-                        docs_anchor: "#unresolved-call".into(),
-                        docs_url: "https://github.com/maolonglong/async-doctor/blob/main/docs/rules.md#unresolved-call".into(),
-                    });
-                }
-            }
-        }
-    }
+    let class_inits = build_class_inits(facts);
+    let mut seed_diag = collect_seed_diagnostics(facts, sinks, options, &reverse, &class_inits);
+    report.omitted_non_production_entries = seed_diag.omitted_non_production_entries;
+    report.hidden_unresolved_candidates = seed_diag.hidden_unresolved_candidates;
 
     // Failed first-party imports: once per (file, module) — already deduped.
     for imp in &facts.unresolved_imports {
         let pattern = format!("unresolved-import:{}", imp.module);
-        let agg = unresolved_agg.entry(pattern.clone()).or_default();
+        let agg = seed_diag.unresolved_agg.entry(pattern.clone()).or_default();
         agg.0 += 1;
         if !options.show_unresolved {
             report.hidden_unresolved_candidates += 1;
@@ -601,10 +199,10 @@ fn analyze_materialized(
             chain_qualnames: &[&sink_key],
             occurrence: 0,
         });
-        if !emitted.insert(id.clone()) {
+        if !seed_diag.emitted.insert(id.clone()) {
             continue;
         }
-        raw_candidates.push(Candidate {
+        seed_diag.raw_candidates.push(Candidate {
             id,
             rule: "unresolved-import".to_string(),
             entry: Entry {
@@ -637,15 +235,21 @@ fn analyze_materialized(
     // — there is no file:line locator for an environment-level aggregate.
     let n_tp = facts.unresolved_third_party_modules.len() as u32;
     let n_resolved = facts.resolved_third_party_modules.len() as u32;
+    let mut unresolved_tp_names = facts.unresolved_third_party_modules.clone();
+    unresolved_tp_names.sort();
+    unresolved_tp_names.dedup();
+    unresolved_tp_names
+        .truncate(crate::environment::ScanEnvironment::MAX_UNRESOLVED_THIRD_PARTY_MODULES);
     report.environment.unresolved_third_party = n_tp;
     report.environment.resolved_third_party = n_resolved;
+    report.environment.unresolved_third_party_modules = unresolved_tp_names;
     report.environment.refresh_note();
     if n_tp > 0 {
         let pattern = crate::environment::ScanEnvironment::missing_third_party_reason(
             n_tp,
             report.environment.kind,
         );
-        let agg = unresolved_agg.entry(pattern.clone()).or_default();
+        let agg = seed_diag.unresolved_agg.entry(pattern.clone()).or_default();
         agg.0 = n_tp;
         let sink_key = "unresolved-import:third-party-not-installed";
         let id = finding_id(FindingIdParts {
@@ -655,7 +259,7 @@ fn analyze_materialized(
             chain_qualnames: &[sink_key],
             occurrence: 0,
         });
-        if emitted.insert(id.clone()) {
+        if seed_diag.emitted.insert(id.clone()) {
             report.location_less_candidates.push(Candidate {
                 id,
                 rule: "unresolved-import".to_string(),
@@ -680,36 +284,45 @@ fn analyze_materialized(
         }
     }
 
-    report.omitted_non_production_entries = omitted_entries.len() as u32;
-    report.findings = merge_same_line_ctor_call_findings(merge_file_io_findings(raw_findings));
-    // offload-coroutine findings (error) — additive; never suppresses existing rules.
-    report.findings.extend(collect_offload_coroutine_findings(
+    let merged_io = merge_file_io_findings(seed_diag.raw_findings, &mut seed_diag.item_spans);
+    report.findings = merge_same_line_ctor_call_findings(merged_io, &mut seed_diag.item_spans);
+    // offload-coroutine and eager-offload-call findings (error) — additive; never suppress existing rules.
+    let mut special_ctx = SpecialFindingCtx {
         facts,
-        &reverse,
-        options.include_non_production,
-        &mut emitted_sink_sites,
-        &mut emitted,
-    ));
-    let eager_offload_findings = collect_eager_offload_findings(
-        facts,
-        &reverse,
-        options.include_non_production,
-        &report.findings,
-        &mut emitted_sink_sites,
-        &mut emitted,
-    );
+        reverse: &reverse,
+        include_non_production: options.include_non_production,
+        class_inits: &class_inits,
+        item_spans: &mut seed_diag.item_spans,
+        emitted_sites: &mut seed_diag.emitted_sink_sites,
+        emitted: &mut seed_diag.emitted,
+    };
+    report
+        .findings
+        .extend(collect_offload_coroutine_findings(&mut special_ctx));
+    let eager_offload_findings = collect_eager_offload_findings(&mut special_ctx, &report.findings);
     report.findings.extend(eager_offload_findings);
     // Empty entry.file/chain belong in locationLessCandidates, not candidates.
-    let (located, location_less): (Vec<_>, Vec<_>) = raw_candidates
+    let (located, location_less): (Vec<_>, Vec<_>) = seed_diag
+        .raw_candidates
         .into_iter()
         .partition(|c| !(c.entry.file.is_empty() && c.chain.is_empty()));
     report.candidates = located;
     report.location_less_candidates.extend(location_less);
-    report.advice =
-        collect_offload_twin_advice(facts, sinks, &reverse, options.include_non_production);
+    let sync_callers = SyncCallerIndex::new(facts);
+    report.advice = collect_offload_twin_advice(
+        facts,
+        sinks,
+        &reverse,
+        &sync_callers,
+        options.include_non_production,
+        &class_inits,
+        &mut seed_diag.item_spans,
+    );
+    report.item_spans = seed_diag.item_spans;
 
     if options.show_unresolved {
-        let mut summary: Vec<UnresolvedPattern> = unresolved_agg
+        let mut summary: Vec<UnresolvedPattern> = seed_diag
+            .unresolved_agg
             .into_iter()
             .map(|(pattern, (sites, entries))| UnresolvedPattern {
                 pattern,
@@ -762,6 +375,7 @@ fn analyze_materialized(
         (af, al, a.id.as_str()).cmp(&(bf, bl, b.id.as_str()))
     });
 
-    report.refresh_sink_sites();
+    report.sink_sites = sync_callers.summarize_sink_sites(facts, &report.findings);
+    report.refresh_score();
     report
 }

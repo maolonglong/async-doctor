@@ -1,6 +1,8 @@
 //! Call / await / property / lambda / task edge recording.
 
-use async_doctor_core::{CallKind, CalleeRef, FunctionId, OffloadKind};
+mod arguments;
+
+use async_doctor_core::{CallKind, CalleeRef, OffloadKind};
 use ruff_db::files::FilePath;
 use ruff_python_ast::visitor::Visitor;
 use ruff_python_ast::{self as ast, Expr};
@@ -8,11 +10,10 @@ use ruff_text_size::Ranged;
 use ty_python_semantic::{ImportAliasResolution, definitions_for_attribute, definitions_for_name};
 
 use super::CallCollector;
-use crate::extract::constants::{is_generator_consumer, keyword_true_names, literal_arg};
+use crate::extract::constants::{is_generator_consumer, keyword_literals, literal_arg};
 use crate::extract::helpers::{
-    is_asyncio_redis_type, is_callable_ref, is_getattr_call, is_partial_call,
-    is_path_or_file_open_qual, is_task_spawn_callee, normalize_asyncio_redis_type,
-    qualname_from_definition, route_handler_arg, twin_relevant_client_root,
+    is_asyncio_redis_type, is_callable_ref, is_getattr_call, is_path_or_file_open_qual,
+    normalize_asyncio_redis_type, qualname_from_definition,
 };
 
 impl<'a, 'db> CallCollector<'a, 'db> {
@@ -32,10 +33,28 @@ impl<'a, 'db> CallCollector<'a, 'db> {
 
         if let Some(kind) = offload_kind {
             let callable_idx = kind.callable_arg_index();
+            let shifts_via_ctx_run = call
+                .arguments
+                .args
+                .get(callable_idx)
+                .is_some_and(|arg| self.is_context_run_callable(arg));
+            let actual_callable_idx = if shifts_via_ctx_run {
+                callable_idx + 1
+            } else {
+                callable_idx
+            };
             for (i, arg) in call.arguments.args.iter().enumerate() {
-                if i == callable_idx {
+                if shifts_via_ctx_run && i == callable_idx {
+                    if let Expr::Attribute(attr) = arg
+                        && !matches!(attr.value.as_ref(), Expr::Name(_))
+                    {
+                        self.visit_eager_offload_expr(&attr.value, consumer);
+                    }
+                    continue;
+                }
+                if i == actual_callable_idx {
                     if let Expr::Call(inner) = arg
-                        && is_partial_call(inner)
+                        && self.is_partial_call_ctx(inner)
                     {
                         self.visit_partial_eager_args(inner, consumer);
                         continue;
@@ -50,7 +69,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             }
             for kw in &call.arguments.keywords {
                 if let Expr::Call(inner) = &kw.value
-                    && is_partial_call(inner)
+                    && self.is_partial_call_ctx(inner)
                 {
                     self.visit_partial_eager_args(inner, consumer);
                     continue;
@@ -94,10 +113,27 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         self.in_eager_offload_arg = prev_eager;
     }
 
-    /// `functools.partial(fn, a, k=b)` passed to an offload defers `fn` (arg 0)
-    /// while evaluating `a` and `b` eagerly on the event loop.
+    /// `functools.partial(fn, a, k=b)` (or `partial(ctx.run, fn, a, k=b)`) passed
+    /// to an offload defers the callable while evaluating bound args eagerly.
     fn visit_partial_eager_args(&mut self, inner: &'a ast::ExprCall, consumer: bool) {
-        for eager_arg in inner.arguments.args.iter().skip(1) {
+        let starts_with_ctx_run = inner
+            .arguments
+            .args
+            .first()
+            .is_some_and(|a| self.is_context_run_callable(a));
+        let target_idx = usize::from(starts_with_ctx_run);
+        if starts_with_ctx_run
+            && let Some(Expr::Attribute(attr)) = inner.arguments.args.first()
+            && !matches!(attr.value.as_ref(), Expr::Name(_))
+        {
+            self.visit_eager_offload_expr(&attr.value, consumer);
+        }
+        if let Some(Expr::Call(nested)) = inner.arguments.args.get(target_idx)
+            && self.is_partial_call_ctx(nested)
+        {
+            self.visit_partial_eager_args(nested, consumer);
+        }
+        for eager_arg in inner.arguments.args.iter().skip(target_idx + 1) {
             self.visit_eager_offload_expr(eager_arg, consumer);
         }
         for kw in &inner.arguments.keywords {
@@ -124,20 +160,13 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         // is an asyncio-redis client so later uses of bound names stay async-keyed.
         // The interesting type is on the method receiver (`client`), not the loop var.
         let _ = for_stmt.target;
-        if let Some(recv) = self.asyncio_redis_iter_receiver(&for_stmt.iter) {
-            // Stash under a synthetic key used by attribute resolution on the same
-            // expression shape is unnecessary — scan_iter itself is the awaited-ish
-            // call. Receiver typing for the *call* uses type_instance_qualname /
-            // external_qualname on `client.scan_iter` directly. Still record the
-            // client name when the iter is `Name.attr(...)` so nested attrs on that
-            // same local prefer redis.asyncio.
-            if let Expr::Call(call) = for_stmt.iter.as_ref()
-                && let Expr::Attribute(attr) = call.func.as_ref()
-                && let Expr::Name(n) = attr.value.as_ref()
-            {
-                self.async_with_receivers
-                    .insert(n.id.as_str().to_string(), recv);
-            }
+        if let Some(recv) = self.asyncio_redis_iter_receiver(&for_stmt.iter)
+            && let Expr::Call(call) = for_stmt.iter.as_ref()
+            && let Expr::Attribute(attr) = call.func.as_ref()
+            && let Expr::Name(n) = attr.value.as_ref()
+        {
+            self.async_with_receivers
+                .insert(n.id.as_str().to_string(), recv);
         }
     }
 
@@ -161,8 +190,6 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                     }
                     return Some("redis.asyncio.client.Pipeline".to_string());
                 }
-                // Heuristic when ty cannot resolve (dist-packages without venv):
-                // `r.pipeline()` where r was imported from redis.asyncio.
                 if self.expr_looks_like_asyncio_redis(&attr.value) {
                     return Some("redis.asyncio.client.Pipeline".to_string());
                 }
@@ -203,7 +230,6 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         {
             return true;
         }
-        // Fall back to definition module path containing redis/asyncio.
         let resolved = match expr {
             Expr::Name(name) => definitions_for_name(
                 self.model,
@@ -265,7 +291,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
 
         self.pending_literals = call.arguments.args.iter().map(literal_arg).collect();
-        self.pending_keyword_true = keyword_true_names(&call.arguments.keywords);
+        self.pending_keyword_literals = keyword_literals(&call.arguments.keywords);
         self.pending_callables = self.resolve_positional_callables(call.arguments.args.as_ref());
         self.pending_externals.clear();
         self.pending_constructed_receivers.clear();
@@ -311,13 +337,13 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 CallKind::Call
             };
             let saved_literals = self.pending_literals.clone();
-            let saved_kw_true = self.pending_keyword_true.clone();
+            let saved_kw_literals = self.pending_keyword_literals.clone();
             let saved_callables = self.pending_callables.clone();
             let saved_kw_callables = self.pending_keyword_callables.clone();
             for (idx, fid) in ctor_fids.into_iter().enumerate() {
                 if idx > 0 {
                     self.pending_literals = saved_literals.clone();
-                    self.pending_keyword_true = saved_kw_true.clone();
+                    self.pending_keyword_literals = saved_kw_literals.clone();
                     self.pending_callables = saved_callables.clone();
                     self.pending_keyword_callables = saved_kw_callables.clone();
                 }
@@ -337,6 +363,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
 
         let func_ext_qual = self.external_qualname(&call.func);
+        self.note_socket_mode_call(call, func_ext_qual.as_deref());
         self.maybe_record_gather_shared_session(caller, call, func_ext_qual.as_deref());
 
         // In-memory buffer args to open/Image.open: not blocking file IO — skip
@@ -375,11 +402,11 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 self.resolve_positional_externals(call.arguments.args.as_ref());
             self.pending_constructed_receivers =
                 self.resolve_positional_constructed_receivers(call.arguments.args.as_ref());
-            // Passing a callable param into a real offload → this function is a wrapper.
             let callable_idx = kind.callable_arg_index();
-            if let Some(arg) = call.arguments.args.get(callable_idx)
-                && let Expr::Name(n) = arg
-            {
+            let effective =
+                self.effective_offload_callable(call.arguments.args.as_ref(), callable_idx);
+            // Passing a callable param into a real offload → this function is a wrapper.
+            if let Some(Expr::Name(n)) = effective {
                 if self.current_param_names.iter().any(|p| p == n.id.as_str()) {
                     self.mark_offload_wrapper(caller);
                 } else if let Some(owner) = self.enclosing_param_scope(n.id.as_str()) {
@@ -388,16 +415,42 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                     self.mark_offload_wrapper(owner);
                 }
             }
-            // Prefer structural coroutine-ness of the offloaded target when known.
-            let target_coro = call
-                .arguments
-                .args
-                .get(callable_idx)
-                .and_then(|arg| match arg {
-                    Expr::Call(inner) if is_partial_call(inner) => inner.arguments.args.first(),
-                    other => Some(other),
-                })
-                .and_then(|target| self.resolve_callee_is_coroutine(target));
+            // Align `callable_idx` slots with the unwrapped target (e.g. after `ctx.run`)
+            // and handle coroutine-returning lambdas (`lambda: async_fn()`).
+            let target_coro = if let Some(target) = effective {
+                if let Some(lam) = self.resolve_lambda_expr(target) {
+                    let (fid, is_coro) = self.resolve_lambda_callable_and_coro(lam);
+                    if callable_idx < self.pending_callables.len() {
+                        self.pending_callables[callable_idx] = fid;
+                    }
+                    if callable_idx < self.pending_externals.len() {
+                        self.pending_externals[callable_idx] = None;
+                    }
+                    if callable_idx < self.pending_constructed_receivers.len() {
+                        self.pending_constructed_receivers[callable_idx] = None;
+                    }
+                    Some(is_coro)
+                } else {
+                    let proj_fid = self.resolve_callable_project_fid(target);
+                    if callable_idx < self.pending_callables.len() {
+                        self.pending_callables[callable_idx] = proj_fid;
+                    }
+                    if callable_idx < self.pending_externals.len() {
+                        self.pending_externals[callable_idx] = if proj_fid.is_some() {
+                            None
+                        } else {
+                            self.external_qualname(target)
+                        };
+                    }
+                    if callable_idx < self.pending_constructed_receivers.len() {
+                        self.pending_constructed_receivers[callable_idx] =
+                            self.constructed_root_receiver(target);
+                    }
+                    self.resolve_callee_is_coroutine(target)
+                }
+            } else {
+                None
+            };
             self.push_edge(
                 caller,
                 CalleeRef::Offload(kind),
@@ -407,6 +460,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 target_coro,
             );
             self.maybe_record_eager_offload_call(caller, call, kind, call.range());
+            self.maybe_record_offload_stateful_session(caller, effective, kind, call.range());
             self.clear_pending_call_args();
             return Some(Some(kind));
         }
@@ -442,7 +496,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                     _ => None,
                 };
             }
-            let kind = if self.pending_with_enter {
+            let kind = if self.pending_with_enter && !self.pending_is_awaited {
                 CallKind::WithEnter
             } else if self.consuming_generator && matches!(&callee, CalleeRef::External { .. }) {
                 // External consume-only sinks (`listen()`).
@@ -458,193 +512,5 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
         self.clear_pending_call_args();
         Some(None)
-    }
-
-    pub(crate) fn clear_pending_call_args(&mut self) {
-        self.pending_literals.clear();
-        self.pending_keyword_true.clear();
-        self.pending_callables.clear();
-        self.pending_externals.clear();
-        self.pending_constructed_receivers.clear();
-        self.pending_constructed_receiver = None;
-        self.pending_keyword_callables.clear();
-        self.pending_is_bound_call = false;
-    }
-
-    pub(crate) fn resolve_keyword_callables(
-        &mut self,
-        call: &'a ast::ExprCall,
-    ) -> Vec<(String, FunctionId)> {
-        let mut out = Vec::new();
-        for kw in &call.arguments.keywords {
-            let Some(name) = kw.arg.as_ref() else {
-                continue;
-            };
-            let fid = match &kw.value {
-                Expr::Name(_) | Expr::Attribute(_) => {
-                    self.resolve_project_function(&kw.value).or_else(|| {
-                        self.resolve_project_constructors(&kw.value)
-                            .into_iter()
-                            .next()
-                    })
-                }
-                Expr::Call(c) if is_partial_call(c) => c.arguments.args.first().and_then(|a| {
-                    self.resolve_project_function(a)
-                        .or_else(|| self.resolve_project_constructors(a).into_iter().next())
-                }),
-                Expr::Lambda(lam) => Some(self.ensure_lambda_fact(lam)),
-                _ => None,
-            };
-            if let Some(fid) = fid {
-                out.push((name.as_str().to_string(), fid));
-            }
-        }
-        out
-    }
-
-    pub(crate) fn maybe_property_get(&mut self, attr: &ast::ExprAttribute) {
-        let Some(caller) = self.current_fn else {
-            return;
-        };
-        if self.dead_depth > 0 {
-            return;
-        }
-        let resolved = definitions_for_attribute(self.model, attr);
-        let mut fid = None;
-        for r in &resolved {
-            if let Some(def) = r.definition()
-                && let Some(id) = self.def_from_definition(def)
-            {
-                fid = Some(id);
-                break;
-            }
-        }
-        let Some(fid) = fid else {
-            return;
-        };
-        if !self.property_defs.contains(&fid) {
-            return;
-        }
-        self.clear_pending_call_args();
-        self.pending_is_bound_call = true;
-        self.push_edge(
-            caller,
-            CalleeRef::Project(fid),
-            attr.range(),
-            CallKind::PropertyGet,
-            false,
-            Some(self.function(fid).is_async),
-        );
-    }
-
-    pub(crate) fn note_imperative_route(&mut self, call: &ast::ExprCall) {
-        let Some(handler) = route_handler_arg(call) else {
-            return;
-        };
-        let Some(fid) = self.resolve_project_function(handler) else {
-            return;
-        };
-        self.mark_imperative_route(fid);
-    }
-
-    pub(crate) fn note_task_spawn(&mut self, call: &ast::ExprCall) {
-        if !is_task_spawn_callee(&call.func) {
-            return;
-        }
-        for arg in call.arguments.args.iter() {
-            // create_task(coro()) — the func of the inner call is the target.
-            let target_expr = match arg {
-                Expr::Call(inner) => inner.func.as_ref(),
-                other => other,
-            };
-            if let Some(fid) = self.resolve_project_function(target_expr) {
-                self.task_targets.0.insert(fid);
-            }
-        }
-    }
-
-    pub(crate) fn resolve_positional_callables(
-        &mut self,
-        args: &'a [Expr],
-    ) -> Vec<Option<FunctionId>> {
-        let mut out = Vec::with_capacity(args.len());
-        for arg in args {
-            let fid = match arg {
-                Expr::Name(_) | Expr::Attribute(_) => self
-                    .resolve_project_function(arg)
-                    .or_else(|| self.resolve_project_constructors(arg).into_iter().next()),
-                Expr::Call(c) if is_partial_call(c) => c.arguments.args.first().and_then(|a| {
-                    self.resolve_project_function(a)
-                        .or_else(|| self.resolve_project_constructors(a).into_iter().next())
-                }),
-                Expr::Lambda(lam) => Some(self.ensure_lambda_fact(lam)),
-                _ => None,
-            };
-            out.push(fid);
-        }
-        out
-    }
-
-    /// External qualnames for positional args (offload of typed third-party methods).
-    pub(crate) fn resolve_positional_externals(&mut self, args: &'a [Expr]) -> Vec<Option<String>> {
-        let mut out = Vec::with_capacity(args.len());
-        for arg in args {
-            // Prefer project FunctionId when both resolve — externals are a fallback.
-            if matches!(arg, Expr::Lambda(_)) {
-                out.push(None);
-                continue;
-            }
-            let target = match arg {
-                Expr::Call(c) if is_partial_call(c) => c.arguments.args.first(),
-                other => Some(other),
-            };
-            let Some(target) = target else {
-                out.push(None);
-                continue;
-            };
-            if self.resolve_project_function(target).is_some()
-                || !self.resolve_project_constructors(target).is_empty()
-            {
-                out.push(None);
-                continue;
-            }
-            out.push(self.external_qualname(target));
-        }
-        out
-    }
-
-    /// Root constructed client class for positional callable args (Azure vs OpenAI).
-    pub(crate) fn resolve_positional_constructed_receivers(
-        &mut self,
-        args: &'a [Expr],
-    ) -> Vec<Option<String>> {
-        let mut out = Vec::with_capacity(args.len());
-        for arg in args {
-            let target = match arg {
-                Expr::Call(c) if is_partial_call(c) => c.arguments.args.first(),
-                Expr::Lambda(_) => {
-                    out.push(None);
-                    continue;
-                }
-                other => Some(other),
-            };
-            let Some(target) = target else {
-                out.push(None);
-                continue;
-            };
-            out.push(self.constructed_root_receiver(target));
-        }
-        out
-    }
-
-    /// Walk an attribute chain to the root expression and name its constructed type
-    /// when it is a known sync client that affects async-twin selection.
-    pub(crate) fn constructed_root_receiver(&mut self, expr: &Expr) -> Option<String> {
-        let mut cur = expr;
-        while let Expr::Attribute(attr) = cur {
-            cur = attr.value.as_ref();
-        }
-        let ty = self.type_instance_qualname(cur)?;
-        twin_relevant_client_root(&ty)
     }
 }

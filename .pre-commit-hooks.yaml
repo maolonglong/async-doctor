@@ -1,0 +1,8 @@
+- id: async-doctor
+  name: async-doctor
+  description: Zero-config static analysis for sync/blocking IO reachable from Python async def code.
+  entry: async-doctor
+  language: python
+  types_or: [python, pyi]
+  pass_filenames: false
+  require_serial: true

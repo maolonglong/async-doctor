@@ -3,7 +3,9 @@
 mod batch;
 
 pub use batch::PackageCacheBatch;
+#[cfg(test)]
 pub(crate) use batch::materialize_cached_functions;
+pub(crate) use batch::{DeferredCallablePatch, materialize_cached_functions_with_deferred};
 
 use std::collections::HashMap;
 use std::fs;
@@ -12,7 +14,9 @@ use std::sync::Arc;
 
 use ruff_db::system::SystemPathBuf;
 
-use crate::cache::{package_content_fingerprint, path_str_is_third_party_python, short_hash};
+use crate::cache::{
+    fingerprint_from_record_bytes, package_content_fingerprint, path_str_is_third_party_python,
+};
 
 /// A third-party `.py` definition we may extract on demand.
 #[derive(Debug, Clone)]
@@ -181,22 +185,6 @@ impl SiteRootIndex {
     }
 }
 
-fn fingerprint_from_record_bytes(dist_info: &Path, bytes: &[u8]) -> String {
-    let mut blob = Vec::with_capacity(bytes.len() + 32);
-    blob.extend_from_slice(b"RECORD:");
-    blob.extend_from_slice(bytes);
-    if let Ok(meta) = fs::metadata(dist_info) {
-        let mtime = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        blob.extend_from_slice(format!("|DI:{mtime}").as_bytes());
-    }
-    short_hash(&blob)
-}
-
 /// Per-scan memo and pre-built site-packages index for package meta lookups.
 ///
 /// Pre-indexing active `site-packages` directories once per scan avoids
@@ -256,17 +244,7 @@ impl PackageMetaMemo {
     /// Returns `(name, version, content_fingerprint)`.
     pub fn meta_for_path(&mut self, py_path: &Path) -> Option<PackageMetaTriple> {
         let s = py_path.to_string_lossy().replace('\\', "/");
-        let (root_str, rest) = match (s.rfind("/site-packages/"), s.rfind("/dist-packages/")) {
-            (Some(idx), _) => (
-                &s[..idx + "/site-packages".len()],
-                &s[idx + "/site-packages/".len()..],
-            ),
-            (None, Some(idx)) => (
-                &s[..idx + "/dist-packages".len()],
-                &s[idx + "/dist-packages/".len()..],
-            ),
-            (None, None) => return None,
-        };
+        let (root_str, rest) = crate::cache::third_party_root_split(&s)?;
         if rest.is_empty() {
             return None;
         }

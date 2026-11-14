@@ -128,7 +128,7 @@ fn materialize_higher_order_in_place(out: &mut ProjectFacts) {
                 // function, not an argument.
                 edge.callee_is_coroutine = Some(f.is_async);
                 edge.positional_literals.clear();
-                edge.keyword_true.clear();
+                edge.keyword_literals.clear();
                 edge.positional_callables = vec![Some(fid)];
                 edge.positional_externals.clear();
                 edge.positional_constructed_receivers.clear();
@@ -141,9 +141,49 @@ fn materialize_higher_order_in_place(out: &mut ProjectFacts) {
             }
             edge.is_offload_wrapper = true;
             edge.callee = CalleeRef::Offload(OffloadKind::AsyncioToThread);
-            let arg_idx = usize::from(edge.is_bound_call);
-            if arg_idx > 0 && edge.positional_callables.len() > arg_idx {
-                edge.positional_callables.drain(0..arg_idx);
+            let has_receiver_param = matches!(
+                f.param_names.first().map(String::as_str),
+                Some("self" | "cls")
+            );
+            // `CallCollector` already strips `self`/`cls` from `positional_*` on bound
+            // calls (`is_bound_call == true`). Only an unbound class-qualified call
+            // (`Pool.run_in_pool(pool, sync_fn)`) passes an explicit receiver at slot 0.
+            if !edge.is_bound_call && has_receiver_param {
+                if !edge.positional_callables.is_empty() {
+                    edge.positional_callables.drain(0..1);
+                }
+                if !edge.positional_externals.is_empty() {
+                    edge.positional_externals.drain(0..1);
+                }
+                if !edge.positional_constructed_receivers.is_empty() {
+                    edge.positional_constructed_receivers.drain(0..1);
+                }
+            }
+            // If the target callable was passed by keyword (`self.run_in_pool(fn=sync_fn)`),
+            // promote it into slot 0 so `offload-coroutine` and twin advice inspect it.
+            let has_pos_target = edge
+                .positional_callables
+                .first()
+                .copied()
+                .flatten()
+                .is_some()
+                || edge
+                    .positional_externals
+                    .first()
+                    .and_then(Option::as_ref)
+                    .is_some();
+            if !has_pos_target {
+                let target_param_idx = usize::from(has_receiver_param);
+                if let Some(param_name) = f.param_names.get(target_param_idx)
+                    && let Some((_, kw_fid)) =
+                        edge.keyword_callables.iter().find(|(k, _)| k == param_name)
+                {
+                    if edge.positional_callables.is_empty() {
+                        edge.positional_callables.push(Some(*kw_fid));
+                    } else {
+                        edge.positional_callables[0] = Some(*kw_fid);
+                    }
+                }
             }
             // The wrapper itself is often `async def`; coroutine-ness for
             // `offload-coroutine` must refer to the *callable argument*, not
@@ -223,12 +263,12 @@ fn materialize_higher_order_in_place(out: &mut ProjectFacts) {
                 occurrence: param_edge.occurrence,
                 is_offload_wrapper: false,
                 positional_literals: vec![],
-                keyword_true: vec![],
+                keyword_literals: vec![],
                 positional_callables: vec![],
                 positional_externals: vec![],
                 positional_constructed_receivers: vec![],
                 keyword_callables: vec![],
-                param_guard: param_edge.param_guard,
+                param_guards: param_edge.param_guards.clone(),
                 is_awaited: param_edge.is_awaited,
                 callee_is_coroutine: param_edge.callee_is_coroutine,
                 is_eager_offload_arg: param_edge.is_eager_offload_arg,

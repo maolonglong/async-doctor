@@ -553,3 +553,224 @@ fn m3c_relimport_missing_is_true_positive() {
     );
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn monorepo_subdirectory_scan_discovers_ancestor_dot_venv_and_venv() {
+    for venv_dir_name in [".venv", "venv"] {
+        let repo = temp_project(&[(
+            "packages/api/routes.py",
+            concat!(
+                "import asyncio\n",
+                "import httpx\n",
+                "import monopkg\n\n",
+                "async def handler():\n",
+                "    monopkg.block_now()\n",
+                "    await asyncio.to_thread(httpx.get, 'https://example.com')\n",
+            ),
+        )]);
+        // temp_project has no .venv by default, create at repo root only.
+        let sp = repo
+            .join(venv_dir_name)
+            .join("lib")
+            .join("python3.12")
+            .join("site-packages");
+        fs::create_dir_all(sp.join("monopkg")).unwrap();
+        fs::create_dir_all(sp.join("httpx")).unwrap();
+        fs::write(
+            repo.join(venv_dir_name).join("pyvenv.cfg"),
+            "home = /usr/bin\n",
+        )
+        .unwrap();
+        fs::write(
+            sp.join("monopkg/__init__.py"),
+            "import time\ndef block_now():\n    time.sleep(0.1)\n",
+        )
+        .unwrap();
+        fs::write(
+            sp.join("httpx/__init__.py"),
+            concat!(
+                "class Client:\n    def get(self, *a, **k): pass\n",
+                "class AsyncClient:\n    async def get(self, *a, **k): pass\n",
+                "def get(url, *a, **k):\n    return Client().get(url)\n",
+            ),
+        )
+        .unwrap();
+
+        let sub = repo.join("packages/api");
+        let report = scan_path(&sub).unwrap();
+        assert_eq!(
+            report.environment.kind,
+            async_doctor_core::EnvironmentKind::Venv,
+            "ancestor {venv_dir_name} must be detected as Venv: {:?}",
+            report.environment
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.rule == "blocking-sleep" && f.entry.name == "handler"),
+            "ancestor {venv_dir_name} site-packages must be followed: {:?}",
+            report.findings
+        );
+        assert!(
+            report
+                .advice
+                .iter()
+                .any(|a| a.rule == "offload-has-async-twin" && a.entry.name == "handler"),
+            "ancestor {venv_dir_name} must also feed twin_resolve: {:?}",
+            report.advice
+        );
+        let _ = fs::remove_dir_all(&repo);
+    }
+}
+
+#[test]
+fn pdm_pypackages_and_external_poetry_pipenv_venvs_resolve() {
+    // 1. PDM PEP 582 `__pypackages__/<ver>/lib` on an ancestor directory.
+    let pdm_repo = temp_project(&[(
+        "services/worker/job.py",
+        "import pdmpkg\nasync def run():\n    pdmpkg.do_io()\n",
+    )]);
+    let pdm_lib = pdm_repo.join("__pypackages__/3.12/lib");
+    fs::create_dir_all(pdm_lib.join("pdmpkg")).unwrap();
+    fs::write(
+        pdm_lib.join("pdmpkg/__init__.py"),
+        "import time\ndef do_io():\n    time.sleep(0.1)\n",
+    )
+    .unwrap();
+    let pdm_report = scan_path(&pdm_repo.join("services/worker")).unwrap();
+    assert!(
+        pdm_report
+            .findings
+            .iter()
+            .any(|f| f.rule == "blocking-sleep" && f.entry.name == "run"),
+        "PDM __pypackages__ must resolve third-party package: {:?}",
+        pdm_report.findings
+    );
+    let _ = fs::remove_dir_all(&pdm_repo);
+
+    // 2. External Poetry (`POETRY_VIRTUALENVS_PATH`) & Pipenv (`WORKON_HOME`) stores.
+    let store = fresh_cache_dir("ext-venv-stores");
+    let poetry_store = store.join("pypoetry-venvs");
+    let pipenv_store = store.join("pipenv-venvs");
+    let poetry_proj = temp_project(&[
+        ("pyproject.toml", "[tool.poetry]\nname = \"MyApp\"\n"),
+        (
+            "sub/app.py",
+            "import poetrypkg\nasync def p():\n    poetrypkg.sync_work()\n",
+        ),
+    ]);
+    let p_canon = poetry_proj.canonicalize().unwrap_or(poetry_proj.clone());
+    let p_hash = crate::env_discovery::sha256_base64url8(p_canon.to_string_lossy().as_bytes());
+    let p_sp = poetry_store.join(format!(
+        "myapp-{p_hash}-py3.12/lib/python3.12/site-packages"
+    ));
+    fs::create_dir_all(p_sp.join("poetrypkg")).unwrap();
+    fs::write(
+        p_sp.join("poetrypkg/__init__.py"),
+        "import time\ndef sync_work():\n    time.sleep(0.1)\n",
+    )
+    .unwrap();
+
+    let pipenv_proj = temp_project(&[
+        ("Pipfile", "[packages]\npipenvpkg = \"*\"\n"),
+        (
+            "app.py",
+            "import pipenvpkg\nasync def q():\n    pipenvpkg.sync_work()\n",
+        ),
+    ]);
+    let pip_canon = pipenv_proj.canonicalize().unwrap_or(pipenv_proj.clone());
+    let pip_hash = crate::env_discovery::sha256_base64url8(
+        pip_canon.join("Pipfile").to_string_lossy().as_bytes(),
+    );
+    let dir_name = pipenv_proj.file_name().unwrap().to_str().unwrap();
+    let e_sp = pipenv_store.join(format!(
+        "{dir_name}-{pip_hash}/lib/python3.12/site-packages"
+    ));
+    fs::create_dir_all(e_sp.join("pipenvpkg")).unwrap();
+    fs::write(
+        e_sp.join("pipenvpkg/__init__.py"),
+        "import time\ndef sync_work():\n    time.sleep(0.1)\n",
+    )
+    .unwrap();
+
+    crate::hermetic_env::with_clean_venv_env(|| {
+        unsafe {
+            std::env::set_var("POETRY_VIRTUALENVS_PATH", &poetry_store);
+            std::env::set_var("WORKON_HOME", &pipenv_store);
+        }
+        let r1 = scan_path(&poetry_proj.join("sub")).unwrap();
+        let r2 = scan_path(&pipenv_proj).unwrap();
+        unsafe {
+            std::env::remove_var("POETRY_VIRTUALENVS_PATH");
+            std::env::remove_var("WORKON_HOME");
+        }
+        assert_eq!(r1.environment.origin, "poetry virtualenv");
+        assert!(r1.findings.iter().any(|f| f.rule == "blocking-sleep"));
+        assert_eq!(r2.environment.origin, "pipenv virtualenv");
+        assert!(r2.findings.iter().any(|f| f.rule == "blocking-sleep"));
+
+        // 3. Default `$HOME/.local/share/virtualenvs` (Pipenv) and
+        // `$HOME/Library/Caches/pypoetry/virtualenvs` (macOS Poetry) still resolve
+        // even when `XDG_CACHE_HOME` is set and `XDG_DATA_HOME` is unset.
+        let fake_home = store.join("fake-home");
+        let xdg_cache = store.join("custom-xdg-cache");
+        let home_pipenv = fake_home.join(".local/share/virtualenvs").join(format!(
+            "{dir_name}-{pip_hash}/lib/python3.12/site-packages"
+        ));
+        let home_poetry = fake_home
+            .join("Library/Caches/pypoetry/virtualenvs")
+            .join(format!(
+                "myapp-{p_hash}-py3.12/lib/python3.12/site-packages"
+            ));
+        fs::create_dir_all(home_pipenv.join("pipenvpkg")).unwrap();
+        fs::create_dir_all(home_poetry.join("poetrypkg")).unwrap();
+        fs::create_dir_all(&xdg_cache).unwrap();
+        fs::write(
+            home_pipenv.join("pipenvpkg/__init__.py"),
+            "import time\ndef sync_work():\n    time.sleep(0.1)\n",
+        )
+        .unwrap();
+        fs::write(
+            home_poetry.join("poetrypkg/__init__.py"),
+            "import time\ndef sync_work():\n    time.sleep(0.1)\n",
+        )
+        .unwrap();
+        let old_home = std::env::var_os("HOME");
+        let old_xdg_cache = std::env::var_os("XDG_CACHE_HOME");
+        let old_xdg_data = std::env::var_os("XDG_DATA_HOME");
+        unsafe {
+            std::env::set_var("HOME", &fake_home);
+            std::env::set_var("XDG_CACHE_HOME", &xdg_cache);
+            std::env::remove_var("XDG_DATA_HOME");
+        }
+        let res = std::panic::catch_unwind(|| {
+            let rp = scan_path(&poetry_proj.join("sub")).unwrap();
+            let re = scan_path(&pipenv_proj).unwrap();
+            assert_eq!(rp.environment.origin, "poetry virtualenv");
+            assert!(rp.findings.iter().any(|f| f.rule == "blocking-sleep"));
+            assert_eq!(re.environment.origin, "pipenv virtualenv");
+            assert!(re.findings.iter().any(|f| f.rule == "blocking-sleep"));
+        });
+        unsafe {
+            match old_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match old_xdg_cache {
+                Some(v) => std::env::set_var("XDG_CACHE_HOME", v),
+                None => std::env::remove_var("XDG_CACHE_HOME"),
+            }
+            match old_xdg_data {
+                Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+                None => std::env::remove_var("XDG_DATA_HOME"),
+            }
+        }
+        if let Err(payload) = res {
+            std::panic::resume_unwind(payload);
+        }
+    });
+    let _ = fs::remove_dir_all(&poetry_proj);
+    let _ = fs::remove_dir_all(&pipenv_proj);
+    let _ = fs::remove_dir_all(&store);
+}

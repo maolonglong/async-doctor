@@ -4,44 +4,35 @@
 //! options, and follow budget are unchanged, a warm run reloads the prior
 //! [`Report`] and skips ty extract/analyze entirely.
 //!
-//! Layout: `{cache_root}/v{schema}/{tool}/scan/{fingerprint}.json`
+//! Layout: `{cache_root}/v{schema}/{tool}/scan/{root_prefix}-{input_hash}.json`
+//! At most `MAX_SCAN_ENTRIES_PER_ROOT = 3` most-recent entries are retained per
+//! canonical `scan_root`, and sibling `v{old}` schema directories older than
+//! [`CACHE_SCHEMA_VERSION`] are opportunistically pruned on write.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 use async_doctor_core::{AnalyzeOptions, Report};
 use serde::{Deserialize, Serialize};
 
 use crate::cache::{
-    CACHE_SCHEMA_VERSION, TOOL_VERSION, build_id, package_content_fingerprint, sanitize_component,
-    short_hash, unique_tmp_path,
+    CACHE_SCHEMA_VERSION, TOOL_VERSION, build_id, mtime_stamp, package_content_fingerprint,
+    prune_stale_schema_dirs, sanitize_component, short_hash, unique_tmp_path,
 };
 use crate::extract::discover_python_and_stub_files;
 use crate::search_paths::discover_extra_paths;
 
-static LAST_SCAN_IGNORE_CANDIDATES: Mutex<Option<(PathBuf, Vec<PathBuf>)>> = Mutex::new(None);
+const MAX_SCAN_ENTRIES_PER_ROOT: usize = 3;
 
-/// Take the list of `.py` files under `scan_root` that contained `"async-doctor"`
-/// during the most recent directory `scan_input_fingerprint` call, if `scan_root`
-/// matches.
-pub fn take_ignore_candidate_files(scan_root: &Path) -> Option<Vec<PathBuf>> {
-    let root_canon = scan_root
-        .canonicalize()
-        .unwrap_or_else(|_| scan_root.to_path_buf());
-    let mut guard = LAST_SCAN_IGNORE_CANDIDATES.lock().ok()?;
-    if guard.as_ref().is_some_and(|(r, _)| r == &root_canon) {
-        guard.take().map(|(_, files)| files)
-    } else {
-        None
-    }
-}
-
-pub(crate) fn clear_ignore_candidate_files() {
-    if let Ok(mut guard) = LAST_SCAN_IGNORE_CANDIDATES.lock() {
-        *guard = None;
-    }
+/// Whole-scan cache key plus the `.py` files under `scan_root` that contained
+/// `"async-doctor"` during fingerprinting (used to scope inline-suppression parsing
+/// without any process-global state).
+#[derive(Debug, Clone)]
+pub(crate) struct ScanFingerprint {
+    pub key: String,
+    pub ignore_candidate_files: Vec<PathBuf>,
 }
 
 /// On-disk envelope so stale schema/tool versions never deserialize as a hit.
@@ -52,6 +43,8 @@ struct ScanCacheFile {
     /// Echo of the filename fingerprint (integrity check).
     input_fingerprint: String,
     report: Report,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    item_spans: std::collections::BTreeMap<String, Vec<(String, u32, u32)>>,
 }
 
 #[derive(Serialize)]
@@ -60,6 +53,8 @@ struct ScanCacheFileRef<'a> {
     tool_version: &'a str,
     input_fingerprint: &'a str,
     report: &'a Report,
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    item_spans: &'a std::collections::BTreeMap<String, Vec<(String, u32, u32)>>,
 }
 
 fn scan_cache_dir(root: &Path) -> PathBuf {
@@ -72,10 +67,85 @@ fn scan_cache_path(root: &Path, fingerprint: &str) -> PathBuf {
     scan_cache_dir(root).join(format!("{}.json", sanitize_component(fingerprint)))
 }
 
+fn fingerprint_root_prefix(sanitized_fp: &str) -> Option<&str> {
+    sanitized_fp
+        .split_once('-')
+        .map(|(prefix, _)| prefix)
+        .filter(|p| !p.is_empty())
+}
+
+/// Reconcile `.{prefix}.order` with `.json` files on disk, promote `stem` to
+/// most-recent, and evict oldest entries beyond `MAX_SCAN_ENTRIES_PER_ROOT`.
+fn touch_and_gc_root_entries(scan_dir: &Path, prefix: &str, stem: &str, evict: bool) {
+    let prefix_dash = format!("{prefix}-");
+    let mut disk_stems: Vec<((u64, u32), String)> = Vec::new();
+    let Ok(entries) = fs::read_dir(scan_dir) else {
+        return;
+    };
+    for ent in entries.flatten() {
+        let fname = ent.file_name();
+        let Some(name) = fname.to_str() else {
+            continue;
+        };
+        let Some(file_stem) = name.strip_suffix(".json") else {
+            continue;
+        };
+        if !file_stem.starts_with(&prefix_dash) {
+            continue;
+        }
+        let stamp = ent.metadata().map(|m| mtime_stamp(&m)).unwrap_or((0, 0));
+        disk_stems.push((stamp, file_stem.to_string()));
+    }
+    let on_disk: HashSet<String> = disk_stems.iter().map(|(_, s)| s.clone()).collect();
+    let order_path = scan_dir.join(format!(".{prefix}.order"));
+    let existing_text = fs::read_to_string(&order_path).unwrap_or_default();
+    if !evict
+        && existing_text
+            .lines()
+            .next_back()
+            .is_some_and(|last| last == stem)
+        && on_disk.len() <= MAX_SCAN_ENTRIES_PER_ROOT
+    {
+        return;
+    }
+
+    let mut ordered: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for line in existing_text.lines() {
+        let s = line.trim();
+        if !s.is_empty() && on_disk.contains(s) && seen.insert(s.to_string()) {
+            ordered.push(s.to_string());
+        }
+    }
+    disk_stems.sort();
+    for (_, s) in disk_stems {
+        if s != stem && seen.insert(s.clone()) {
+            ordered.push(s);
+        }
+    }
+    ordered.retain(|s| s != stem);
+    if on_disk.contains(stem) {
+        ordered.push(stem.to_string());
+    }
+    if evict {
+        while ordered.len() > MAX_SCAN_ENTRIES_PER_ROOT {
+            let victim = ordered.remove(0);
+            let _ = fs::remove_file(scan_dir.join(format!("{victim}.json")));
+        }
+    }
+    let tmp = unique_tmp_path(&order_path);
+    if fs::write(&tmp, ordered.join("\n"))
+        .and_then(|()| fs::rename(&tmp, &order_path))
+        .is_err()
+    {
+        let _ = fs::remove_file(&tmp);
+    }
+}
+
 /// Load a cached report when present and compatible with this tool/schema.
 pub fn load_scan_report(root: &Path, fingerprint: &str) -> Option<Report> {
     let path = scan_cache_path(root, fingerprint);
-    let data = fs::read(path).ok()?;
+    let data = fs::read(&path).ok()?;
     let cached: ScanCacheFile = serde_json::from_slice(&data).ok()?;
     if cached.schema_version != CACHE_SCHEMA_VERSION || cached.tool_version != TOOL_VERSION {
         return None;
@@ -83,11 +153,19 @@ pub fn load_scan_report(root: &Path, fingerprint: &str) -> Option<Report> {
     if cached.input_fingerprint != fingerprint {
         return None;
     }
-    Some(cached.report)
+    let sanitized = sanitize_component(fingerprint);
+    if let (Some(scan_dir), Some(prefix)) = (path.parent(), fingerprint_root_prefix(&sanitized)) {
+        touch_and_gc_root_entries(scan_dir, prefix, &sanitized, false);
+    }
+    let mut report = cached.report;
+    report.item_spans = cached.item_spans;
+    Some(report)
 }
 
-/// Persist a scan report atomically under `fingerprint`.
+/// Persist a scan report atomically under `fingerprint`, pruning stale schema
+/// directories and capping per-root scan cache files to `K = 3`.
 pub fn save_scan_report(root: &Path, fingerprint: &str, report: &Report) -> std::io::Result<()> {
+    prune_stale_schema_dirs(root);
     let path = scan_cache_path(root, fingerprint);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -97,6 +175,7 @@ pub fn save_scan_report(root: &Path, fingerprint: &str, report: &Report) -> std:
         tool_version: TOOL_VERSION,
         input_fingerprint: fingerprint,
         report,
+        item_spans: &report.item_spans,
     };
     let tmp = unique_tmp_path(&path);
     let write_res = (|| -> std::io::Result<()> {
@@ -110,26 +189,34 @@ pub fn save_scan_report(root: &Path, fingerprint: &str, report: &Report) -> std:
         let _ = fs::remove_file(&tmp);
         return Err(err);
     }
+    let sanitized = sanitize_component(fingerprint);
+    if let (Some(scan_dir), Some(prefix)) = (path.parent(), fingerprint_root_prefix(&sanitized)) {
+        touch_and_gc_root_entries(scan_dir, prefix, &sanitized, true);
+    }
     Ok(())
 }
 
 /// Fingerprint everything that can change graded output for a scan root.
-///
-/// Includes schema/tool versions, analyze options, follow budget, every
-/// first-party `.py` / `.pyi` `(rel, content-hash)`, the active venv identity,
-/// and each installed dist-info content fingerprint.
-///
-/// Content hashes (not whole-second mtime+size) so same-second same-size edits
-/// still invalidate the whole-scan cache. Callers must pass stub paths as well
-/// as `.py` sources — ty resolves against first-party `.pyi` files.
+#[cfg(test)]
 pub fn scan_input_fingerprint(
     scan_root: &Path,
     first_party_files: &[PathBuf],
     options: AnalyzeOptions,
     follow_budget: usize,
 ) -> String {
+    scan_input_fingerprint_with_python(scan_root, first_party_files, options, follow_budget, None)
+        .key
+}
+
+pub(crate) fn scan_input_fingerprint_with_python(
+    scan_root: &Path,
+    first_party_files: &[PathBuf],
+    options: AnalyzeOptions,
+    follow_budget: usize,
+    python: Option<&Path>,
+) -> ScanFingerprint {
     let mut blob = String::with_capacity(64 * 1024);
-    blob.push_str("scan-cache-v5\n");
+    blob.push_str("scan-cache-v8\n");
     blob.push_str(&format!(
         "schema:{CACHE_SCHEMA_VERSION}\ntool:{TOOL_VERSION}\nbuild:{}\n",
         build_id()
@@ -138,10 +225,18 @@ pub fn scan_input_fingerprint(
         "include_non_production:{}\nshow_unresolved:{}\nfollow_budget:{follow_budget}\n",
         options.include_non_production as u8, options.show_unresolved as u8,
     ));
+    match python {
+        Some(py) => {
+            let py_canon = py.canonicalize().unwrap_or_else(|_| py.to_path_buf());
+            blob.push_str(&format!("python_arg:{}\n", py_canon.display()));
+        }
+        None => blob.push_str("python_arg:\n"),
+    }
 
     let root_canon = scan_root
         .canonicalize()
         .unwrap_or_else(|_| scan_root.to_path_buf());
+    let root_prefix = short_hash(format!("scan-root-v1:{}", root_canon.display()).as_bytes());
     blob.push_str(&format!("root:{}\n", root_canon.display()));
 
     let fp_one = |path: &PathBuf| -> (String, String, Option<PathBuf>) {
@@ -194,17 +289,13 @@ pub fn scan_input_fingerprint(
         }
         files.push((rel, fp));
     }
-    if let Ok(mut guard) = LAST_SCAN_IGNORE_CANDIDATES.lock() {
-        *guard = Some((root_canon.clone(), ignore_candidates));
-    }
+    ignore_candidates.sort();
     files.sort();
     for (rel, fp) in &files {
-        // Tag by extension so .py vs .pyi with the same stem cannot collide.
         let tag = if rel.ends_with(".pyi") { "pyi" } else { "py" };
         blob.push_str(&format!("{tag}:{rel}:{fp}\n"));
     }
 
-    // Config files that affect search-path discovery (extraPaths / editables).
     for (depth, anc) in root_canon.ancestors().take(6).enumerate() {
         for name in [
             "pyproject.toml",
@@ -217,27 +308,24 @@ pub fn scan_input_fingerprint(
         }
     }
 
-    let venv = resolve_venv_prefix(&root_canon);
-    let site_roots = match &venv {
+    let (env_kind, env_prefix, site_roots) =
+        crate::env_discovery::discover_site_packages_for_path(&root_canon, python);
+    match &env_prefix {
         Some(prefix) => {
             let canon = prefix.canonicalize().unwrap_or_else(|_| prefix.clone());
-            blob.push_str(&format!("venv:{}\n", canon.display()));
-            let roots = site_packages_roots_for_prefix(&canon);
-            let mut pkgs = fingerprint_site_packages(&roots);
-            pkgs.sort();
-            for line in pkgs {
-                blob.push_str(&line);
-                blob.push('\n');
-            }
-            roots
+            blob.push_str(&format!("venv:{env_kind:?}:{}\n", canon.display()));
         }
-        None => {
-            blob.push_str("venv:\n");
-            Vec::new()
+        None => blob.push_str("venv:\n"),
+    }
+    if !site_roots.is_empty() {
+        let mut pkgs = fingerprint_site_packages(&site_roots);
+        pkgs.sort();
+        for line in pkgs {
+            blob.push_str(&line);
+            blob.push('\n');
         }
-    };
+    }
 
-    // Fingerprint outside-scan-root extraPaths / editable finder targets.
     if let Ok(sys_root) = ruff_db::system::SystemPathBuf::from_path_buf(root_canon.clone()) {
         let mut existing = vec![sys_root.clone()];
         let src_dir = sys_root.join("src");
@@ -280,7 +368,10 @@ pub fn scan_input_fingerprint(
         }
     }
 
-    short_hash(blob.as_bytes())
+    ScanFingerprint {
+        key: format!("{root_prefix}-{}", short_hash(blob.as_bytes())),
+        ignore_candidate_files: ignore_candidates,
+    }
 }
 
 fn content_fingerprint(path: &Path) -> Option<String> {
@@ -299,91 +390,30 @@ fn push_file_content(blob: &mut String, tag: &str, path: &Path) {
 }
 
 /// Compact fingerprint of the active venv's installed dist-info set.
-///
-/// Available for callers that need a standalone venv identity (the whole-scan
-/// fingerprint already embeds the same dist-info lines).
 #[allow(dead_code)]
 pub fn venv_fingerprint(scan_root: &Path) -> String {
     let root_canon = scan_root
         .canonicalize()
         .unwrap_or_else(|_| scan_root.to_path_buf());
-    let mut blob = String::from("venv-fp-v1\n");
-    match resolve_venv_prefix(&root_canon) {
+    let mut blob = String::from("venv-fp-v2\n");
+    let (env_kind, env_prefix, roots) =
+        crate::env_discovery::discover_site_packages_for_path(&root_canon, None);
+    match env_prefix {
         Some(prefix) => {
             let canon = prefix.canonicalize().unwrap_or_else(|_| prefix.clone());
-            blob.push_str(&format!("venv:{}\n", canon.display()));
-            let roots = site_packages_roots_for_prefix(&canon);
-            let mut pkgs = fingerprint_site_packages(&roots);
-            pkgs.sort();
-            for line in pkgs {
-                blob.push_str(&line);
-                blob.push('\n');
-            }
+            blob.push_str(&format!("venv:{env_kind:?}:{}\n", canon.display()));
         }
         None => blob.push_str("venv:\n"),
     }
+    if !roots.is_empty() {
+        let mut pkgs = fingerprint_site_packages(&roots);
+        pkgs.sort();
+        for line in pkgs {
+            blob.push_str(&line);
+            blob.push('\n');
+        }
+    }
     short_hash(blob.as_bytes())
-}
-
-/// Prefer `VIRTUAL_ENV`, then ancestor `.venv`/`venv`, then `CONDA_PREFIX`.
-pub(crate) fn resolve_venv_prefix(scan_root: &Path) -> Option<PathBuf> {
-    if let Ok(v) = std::env::var("VIRTUAL_ENV")
-        && !v.is_empty()
-    {
-        let p = PathBuf::from(v);
-        if p.is_dir() {
-            return Some(p);
-        }
-    }
-    for base in scan_root.ancestors() {
-        for name in [".venv", "venv"] {
-            let p = base.join(name);
-            if p.is_dir()
-                && (p.join("pyvenv.cfg").is_file()
-                    || p.join("lib").is_dir()
-                    || p.join("Lib").is_dir())
-            {
-                return Some(p);
-            }
-        }
-    }
-    if let Ok(c) = std::env::var("CONDA_PREFIX")
-        && !c.is_empty()
-    {
-        let p = PathBuf::from(c);
-        if p.is_dir() {
-            return Some(p);
-        }
-    }
-    None
-}
-
-/// Enumerate sorted, deduplicated `site-packages` directories under `venv_prefix`.
-pub(crate) fn site_packages_roots_for_prefix(venv_prefix: &Path) -> Vec<PathBuf> {
-    let mut site_roots = Vec::new();
-    for lib_dir in ["lib", "lib64"] {
-        let lib = venv_prefix.join(lib_dir);
-        if let Ok(entries) = fs::read_dir(&lib) {
-            for ent in entries.flatten() {
-                let name = ent.file_name();
-                let name = name.to_string_lossy();
-                if name.starts_with("python") {
-                    let sp = ent.path().join("site-packages");
-                    if sp.is_dir() {
-                        site_roots.push(sp);
-                    }
-                }
-            }
-        }
-    }
-    // Windows-style / alternate layout.
-    let sp = venv_prefix.join("Lib").join("site-packages");
-    if sp.is_dir() {
-        site_roots.push(sp);
-    }
-    site_roots.sort();
-    site_roots.dedup();
-    site_roots
 }
 
 fn fingerprint_site_packages(site_roots: &[PathBuf]) -> Vec<String> {
@@ -394,13 +424,13 @@ fn fingerprint_site_packages(site_roots: &[PathBuf]) -> Vec<String> {
         };
         let mut dists: Vec<PathBuf> = Vec::new();
         let mut pths_and_finders: Vec<PathBuf> = Vec::new();
-        let mut loose_py: Vec<(String, u64, u64)> = Vec::new();
+        let mut loose_py: Vec<(String, u64, u64, u32)> = Vec::new();
         for ent in entries.flatten() {
             let p = ent.path();
             let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
-            if name.ends_with(".dist-info") {
+            if name.ends_with(".dist-info") || name.ends_with(".egg-info") {
                 dists.push(p);
             } else if name.ends_with(".pth")
                 || (name.starts_with("__editable__") && name.ends_with("_finder.py"))
@@ -409,13 +439,8 @@ fn fingerprint_site_packages(site_roots: &[PathBuf]) -> Vec<String> {
             } else if name.ends_with(".py")
                 && let Ok(meta) = ent.metadata()
             {
-                let mtime = meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                loose_py.push((name.to_string(), meta.len(), mtime));
+                let (secs, nanos) = mtime_stamp(&meta);
+                loose_py.push((name.to_string(), meta.len(), secs, nanos));
             }
         }
         dists.sort();
@@ -435,8 +460,8 @@ fn fingerprint_site_packages(site_roots: &[PathBuf]) -> Vec<String> {
             out.push(format!("pth:{name}:{fp}"));
         }
         loose_py.sort();
-        for (name, len, mtime) in loose_py {
-            out.push(format!("loose_py:{name}:{len}:{mtime}"));
+        for (name, len, secs, nanos) in loose_py {
+            out.push(format!("loose_py:{name}:{len}:{secs}.{nanos}"));
         }
     }
     out
@@ -469,23 +494,24 @@ mod tests {
         let fp1 = scan_input_fingerprint(&project, &files, AnalyzeOptions::default(), 256);
         let fp2 = scan_input_fingerprint(&project, &files, AnalyzeOptions::default(), 256);
         assert_eq!(fp1, fp2);
+        assert!(
+            fp1.contains('-'),
+            "fingerprint should carry root prefix: {fp1}"
+        );
 
         let report = Report::empty_complete();
         save_scan_report(&root, &fp1, &report).unwrap();
         let loaded = load_scan_report(&root, &fp1).unwrap();
         assert_eq!(loaded, report);
 
-        // Budget change must miss.
         let fp_budget = scan_input_fingerprint(&project, &files, AnalyzeOptions::default(), 1);
         assert_ne!(fp1, fp_budget);
         assert!(load_scan_report(&root, &fp_budget).is_none());
 
-        // Content change must miss.
         fs::write(&py, "async def h():\n    await x()\n").unwrap();
         let fp3 = scan_input_fingerprint(&project, &files, AnalyzeOptions::default(), 256);
         assert_ne!(fp1, fp3);
 
-        // Same-size same-second edit must also miss (content hash, not mtime+len).
         let before = "import time\n\nasync def h():\n    time.sleep(1)\n";
         let after = "import time\n\nasync def h():\n    time.sleeq(1)\n";
         assert_eq!(before.len(), after.len());
@@ -493,22 +519,18 @@ mod tests {
         let fp_a = scan_input_fingerprint(&project, &files, AnalyzeOptions::default(), 256);
         fs::write(&py, after).unwrap();
         let fp_b = scan_input_fingerprint(&project, &files, AnalyzeOptions::default(), 256);
-        assert_ne!(
-            fp_a, fp_b,
-            "same-size edit must change content-hash fingerprint"
-        );
+        assert_ne!(fp_a, fp_b);
 
-        // First-party .pyi stubs must participate in the fingerprint.
         let stub = project.join("a.pyi");
         fs::write(&py, "async def h():\n    pass\n").unwrap();
         let fp_no_stub = scan_input_fingerprint(&project, &files, AnalyzeOptions::default(), 256);
         fs::write(&stub, "def h() -> None: ...\n").unwrap();
         let with_stub = vec![py.clone(), stub.clone()];
         let fp_stub = scan_input_fingerprint(&project, &with_stub, AnalyzeOptions::default(), 256);
-        assert_ne!(fp_no_stub, fp_stub, "adding .pyi must change fingerprint");
+        assert_ne!(fp_no_stub, fp_stub);
         fs::write(&stub, "def h() -> int: ...\n").unwrap();
         let fp_stub2 = scan_input_fingerprint(&project, &with_stub, AnalyzeOptions::default(), 256);
-        assert_ne!(fp_stub, fp_stub2, "editing .pyi must change fingerprint");
+        assert_ne!(fp_stub, fp_stub2);
 
         let _ = fs::remove_dir_all(&dir);
     }

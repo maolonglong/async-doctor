@@ -11,6 +11,7 @@ use super::style::Palette;
 use super::{sink_label, write_finding_indented};
 
 const TOP_CLUSTERS_SHOWN: usize = 8;
+const TOP_GROUPS_SHOWN: usize = 10;
 
 pub(super) fn write_grouped(
     out: &mut impl Write,
@@ -52,6 +53,7 @@ pub(super) fn write_grouped(
     let total_groups = all_group_ids.len();
     let b = pal.bold;
     let dim = pal.dim;
+    let ck = pal.choke;
     // Lead with distinct sink sites (the actionable unit), then findings
     // (entry × sink paths), so totals are not mistaken for site counts.
     let entry_s = if total_entries == 1 { "y" } else { "ies" };
@@ -60,7 +62,7 @@ pub(super) fn write_grouped(
     let group_s = if total_groups == 1 { "" } else { "s" };
     writeln!(
         out,
-        "{b}Found {} sink site{} · {} finding{} · {} entr{} · {} fix group{}{b:#}\n",
+        "{b}Found {} sink site{} · {} finding{} · {} entr{} · {} fix group{}{b:#}",
         unique_sites,
         site_s,
         total_findings,
@@ -70,6 +72,10 @@ pub(super) fn write_grouped(
         total_groups,
         group_s
     )?;
+    if let Some(top) = sites.first().filter(|s| s.finding_count > 1) {
+        write_top_fix_callout(out, top, ck)?;
+    }
+    writeln!(out)?;
     writeln!(
         out,
         "{dim}(sink sites ranked by entries; shared entry sets are clustered; pass --expand for every chain){dim:#}\n"
@@ -86,10 +92,19 @@ pub(super) fn write_grouped(
     let mut ordered: Vec<_> = groups.into_iter().collect();
     ordered.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(b.0)));
 
+    let omitted_groups = ordered.len().saturating_sub(TOP_GROUPS_SHOWN);
+    let omitted_group_findings: usize = if omitted_groups > 0 {
+        ordered[TOP_GROUPS_SHOWN..]
+            .iter()
+            .map(|(_, g)| g.len())
+            .sum()
+    } else {
+        0
+    };
+
     let r = pal.rule_finding;
     let fx = pal.fix;
-    let ck = pal.choke;
-    for (gid, group) in ordered {
+    for (gid, group) in ordered.into_iter().take(TOP_GROUPS_SHOWN) {
         let rep = group[0];
         let group_sites = sites_by_group.remove(gid).unwrap_or_default();
         let mut group_entries: BTreeSet<&str> = BTreeSet::new();
@@ -168,6 +183,74 @@ pub(super) fn write_grouped(
             writeln!(out)?;
         }
     }
+
+    if omitted_groups > 0 {
+        writeln!(
+            out,
+            "{dim}… and {omitted_groups} more fix group(s) ({omitted_group_findings} finding(s)); pass --expand to list all{dim:#}\n"
+        )?;
+    }
+    Ok(())
+}
+
+fn format_sync_callers_note(site: &SinkSiteSummary) -> String {
+    if site.sync_caller_count == 0 {
+        return String::new();
+    }
+    let caller_s = if site.sync_caller_count == 1 { "" } else { "s" };
+    match site.sample_sync_caller.as_deref() {
+        Some(sample) if !sample.is_empty() => {
+            format!(
+                "; {} sync caller{caller_s}, e.g. {sample}",
+                site.sync_caller_count
+            )
+        }
+        _ => format!("; {} sync caller{caller_s}", site.sync_caller_count),
+    }
+}
+
+fn write_top_fix_callout(
+    out: &mut impl Write,
+    top: &SinkSiteSummary,
+    ck: anstyle::Style,
+) -> anyhow::Result<()> {
+    let entry_s = if top.entry_count == 1 { "y" } else { "ies" };
+    let sync_note = format_sync_callers_note(top);
+    if top.choke_point_finding_count > 1 && !top.choke_point_file.is_empty() {
+        let choke_call = truncate_call(&top.choke_point_text, 48);
+        if top.choke_point_finding_count == top.finding_count {
+            writeln!(
+                out,
+                "{ck}Top fix:{ck:#} {}:{}  {choke_call} → {}:{}  (clears {} findings across {} entr{entry_s}{sync_note})",
+                top.choke_point_file,
+                top.choke_point_line,
+                top.file,
+                top.line,
+                top.finding_count,
+                top.entry_count,
+            )?;
+        } else {
+            writeln!(
+                out,
+                "{ck}Top fix:{ck:#} {}:{}  {}  (clears {} findings across {} entr{entry_s}; choke {}:{} in {}{sync_note})",
+                top.file,
+                top.line,
+                truncate_call(&top.text, 48),
+                top.finding_count,
+                top.entry_count,
+                top.choke_point_file,
+                top.choke_point_line,
+                top.choke_point_finding_count,
+            )?;
+        }
+    } else {
+        let call = truncate_call(&top.text, 56);
+        writeln!(
+            out,
+            "{ck}Top fix:{ck:#} {}:{}  {call}  (clears {} findings across {} entr{entry_s}{sync_note})",
+            top.file, top.line, top.finding_count, top.entry_count,
+        )?;
+    }
     Ok(())
 }
 
@@ -191,7 +274,7 @@ fn write_top_sink_clusters(
         }
         if site.shared_entry_site_count > 1 && !site.entry_set_id.is_empty() {
             if !emitted_set_ids.insert(site.entry_set_id.as_str()) {
-                continue; // already printed this cluster
+                continue;
             }
             let cluster: Vec<&SinkSiteSummary> = group_sites
                 .iter()
@@ -211,9 +294,10 @@ fn write_top_sink_clusters(
             )?;
             for s in &cluster {
                 let short = truncate_call(&s.text, 64);
+                let sync_note = format_sync_callers_note(s);
                 writeln!(
                     out,
-                    "        {}:{}  {short}  — {} finding(s)",
+                    "        {}:{}  {short}  — {} finding(s){sync_note}",
                     s.file, s.line, s.finding_count
                 )?;
             }
@@ -226,9 +310,10 @@ fn write_top_sink_clusters(
             sites_covered += 1;
             clusters_shown += 1;
             let short = truncate_call(&site.text, 64);
+            let sync_note = format_sync_callers_note(site);
             writeln!(
                 out,
-                "    {clusters_shown}. {}:{}  {short}  — {} finding(s), {} entr{}",
+                "    {clusters_shown}. {}:{}  {short}  — {} finding(s), {} entr{}{sync_note}",
                 site.file,
                 site.line,
                 site.finding_count,

@@ -1,21 +1,23 @@
 //! Control-flow-aware body walking for call collection.
 
-use async_doctor_core::{CallKind, ConditionTag};
+mod loops_and_with;
+
+use std::collections::HashSet;
+
+use async_doctor_core::ConditionTag;
 use ruff_db::files::FilePath;
 use ruff_python_ast::visitor::Visitor;
 use ruff_python_ast::{self as ast, Expr, Stmt};
-use ruff_text_size::Ranged;
 use ty_python_core::definition::DefinitionKind;
 use ty_python_semantic::{ImportAliasResolution, definitions_for_name};
 
 use super::CallCollector;
-use super::loop_guards::except_is_runtime_error;
 use super::thread_guards::{
     futures_proven_done_in_test, is_off_loop_thread_test, is_on_loop_thread_test,
 };
 use crate::extract::constants::{
-    EarlyExitKind, ModuleConst, body_always_exits, is_cache_hit_test, is_cache_miss_test,
-    param_guard_from_test,
+    EarlyExitKind, ModuleConst, body_always_exits, cache_hit_storage_operand,
+    cache_miss_storage_operand, param_guards_from_test,
 };
 use crate::extract::helpers::narrow_from_test;
 use crate::extract::path::relative_display;
@@ -46,42 +48,79 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         let mut after_cache = 0u32;
         let mut after_no_loop = 0u32;
         let mut after_dead = 0u32;
+        let saved_guard_len = self.active_param_guards.len();
         for stmt in body {
             if let Stmt::If(if_stmt) = stmt {
                 self.visit_if(if_stmt);
-                if after_dead == 0
-                    && let Some(kind) = self.classify_early_exit(if_stmt)
-                {
-                    match kind {
-                        EarlyExitKind::UnreachableRest => {
-                            after_dead += 1;
-                            self.dead_depth += 1;
-                        }
-                        EarlyExitKind::Conditional {
-                            cache_miss,
-                            no_running_loop,
-                        } => {
-                            after_branch += 1;
-                            self.branch_depth += 1;
-                            if cache_miss {
-                                after_cache += 1;
-                                self.cache_miss_depth += 1;
+                if after_dead == 0 {
+                    if let Some(kind) = self.classify_early_exit(if_stmt) {
+                        match kind {
+                            EarlyExitKind::UnreachableRest => {
+                                after_dead += 1;
+                                self.dead_depth += 1;
                             }
-                            if no_running_loop {
-                                after_no_loop += 1;
-                                self.no_running_loop_depth += 1;
+                            EarlyExitKind::Conditional {
+                                cache_miss,
+                                no_running_loop,
+                            } => {
+                                after_branch += 1;
+                                self.branch_depth += 1;
+                                if cache_miss {
+                                    after_cache += 1;
+                                    self.cache_miss_depth += 1;
+                                }
+                                if no_running_loop {
+                                    after_no_loop += 1;
+                                    self.no_running_loop_depth += 1;
+                                }
                             }
                         }
                     }
+                    self.push_early_exit_param_guards(if_stmt);
                 }
             } else {
                 self.visit_stmt(stmt);
             }
         }
+        self.active_param_guards.truncate(saved_guard_len);
         self.branch_depth -= after_branch;
         self.cache_miss_depth -= after_cache;
         self.no_running_loop_depth -= after_no_loop;
         self.dead_depth -= after_dead;
+    }
+
+    fn push_unique_param_guard(&mut self, guard: async_doctor_core::ParamGuard) {
+        if !self.active_param_guards.contains(&guard) {
+            self.active_param_guards.push(guard);
+        }
+    }
+
+    /// Record inverted parameter guards after `if <exact-param-test>: return/raise/...`
+    /// (and contiguous `elif` branches that also always exit).
+    fn push_early_exit_param_guards(&mut self, if_stmt: &ast::StmtIf) {
+        if !body_always_exits(&if_stmt.body) {
+            return;
+        }
+        if !self.is_dead_branch_test(&if_stmt.test) {
+            let (guards, exact) = param_guards_from_test(&if_stmt.test, &self.current_param_names);
+            if exact && guards.len() == 1 {
+                self.push_unique_param_guard(guards[0].inverted());
+            }
+        }
+        for clause in &if_stmt.elif_else_clauses {
+            let Some(test) = &clause.test else {
+                break;
+            };
+            if !body_always_exits(&clause.body) {
+                break;
+            }
+            if !self.is_dead_branch_test(test) {
+                let (guards, exact) = param_guards_from_test(test, &self.current_param_names);
+                if exact && guards.len() == 1 {
+                    self.push_unique_param_guard(guards[0].inverted());
+                }
+            }
+        }
     }
 
     pub(crate) fn classify_early_exit(&self, if_stmt: &ast::StmtIf) -> Option<EarlyExitKind> {
@@ -119,11 +158,49 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
         // Loop-state early returns must not be mis-tagged as cache-miss
         // (`is_cache_hit_test` also matches `x is not None`).
-        let cache_miss = !no_running_loop && is_cache_hit_test(&if_stmt.test);
+        let cache_miss = !no_running_loop && self.is_cache_hit_test_ctx(&if_stmt.test);
         Some(EarlyExitKind::Conditional {
             cache_miss,
             no_running_loop,
         })
+    }
+
+    fn is_cache_hit_test_ctx(&self, test: &Expr) -> bool {
+        cache_hit_storage_operand(test).is_some_and(|s| self.is_cache_storage_expr(s))
+    }
+
+    fn is_cache_miss_test_ctx(&self, test: &Expr) -> bool {
+        cache_miss_storage_operand(test).is_some_and(|s| self.is_cache_storage_expr(s))
+    }
+
+    /// True when `storage` refers to persistent cache state (attribute, subscript,
+    /// `global`/`nonlocal` name, or module-scope variable) rather than a function
+    /// parameter or ordinary local variable.
+    fn is_cache_storage_expr(&self, storage: &Expr) -> bool {
+        match storage {
+            Expr::Attribute(_) | Expr::Subscript(_) => true,
+            Expr::Name(name_expr) => {
+                let name = name_expr.id.as_str();
+                if self.current_param_names.iter().any(|p| p == name) {
+                    return false;
+                }
+                if self.nonlocal_or_global_names.contains(name) {
+                    return true;
+                }
+                let resolved = definitions_for_name(
+                    self.model,
+                    name,
+                    name_expr.into(),
+                    ImportAliasResolution::ResolveAliases,
+                );
+                !resolved.is_empty()
+                    && resolved.iter().all(|r| {
+                        r.definition()
+                            .is_some_and(|def| def.file_scope(self.model.db()).is_global())
+                    })
+            }
+            _ => false,
+        }
     }
 
     /// Confirm `name` binds to a once-assigned module-level constant via ty.
@@ -158,7 +235,6 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             };
             let rel = relative_display(self.ctx.db.project_root(), sys);
             if rel != self.ctx.rel {
-                // Imported binding — do not prune on name alone.
                 return None;
             }
         }
@@ -168,19 +244,18 @@ impl<'a, 'db> CallCollector<'a, 'db> {
     pub(crate) fn is_dead_branch_test(&self, test: &Expr) -> bool {
         match test {
             Expr::BooleanLiteral(b) => !b.value,
-            Expr::NoneLiteral(_) => true,
-            Expr::Name(name) if name.id.as_str() == "TYPE_CHECKING" => true,
-            Expr::Attribute(attr) if attr.attr.as_str() == "TYPE_CHECKING" => true,
-            Expr::Name(name) => matches!(
-                self.binds_to_module_const(name),
-                Some(ModuleConst::False | ModuleConst::None | ModuleConst::Empty)
+            Expr::Name(n) if n.id.as_str() == "TYPE_CHECKING" => true,
+            Expr::Name(n) => matches!(
+                self.binds_to_module_const(n),
+                Some(ModuleConst::False | ModuleConst::Empty)
             ),
-            Expr::UnaryOp(u) if matches!(u.op, ast::UnaryOp::Not) => match u.operand.as_ref() {
-                Expr::BooleanLiteral(b) => b.value,
-                Expr::Name(n) => {
-                    matches!(self.binds_to_module_const(n), Some(ModuleConst::True))
-                }
-                _ => false,
+            Expr::Attribute(a) if a.attr.as_str() == "TYPE_CHECKING" => true,
+            Expr::UnaryOp(u) if matches!(u.op, ast::UnaryOp::Not) => {
+                self.is_always_truthy(&u.operand)
+            }
+            Expr::BoolOp(b) => match b.op {
+                ast::BoolOp::And => b.values.iter().any(|v| self.is_dead_branch_test(v)),
+                ast::BoolOp::Or => b.values.iter().all(|v| self.is_dead_branch_test(v)),
             },
             _ => false,
         }
@@ -191,67 +266,25 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             Expr::BooleanLiteral(b) => b.value,
             Expr::Name(n) => matches!(self.binds_to_module_const(n), Some(ModuleConst::True)),
             Expr::UnaryOp(u) if matches!(u.op, ast::UnaryOp::Not) => {
-                self.is_dead_branch_test(u.operand.as_ref())
+                self.is_dead_branch_test(&u.operand)
             }
             _ => false,
         }
     }
 
-    pub(crate) fn visit_comprehension_like(
-        &mut self,
-        elt: &'a Expr,
-        key: Option<&'a Expr>,
-        generators: &'a [ast::Comprehension],
-    ) {
-        let has_filter = generators.iter().any(|g| !g.ifs.is_empty());
-        if has_filter {
-            self.branch_depth += 1;
-        }
-        for comp in generators {
-            if !comp.is_async
-                && self.dead_depth == 0
-                && !self.in_lambda
-                && self.off_loop_thread_depth == 0
-                && let Some(caller) = self.current_fn
-                && !self.function(caller).is_installed_third_party()
-                && self.is_sync_for_async_iterable(&comp.iter)
-            {
-                self.push_sync_for_async_iterable_edge(
-                    caller,
-                    &comp.iter,
-                    CallKind::GeneratorConsume,
-                );
-            }
-            self.consuming_generator = true;
-            if comp.is_async {
-                if let Expr::Call(call) = &comp.iter {
-                    let is_offload = self.handle_call(call, true);
-                    self.walk_call_children(call, is_offload);
-                } else {
-                    self.visit_expr(&comp.iter);
-                }
-            } else {
-                self.visit_expr(&comp.iter);
-            }
-            self.consuming_generator = false;
-            self.visit_expr(&comp.target);
-            for test in &comp.ifs {
-                self.visit_expr(test);
-            }
-        }
-        if let Some(k) = key {
-            self.visit_expr(k);
-        }
-        self.visit_expr(elt);
-        if has_filter {
-            self.branch_depth -= 1;
-        }
-    }
-
     pub(crate) fn visit_if(&mut self, if_stmt: &'a ast::StmtIf) {
+        let pre_local_guards = (
+            self.in_memory_sqlite_vars.clone(),
+            self.nonblocking_socket_vars.clone(),
+            self.in_memory_archive_receivers.clone(),
+        );
+        let mut live_fallthrough_guards: Vec<(HashSet<String>, HashSet<String>, HashSet<String>)> =
+            Vec::new();
+        let mut has_else = false;
+
         let dead = self.is_dead_branch_test(&if_stmt.test);
         let always = self.is_always_truthy(&if_stmt.test);
-        let cache_miss = !dead && is_cache_miss_test(&if_stmt.test);
+        let cache_miss = !dead && self.is_cache_miss_test_ctx(&if_stmt.test);
         let no_loop = !dead
             && (self.is_no_running_loop_test_ctx(&if_stmt.test)
                 || self.is_idle_loop_local_guard(&if_stmt.test));
@@ -264,10 +297,10 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         } else {
             futures_proven_done_in_test(&if_stmt.test)
         };
-        let param_guard = if dead {
-            None
+        let (if_guards, if_exact) = if dead {
+            (Vec::new(), false)
         } else {
-            param_guard_from_test(&if_stmt.test, &self.current_param_names)
+            param_guards_from_test(&if_stmt.test, &self.current_param_names)
         };
 
         if dead {
@@ -296,9 +329,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 self.off_loop_thread_depth += 1;
             }
         }
-        let prev_guard = self.active_param_guard;
-        if let Some(g) = param_guard {
-            self.active_param_guard = Some(g);
+        let saved_guard_len = self.active_param_guards.len();
+        for g in &if_guards {
+            self.push_unique_param_guard(*g);
         }
         let pushed_narrow = if !dead {
             self.push_narrowing(&if_stmt.test)
@@ -307,7 +340,11 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         };
         self.visit_body_seq(&if_stmt.body);
         self.pop_narrowing(pushed_narrow);
-        self.active_param_guard = prev_guard;
+        self.active_param_guards.truncate(saved_guard_len);
+        let mut negated_prior: Vec<async_doctor_core::ParamGuard> = Vec::new();
+        if !dead && if_exact && if_guards.len() == 1 {
+            negated_prior.push(if_guards[0].inverted());
+        }
         if let Some(prev) = prev_done {
             self.future_done_receivers = prev;
         }
@@ -325,10 +362,23 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
         if dead {
             self.dead_depth -= 1;
+        } else if !body_always_exits(&if_stmt.body) {
+            live_fallthrough_guards.push((
+                self.in_memory_sqlite_vars.clone(),
+                self.nonblocking_socket_vars.clone(),
+                self.in_memory_archive_receivers.clone(),
+            ));
         }
 
         for clause in &if_stmt.elif_else_clauses {
+            self.in_memory_sqlite_vars.clone_from(&pre_local_guards.0);
+            self.nonblocking_socket_vars.clone_from(&pre_local_guards.1);
+            self.in_memory_archive_receivers
+                .clone_from(&pre_local_guards.2);
             let is_else = clause.test.is_none();
+            if is_else {
+                has_else = true;
+            }
             let elif_dead = if is_else {
                 // else of a provably-true if is unreachable.
                 always
@@ -341,7 +391,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             let elif_cache = clause
                 .test
                 .as_ref()
-                .is_some_and(|t| !elif_dead && is_cache_miss_test(t));
+                .is_some_and(|t| !elif_dead && self.is_cache_miss_test_ctx(t));
             let elif_no_loop = if elif_dead {
                 false
             } else if is_else {
@@ -379,13 +429,10 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                     .map(futures_proven_done_in_test)
                     .unwrap_or_default()
             };
-            let elif_guard = clause.test.as_ref().and_then(|t| {
-                if elif_dead {
-                    None
-                } else {
-                    param_guard_from_test(t, &self.current_param_names)
-                }
-            });
+            let (elif_guards, elif_exact) = match clause.test.as_ref() {
+                Some(t) if !elif_dead => param_guards_from_test(t, &self.current_param_names),
+                _ => (Vec::new(), false),
+            };
             if elif_dead {
                 self.dead_depth += 1;
             } else if let Some(test) = &clause.test {
@@ -413,9 +460,14 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                     self.off_loop_thread_depth += 1;
                 }
             }
-            let prev_guard = self.active_param_guard;
-            if let Some(g) = elif_guard {
-                self.active_param_guard = Some(g);
+            let clause_guard_len = self.active_param_guards.len();
+            if !elif_dead {
+                for g in &negated_prior {
+                    self.push_unique_param_guard(*g);
+                }
+                for g in &elif_guards {
+                    self.push_unique_param_guard(*g);
+                }
             }
             let pushed_narrow = if !elif_dead {
                 clause.test.as_ref().and_then(|t| self.push_narrowing(t))
@@ -424,7 +476,10 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             };
             self.visit_body_seq(&clause.body);
             self.pop_narrowing(pushed_narrow);
-            self.active_param_guard = prev_guard;
+            self.active_param_guards.truncate(clause_guard_len);
+            if !elif_dead && elif_exact && elif_guards.len() == 1 {
+                negated_prior.push(elif_guards[0].inverted());
+            }
             if let Some(prev) = prev_done {
                 self.future_done_receivers = prev;
             }
@@ -442,7 +497,31 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             }
             if elif_dead {
                 self.dead_depth -= 1;
+            } else if !body_always_exits(&clause.body) {
+                live_fallthrough_guards.push((
+                    self.in_memory_sqlite_vars.clone(),
+                    self.nonblocking_socket_vars.clone(),
+                    self.in_memory_archive_receivers.clone(),
+                ));
             }
+        }
+
+        if !has_else && !always {
+            live_fallthrough_guards.push(pre_local_guards.clone());
+        }
+        if let Some((mut sql, mut sock, mut arch)) = live_fallthrough_guards.pop() {
+            for (s, k, a) in &live_fallthrough_guards {
+                sql.retain(|v| s.contains(v));
+                sock.retain(|v| k.contains(v));
+                arch.retain(|v| a.contains(v));
+            }
+            self.in_memory_sqlite_vars = sql;
+            self.nonblocking_socket_vars = sock;
+            self.in_memory_archive_receivers = arch;
+        } else {
+            self.in_memory_sqlite_vars = pre_local_guards.0;
+            self.nonblocking_socket_vars = pre_local_guards.1;
+            self.in_memory_archive_receivers = pre_local_guards.2;
         }
     }
 
@@ -492,176 +571,5 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 }
             }
         }
-    }
-
-    pub(crate) fn visit_try(&mut self, try_stmt: &'a ast::StmtTry) {
-        // Any try/except/else/finally path is guarded — not unconditional.
-        let prev_saw = self.try_saw_get_loop;
-        self.try_saw_get_loop = false;
-        self.branch_depth += 1;
-        self.visit_body_seq(&try_stmt.body);
-        let saw_get_loop = self.try_saw_get_loop;
-        self.branch_depth -= 1;
-        for handler in &try_stmt.handlers {
-            let ast::ExceptHandler::ExceptHandler(h) = handler;
-            if let Some(type_) = &h.type_ {
-                self.visit_expr(type_);
-            }
-            let runtime_error = saw_get_loop && except_is_runtime_error(h.type_.as_deref());
-            self.branch_depth += 1;
-            if runtime_error {
-                self.no_running_loop_depth += 1;
-            }
-            self.visit_body_seq(&h.body);
-            if runtime_error {
-                self.no_running_loop_depth -= 1;
-            }
-            self.branch_depth -= 1;
-        }
-        self.try_saw_get_loop = prev_saw;
-        self.branch_depth += 1;
-        self.visit_body_seq(&try_stmt.orelse);
-        self.branch_depth -= 1;
-        // finally always runs, but keep conservative (still a try-related path).
-        self.branch_depth += 1;
-        self.visit_body_seq(&try_stmt.finalbody);
-        self.branch_depth -= 1;
-    }
-
-    pub(crate) fn visit_match(&mut self, match_stmt: &'a ast::StmtMatch) {
-        self.visit_expr(&match_stmt.subject);
-        for case in &match_stmt.cases {
-            self.branch_depth += 1;
-            self.visit_body_seq(&case.body);
-            self.branch_depth -= 1;
-        }
-    }
-
-    pub(crate) fn visit_for(&mut self, for_stmt: &'a ast::StmtFor) {
-        // Record __iter__/__aiter__ edge when cheap to resolve.
-        if let Some(caller) = self.current_fn
-            && self.dead_depth == 0
-            && !for_stmt.is_async
-        {
-            if !self.in_lambda
-                && self.off_loop_thread_depth == 0
-                && !self.function(caller).is_installed_third_party()
-                && self.is_sync_for_async_iterable(&for_stmt.iter)
-            {
-                self.push_sync_for_async_iterable_edge(caller, &for_stmt.iter, CallKind::ForIter);
-            } else {
-                let dunder = "__iter__";
-                if let Some(callee) = self.resolve_dunder(&for_stmt.iter, dunder) {
-                    self.push_edge(
-                        caller,
-                        callee,
-                        for_stmt.iter.range(),
-                        CallKind::ForIter,
-                        false,
-                        None,
-                    );
-                }
-            }
-        }
-        // `async for x in call(...)`: the iter Call is an async use of that one call.
-        self.consuming_generator = true;
-        if for_stmt.is_async {
-            if let Expr::Call(call) = for_stmt.iter.as_ref() {
-                let is_offload = self.handle_call(call, true);
-                self.walk_call_children(call, is_offload);
-            } else {
-                self.visit_expr(&for_stmt.iter);
-            }
-            self.note_async_for_receivers(for_stmt);
-        } else {
-            self.visit_expr(&for_stmt.iter);
-        }
-        self.consuming_generator = false;
-        self.loop_depth += 1;
-        self.visit_body_seq(&for_stmt.body);
-        self.loop_depth -= 1;
-        self.visit_body_seq(&for_stmt.orelse);
-    }
-
-    pub(crate) fn visit_with(&mut self, with_stmt: &'a ast::StmtWith) {
-        if let Some(caller) = self.current_fn
-            && self.dead_depth == 0
-            && !with_stmt.is_async
-        {
-            for item in &with_stmt.items {
-                if self.is_sync_with_async_cm(&item.context_expr) {
-                    self.push_sync_with_async_cm_edge(caller, &item.context_expr);
-                    if let Expr::Call(call) = &item.context_expr {
-                        self.walk_call_children(call, None);
-                    }
-                    continue;
-                }
-                // `with engine.begin() as conn:` — the Call itself is the enter site
-                // for with_only sinks (Engine.begin). Dunder __enter__ on the *return*
-                // type is secondary and often unnamed for stubs.
-                if let Expr::Call(call) = &item.context_expr {
-                    self.pending_with_enter = true;
-                    let is_offload = self.handle_call(call, false);
-                    self.pending_with_enter = false;
-                    self.walk_call_children(call, is_offload);
-                } else if let Some(callee) = self.resolve_dunder(&item.context_expr, "__enter__") {
-                    self.push_edge(
-                        caller,
-                        callee,
-                        item.context_expr.range(),
-                        CallKind::WithEnter,
-                        false,
-                        None,
-                    );
-                }
-                if let Some(callee) = self.resolve_dunder(&item.context_expr, "__exit__") {
-                    self.push_edge(
-                        caller,
-                        callee,
-                        item.context_expr.range(),
-                        CallKind::WithExit,
-                        false,
-                        None,
-                    );
-                }
-            }
-        }
-        for item in &with_stmt.items {
-            // `async with call(...) as x`: mark that one call awaited; bind asyncio receivers.
-            if with_stmt.is_async {
-                if let Some(caller) = self.current_fn {
-                    self.maybe_record_async_with_ephemeral_client(caller, item);
-                }
-                if let Expr::Call(call) = &item.context_expr {
-                    let is_offload = self.handle_call(call, true);
-                    self.walk_call_children(call, is_offload);
-                } else {
-                    self.visit_expr(&item.context_expr);
-                }
-                self.note_async_with_receiver(item);
-                self.note_async_with_stateful_session(item);
-            } else if !matches!(item.context_expr, Expr::Call(_)) {
-                // Sync `with Call(...)` already recorded above as WithEnter.
-                self.visit_expr(&item.context_expr);
-            }
-            // Bind `with ZipFile(buf) as zf` / buffer receivers for later method skips.
-            if let Some(Expr::Name(n)) = item.optional_vars.as_deref() {
-                self.note_local_binding(n.id.as_str(), &item.context_expr);
-                if with_stmt.is_async {
-                    // `async with` ephemeral clients are already recorded above;
-                    // re-apply async-with receiver/session bindings after `note_local_binding`.
-                    self.local_ephemeral_clients.remove(n.id.as_str());
-                    self.note_async_with_receiver(item);
-                    self.note_async_with_stateful_session(item);
-                }
-            }
-            if let Some(opt) = &item.optional_vars {
-                self.visit_expr(opt);
-            }
-        }
-        if let Some(caller) = self.current_fn {
-            self.maybe_record_taskgroup_shared_session(caller, with_stmt);
-        }
-        self.visit_body_seq(&with_stmt.body);
     }
 }

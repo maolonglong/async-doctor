@@ -35,6 +35,8 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                     nonlocal_or_global_names(&func.body),
                 );
                 let prev_stateful_sessions = std::mem::take(&mut self.local_stateful_sessions);
+                let prev_partials = std::mem::take(&mut self.local_partials);
+                let prev_unshared_locks = std::mem::take(&mut self.unshared_local_locks);
                 // Module-level unbounded queues remain visible inside functions;
                 // clone so local rebinds do not leak to sibling defs.
                 let prev_queues = self.unbounded_queues.clone();
@@ -43,6 +45,9 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 let prev_aio_boto = self.aio_boto_receivers.clone();
                 let prev_buffers = self.buffer_locals.clone();
                 let prev_archives = self.in_memory_archive_receivers.clone();
+                let prev_sqlite = self.in_memory_sqlite_vars.clone();
+                let prev_sockets = self.nonblocking_socket_vars.clone();
+                let prev_contexts = self.context_locals.clone();
                 self.current_fn = fid;
                 self.current_param_names = fid
                     .map(|id| self.function(id).param_names.clone())
@@ -55,6 +60,9 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                     self.aio_boto_receivers.remove(p);
                     self.buffer_locals.remove(p);
                     self.in_memory_archive_receivers.remove(p);
+                    self.in_memory_sqlite_vars.remove(p);
+                    self.nonblocking_socket_vars.remove(p);
+                    self.context_locals.remove(p);
                 }
                 self.fn_stack.push(func.name.as_str().to_string());
                 self.fn_scopes.push(super::FnScope {
@@ -70,9 +78,13 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 // Statically dead definitions still have no executable body.
                 let depths = self.take_enclosing_depths();
                 self.dead_depth = depths.0;
-                let prev_guard = self.active_param_guard.take();
+                let prev_guards = std::mem::take(&mut self.active_param_guards);
+                if let Some(id) = fid {
+                    self.note_function_dependencies(id, func);
+                    self.unshared_local_locks = self.compute_unshared_local_async_locks(id, func);
+                }
                 self.visit_body_seq(&func.body);
-                self.active_param_guard = prev_guard;
+                self.active_param_guards = prev_guards;
                 self.restore_enclosing_depths(depths);
                 self.fn_scopes.pop();
                 self.fn_stack.pop();
@@ -88,12 +100,17 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 self.local_ephemeral_clients = prev_ephemeral_clients;
                 self.nonlocal_or_global_names = prev_nonlocal_globals;
                 self.local_stateful_sessions = prev_stateful_sessions;
+                self.local_partials = prev_partials;
+                self.unshared_local_locks = prev_unshared_locks;
                 self.unbounded_queues = prev_queues;
                 self.boto_receivers = prev_boto;
                 self.boto_session_receivers = prev_boto_session;
                 self.aio_boto_receivers = prev_aio_boto;
                 self.buffer_locals = prev_buffers;
                 self.in_memory_archive_receivers = prev_archives;
+                self.in_memory_sqlite_vars = prev_sqlite;
+                self.nonblocking_socket_vars = prev_sockets;
+                self.context_locals = prev_contexts;
             }
             Stmt::ClassDef(class) => {
                 // Pre-scan methods so later-defined idle helpers are visible to

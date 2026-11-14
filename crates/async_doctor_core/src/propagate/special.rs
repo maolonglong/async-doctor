@@ -12,8 +12,8 @@ use crate::report::{Entry, Finding, Fix};
 
 use super::SinkHit;
 use super::grade::{
-    chain_step_for, reconcile_conditions, resolution_for_edge, shortest_paths_to_async_entries,
-    unique_site_finding_id,
+    ClassInitIndex, ItemSpanMap, chain_step_for, collect_item_spans, reconcile_conditions,
+    resolution_for_edge, shortest_paths_to_async_entries, unique_site_finding_id,
 };
 
 pub(super) const RULE_NESTED_EVENT_LOOP: &str = "nested-event-loop";
@@ -102,14 +102,22 @@ pub(super) fn is_nested_event_loop_qual(qualname: &str) -> bool {
         || (qualname.starts_with("asyncio.") && qualname.ends_with(".Runner.run"))
 }
 
+pub(super) struct SpecialFindingCtx<'a> {
+    pub facts: &'a ProjectFacts,
+    pub reverse: &'a [Vec<usize>],
+    pub include_non_production: bool,
+    pub class_inits: &'a ClassInitIndex,
+    pub item_spans: &'a mut ItemSpanMap,
+    pub emitted_sites: &'a mut HashMap<String, (FunctionId, String, u32)>,
+    pub emitted: &'a mut HashSet<String>,
+}
+
 /// Emit `offload-coroutine` findings for offload sites whose target is `async def`.
-pub(super) fn collect_offload_coroutine_findings(
-    facts: &ProjectFacts,
-    reverse: &[Vec<usize>],
-    include_non_production: bool,
-    emitted_sites: &mut HashMap<String, (FunctionId, String, u32)>,
-    emitted: &mut HashSet<String>,
-) -> Vec<Finding> {
+pub(super) fn collect_offload_coroutine_findings(ctx: &mut SpecialFindingCtx<'_>) -> Vec<Finding> {
+    let facts = ctx.facts;
+    let reverse = ctx.reverse;
+    let include_non_production = ctx.include_non_production;
+    let class_inits = ctx.class_inits;
     let mut out = Vec::new();
     for edge in &facts.edges {
         let CalleeRef::Offload(kind) = edge.callee else {
@@ -189,11 +197,15 @@ pub(super) fn collect_offload_coroutine_findings(
                 },
                 entry_id,
                 (&edge.file, edge.line),
-                emitted_sites,
-                emitted,
+                ctx.emitted_sites,
+                ctx.emitted,
             ) else {
                 continue;
             };
+            ctx.item_spans.insert(
+                id.clone(),
+                collect_item_spans(facts, class_inits, &path, edge),
+            );
             out.push(Finding {
                 id,
                 rule: RULE_OFFLOAD_COROUTINE.to_string(),
@@ -231,13 +243,13 @@ pub(super) fn collect_offload_coroutine_findings(
 /// Deduplicates against `existing_findings` when the eagerly evaluated inner call
 /// already produced a `blocking-*` finding for the same entry + offload site.
 pub(super) fn collect_eager_offload_findings(
-    facts: &ProjectFacts,
-    reverse: &[Vec<usize>],
-    include_non_production: bool,
+    ctx: &mut SpecialFindingCtx<'_>,
     existing_findings: &[Finding],
-    emitted_sites: &mut HashMap<String, (FunctionId, String, u32)>,
-    emitted: &mut HashSet<String>,
 ) -> Vec<Finding> {
+    let facts = ctx.facts;
+    let reverse = ctx.reverse;
+    let include_non_production = ctx.include_non_production;
+    let class_inits = ctx.class_inits;
     let mut out = Vec::new();
     for edge in &facts.edges {
         let CalleeRef::External { qualname } = &edge.callee else {
@@ -323,11 +335,15 @@ pub(super) fn collect_eager_offload_findings(
                 },
                 entry_id,
                 (&edge.file, edge.line),
-                emitted_sites,
-                emitted,
+                ctx.emitted_sites,
+                ctx.emitted,
             ) else {
                 continue;
             };
+            ctx.item_spans.insert(
+                id.clone(),
+                collect_item_spans(facts, class_inits, &path, edge),
+            );
             out.push(Finding {
                 id,
                 rule: RULE_EAGER_OFFLOAD_CALL.to_string(),

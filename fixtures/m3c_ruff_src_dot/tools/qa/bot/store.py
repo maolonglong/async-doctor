@@ -7,5 +7,5 @@ import sqlite3
 
 class Store:
     def save(self, q: str) -> None:
-        conn = sqlite3.connect(":memory:")
+        conn = sqlite3.connect("bot.db")
         conn.execute("insert into t values (?)", (q,))

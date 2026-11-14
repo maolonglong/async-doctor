@@ -21,8 +21,8 @@ use super::follow::follow_third_party;
 use super::functions::{Pass1FileOutcome, merge_pass1_file_data, twin_name};
 use super::panic_util::panic_message;
 use super::pass2::{
-    Pass2FileLens, Pass2FileSpec, Pass2Shared, extract_pass1_one_file, merge_pass2_results,
-    run_pass1_parallel, run_pass2_parallel, visit_one_file_shared,
+    PASS2_WAVE_AST_CLEAR_INTERVAL, Pass2FileResult, Pass2FileSpec, Pass2Shared, extract_one_file,
+    extract_pass1_one_file, merge_pass2_results, run_pass1_parallel, run_pass2_parallel,
 };
 use super::path::{module_name_from_relative, relative_display};
 
@@ -60,6 +60,7 @@ struct FileRef {
 pub(crate) fn extract_files(
     project_root: &SystemPath,
     files: Vec<PathBuf>,
+    python: Option<&Path>,
     cache_dir: Option<&Path>,
     follow_budget: usize,
 ) -> anyhow::Result<ProjectFacts> {
@@ -80,6 +81,9 @@ pub(crate) fn extract_files(
                 continue;
             }
         };
+        if crate::cache::path_str_is_third_party_python(system_path.as_str()) {
+            continue;
+        }
         let rel = relative_display(project_root, &system_path);
         let module = module_name_from_relative(&rel);
         catalog.push(FileRef {
@@ -95,7 +99,8 @@ pub(crate) fn extract_files(
     let mut property_defs: HashSet<FunctionId> = HashSet::new();
     let mut class_methods: HashMap<(String, String), Vec<String>> = HashMap::new();
 
-    let mut db = AsyncDoctorDb::open(project_root, None)?;
+    let sys_python = python.map(super::path::absolute_utf8).transpose()?;
+    let mut db = AsyncDoctorDb::open(project_root, sys_python.as_deref())?;
     facts.environment = db.scan_environment().clone();
     let mut package_meta = PackageMetaMemo::for_site_packages(&facts.environment.site_packages);
     let followable_extra_roots: Vec<PathBuf> = db
@@ -266,11 +271,12 @@ pub(crate) fn extract_files(
     );
     let drop_db = std::thread::spawn(move || {
         drop(db);
-        crate::db::release_freed_memory();
     });
 
-    facts.resolved_symbols =
-        crate::twin_resolve::collect_resolved_twin_symbols(project_root.as_std_path());
+    facts.resolved_symbols = crate::twin_resolve::collect_resolved_twin_symbols_with_python(
+        project_root.as_std_path(),
+        python,
+    );
     stabilize_facts(&mut facts);
     let _ = drop_db.join();
     Ok(facts)
@@ -290,52 +296,63 @@ fn run_pass2_batched(
     package_meta: &mut PackageMetaMemo,
     followable_extra_roots: &[PathBuf],
 ) {
+    if entries.is_empty() {
+        return;
+    }
     let chunks = pass2_chunks(entries, batch_mode);
-    let reset_between = matches!(
+    if matches!(
         batch_mode,
         Pass2BatchMode::Fixed(_) | Pass2BatchMode::Locality
-    );
-    if reset_between && !chunks.is_empty() {
+    ) {
         *db = db.fresh_empty();
     }
-    for (batch_idx, chunk) in chunks.iter().enumerate() {
-        if batch_idx > 0 {
-            *db = db.fresh_empty();
-        }
-        // Visit into shared maps (main's cost model). catch_unwind + lens
-        // rollback keeps per-file panic isolation without cloning def/qual/
-        // function tables for every file.
-        for entry in chunk.iter() {
-            let spec = Pass2FileSpec {
-                system_path: entry.system_path.clone(),
-                rel: entry.rel.clone(),
-                module: entry.module.clone(),
-            };
-            let lens = Pass2FileLens::capture(facts);
-            let panicked = catch_unwind(AssertUnwindSafe(|| {
-                visit_one_file_shared(
-                    db,
-                    &spec,
-                    facts,
-                    def_map,
-                    qual_map,
-                    property_defs,
-                    task_targets,
-                    follow_targets,
-                    package_meta,
-                    followable_extra_roots,
-                );
-            }));
-            if let Err(payload) = panicked {
-                lens.rollback(facts, def_map, qual_map, task_targets);
-                facts.complete = false;
-                facts
-                    .skipped
-                    .push(format!("{}: {}", entry.rel, panic_message(&payload)));
+    let base_fn_len = facts.functions.len();
+    let results = {
+        let shared = Pass2Shared {
+            functions: &facts.functions,
+            def_map,
+            qual_map,
+            property_defs,
+            followable_extra_roots,
+            package_meta,
+        };
+        let mut out = Vec::with_capacity(entries.len());
+        for (batch_idx, chunk) in chunks.iter().enumerate() {
+            if batch_idx > 0 {
+                db.clear_parsed_modules_only();
                 *db = db.fresh_empty();
             }
+            for (in_chunk, entry) in chunk.iter().enumerate() {
+                let spec = Pass2FileSpec {
+                    system_path: entry.system_path.clone(),
+                    rel: entry.rel.clone(),
+                    module: entry.module.clone(),
+                };
+                let result =
+                    match catch_unwind(AssertUnwindSafe(|| extract_one_file(db, &spec, &shared))) {
+                        Ok(r) => r,
+                        Err(payload) => {
+                            *db = db.fresh_empty();
+                            Pass2FileResult::skipped(&entry.rel, &panic_message(&payload))
+                        }
+                    };
+                out.push(result);
+                if (in_chunk + 1).is_multiple_of(PASS2_WAVE_AST_CLEAR_INTERVAL) {
+                    db.clear_parsed_modules_only();
+                }
+            }
         }
-    }
+        out
+    };
+    merge_pass2_results(
+        facts,
+        def_map,
+        qual_map,
+        follow_targets,
+        task_targets,
+        base_fn_len,
+        results,
+    );
 }
 
 fn pass2_chunks<'a>(entries: &[&'a FileRef], mode: Pass2BatchMode) -> Vec<Vec<&'a FileRef>> {

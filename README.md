@@ -30,6 +30,7 @@ imports resolve. Without a project environment, results silently degrade —
 
 ```bash
 async-doctor .
+async-doctor --python /path/to/.venv .
 async-doctor --score .
 async-doctor --format json .
 async-doctor --format markdown . >> "$GITHUB_STEP_SUMMARY"
@@ -72,21 +73,28 @@ hidden dirs are skipped (`--include-non-production` to include).
   boto3 client/resource calls, sync OpenAI/Anthropic, and more — async twins
   never fire as findings
 - Higher-order / offload: `asyncio.to_thread`, executors, inferred wrappers
-- **Advice** (`offload-has-async-twin`, `dangling-task`): offload cuts that only reach sinks with
-  a high-confidence same-package async twin installed in the scanned venv, and
-  bare `asyncio.create_task` / `ensure_future` statements that discard the
-  returned `Task`
-  (non-blocking; SARIF `note`; text **Advice** section, capped unless `--expand`)
+- **Advice** (`offload-has-async-twin`, `dangling-task`, `ephemeral-async-client`,
+  `shared-async-session`, `offload-stateful-session`, `useless-local-async-lock`,
+  `swallowed-cancelled-error`): offload cuts with an installed same-package async
+  twin, discarded `create_task` / `ensure_future` handles, per-request / per-loop
+  HTTP client pools, shared non-concurrency-safe async DB sessions across
+  `gather` / `TaskGroup`, offloaded bound sync DB session/cursor methods,
+  per-call unshared `asyncio.Lock` / `Semaphore` guards, and swallowed
+  `CancelledError` handlers (non-blocking; SARIF `note`; text **Advice** section,
+  capped unless `--expand`)
 - **Errors:** `nested-event-loop` (`asyncio.run` / … from async without offload;
   loop-state guards like `if loop is None` / early-return `if loop is not None:
   return` are dropped), `offload-coroutine` (offload target is `async def`),
-  `sync-with-async-cm` (sync `with` entering an async-only context manager)
+  `sync-with-async-cm` (sync `with` on an async-only context manager),
+  `sync-for-async-iterable` (sync `for` or comprehension on an async-only
+  iterable), `eager-offload-call` (`to_thread(fn(...))` where `fn(...)` runs on
+  the loop and returns a non-callable), and `unawaited-coroutine` (bare `fn(...)`
+  statement discarding a proven coroutine)
 
-## GitHub Actions (SARIF / code scanning)
+## GitHub Actions & pre-commit
 
-Upload SARIF so findings appear in GitHub code scanning. `async-doctor` exits
-`1` when it finds issues — append `|| true` (same pattern as GitHub’s ESLint
-SARIF example) so the upload step still runs:
+Use the bundled composite GitHub Action (`action.yml`) for zero-config checks,
+step summaries, and optional GitHub Code Scanning SARIF upload:
 
 ```yaml
 name: async-doctor
@@ -99,23 +107,31 @@ jobs:
   scan:
     runs-on: ubuntu-latest
     permissions:
-      # required for all workflows
       security-events: write
-      # required for private repositories
       actions: read
       contents: read
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.3.3
-      - name: Install project deps
-        run: uv sync --frozen
-      - name: Run async-doctor
-        run: |
-          source .venv/bin/activate
-          uvx async-doctor --format sarif . > async-doctor.sarif || true
-      - uses: github/codeql-action/upload-sarif@v4
+      - uses: actions/checkout@v6
         with:
-          sarif_file: async-doctor.sarif
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v7
+      - run: uv sync --frozen
+      - uses: maolonglong/async-doctor@v0
+        with:
+          args: "--changed"
+          sarif: "true"
+```
+
+Or run as a `pre-commit` hook (`.pre-commit-hooks.yaml`; pass `args: [--changed]`
+for diff-scoped commits that short-circuit in `<20ms` when no Python or config
+files changed):
+
+```yaml
+repos:
+  - repo: https://github.com/maolonglong/async-doctor
+    rev: v0.1.3
+    hooks:
+      - id: async-doctor
 ```
 
 ## Large repositories / memory

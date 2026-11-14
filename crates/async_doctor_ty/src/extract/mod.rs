@@ -6,7 +6,7 @@ mod collector;
 mod constants;
 mod ctx;
 mod files;
-mod follow;
+pub(crate) mod follow;
 mod functions;
 mod helpers;
 mod panic_util;
@@ -40,13 +40,14 @@ pub fn extract_path_with_cache(
     path: &Path,
     cache_dir: Option<&Path>,
 ) -> anyhow::Result<ProjectFacts> {
-    extract_path_with_cache_budget(path, cache_dir, DEFAULT_FOLLOW_BUDGET)
+    extract_path_with_cache_budget(path, None, cache_dir, DEFAULT_FOLLOW_BUDGET)
 }
 
 /// Like [`extract_path_with_cache`], but with an injectable third-party follow
-/// budget (test seam only — not a user-facing config).
+/// budget and optional `--python` path (test/internal seam).
 pub(crate) fn extract_path_with_cache_budget(
     path: &Path,
+    python: Option<&Path>,
     cache_dir: Option<&Path>,
     follow_budget: usize,
 ) -> anyhow::Result<ProjectFacts> {
@@ -62,6 +63,7 @@ pub(crate) fn extract_path_with_cache_budget(
         return extract_files(
             &parent,
             vec![path.as_std_path().to_path_buf()],
+            python,
             cache_dir,
             follow_budget,
         );
@@ -70,19 +72,22 @@ pub(crate) fn extract_path_with_cache_budget(
     // Only walk the scan root for first-party entries. Outside editable roots
     // stay on the search path and are followed like site-packages when called.
     let files = discover_python_files(path.as_std_path())?;
-    extract_discovered_files(&path, files, cache_dir, follow_budget)
+    extract_discovered_files(&path, files, python, cache_dir, follow_budget)
 }
 
 pub(crate) fn extract_discovered_files(
     path: &SystemPath,
     files: Vec<std::path::PathBuf>,
+    python: Option<&Path>,
     cache_dir: Option<&Path>,
     follow_budget: usize,
 ) -> anyhow::Result<ProjectFacts> {
     if files.is_empty() {
+        let sys_python = python.map(absolute_utf8).transpose()?;
         // Discover before returning so cold empty scans match warm cache hits
-        // (which refresh `environment` via `discover_scan_environment`).
-        let environment = crate::env_info::discover_scan_environment(path)?;
+        // (which refresh `environment` via `discover_scan_environment_with_python`).
+        let environment =
+            crate::env_info::discover_scan_environment_with_python(path, sys_python.as_deref())?;
         return Ok(ProjectFacts {
             complete: true,
             no_python_files: true,
@@ -90,5 +95,5 @@ pub(crate) fn extract_discovered_files(
             ..ProjectFacts::default()
         });
     }
-    extract_files(path, files, cache_dir, follow_budget)
+    extract_files(path, files, python, cache_dir, follow_budget)
 }

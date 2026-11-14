@@ -32,15 +32,54 @@ pub fn primary_sink_step(f: &Finding) -> Option<(usize, &ChainStep)> {
 }
 
 fn why_file_line(why: &str) -> Option<(&str, u32)> {
-    let rest = why.strip_prefix("async-doctor why ")?;
-    let loc = rest.split_whitespace().next()?;
+    let rest = why.strip_prefix("async-doctor why ")?.trim();
+    let valid_flag_tail =
+        |tail: &str| tail.is_empty() || tail.starts_with("--path") || tail.starts_with("--python");
+    let loc = if let Some(after_quote) = rest.strip_prefix('"') {
+        let (quoted, tail) = after_quote.split_once('"')?;
+        if !valid_flag_tail(tail.trim()) {
+            return None;
+        }
+        quoted
+    } else if let Some(after_quote) = rest.strip_prefix('\'') {
+        let (quoted, tail) = after_quote.split_once('\'')?;
+        if !valid_flag_tail(tail.trim()) {
+            return None;
+        }
+        quoted
+    } else {
+        let without_path = rest
+            .split_once(" --path ")
+            .or_else(|| rest.split_once(" --path"))
+            .map(|(l, _)| l.trim())
+            .unwrap_or(rest);
+        without_path
+            .split_once(" --python ")
+            .or_else(|| without_path.split_once(" --python"))
+            .map(|(l, _)| l.trim())
+            .unwrap_or(without_path)
+    };
     let (file, line_str) = loc.rsplit_once(':')?;
+    if file.is_empty() {
+        return None;
+    }
     let line = line_str.parse::<u32>().ok()?;
     Some((file, line))
 }
 
 /// Build an additive `sinkSites` summary from findings (largest sites first).
 pub fn summarize(findings: &[Finding]) -> Vec<SinkSiteSummary> {
+    summarize_with_project_hops(findings)
+        .into_iter()
+        .map(|(site, _)| site)
+        .collect()
+}
+
+/// Build `sinkSites` together with each site's deepest first-party intermediate hop
+/// (used during propagation to resolve sync-only callers for followed third-party sinks).
+pub(crate) fn summarize_with_project_hops(
+    findings: &[Finding],
+) -> Vec<(SinkSiteSummary, Option<(String, u32)>)> {
     // (fix_group_id, file, line) → aggregate — BTreeMap for stable order.
     let mut sites: BTreeMap<(&str, &str, u32), SiteAcc<'_>> = BTreeMap::new();
 
@@ -62,6 +101,7 @@ pub fn summarize(findings: &[Finding]) -> Vec<SinkSiteSummary> {
             finding_count: 0,
             entries: BTreeSet::new(),
             intermediates: BTreeMap::new(),
+            deepest_project_hop: None,
         });
         acc.finding_count += 1;
         acc.entries
@@ -75,6 +115,13 @@ pub fn summarize(findings: &[Finding]) -> Vec<SinkSiteSummary> {
                     entry.1 = f_idx;
                 }
             }
+            if let Some(proj_step) = f.chain[..sink_idx].iter().rfind(|s| !s.third_party) {
+                let candidate = (proj_step.file.as_str(), proj_step.line);
+                acc.deepest_project_hop = Some(match acc.deepest_project_hop {
+                    None => candidate,
+                    Some(prev) => prev.min(candidate),
+                });
+            }
         }
     }
 
@@ -87,7 +134,7 @@ pub fn summarize(findings: &[Finding]) -> Vec<SinkSiteSummary> {
         site_set_ids.insert((gid, file, line), set_id);
     }
 
-    let mut out: Vec<SinkSiteSummary> = sites
+    let mut out: Vec<(SinkSiteSummary, Option<(String, u32)>)> = sites
         .into_iter()
         .map(|(key, acc)| {
             let set_id = site_set_ids.remove(&key).unwrap_or_default();
@@ -96,25 +143,31 @@ pub fn summarize(findings: &[Finding]) -> Vec<SinkSiteSummary> {
                 .copied()
                 .unwrap_or(1);
             let choke = dominant_choke(&acc);
-            SinkSiteSummary {
-                rule: acc.rule.to_string(),
-                fix_group_id: acc.fix_group_id.to_string(),
-                file: acc.file.to_string(),
-                line: acc.line,
-                text: acc.text.to_string(),
-                finding_count: acc.finding_count,
-                entry_count: acc.entries.len() as u32,
-                entry_set_id: set_id,
-                shared_entry_site_count: shared,
-                choke_point_file: choke.as_ref().map(|c| c.0.to_string()).unwrap_or_default(),
-                choke_point_line: choke.as_ref().map(|c| c.1).unwrap_or(0),
-                choke_point_text: choke.as_ref().map(|c| c.2.to_string()).unwrap_or_default(),
-                choke_point_finding_count: choke.as_ref().map(|c| c.3).unwrap_or(0),
-            }
+            let deepest = acc.deepest_project_hop.map(|(f, l)| (f.to_string(), l));
+            (
+                SinkSiteSummary {
+                    rule: acc.rule.to_string(),
+                    fix_group_id: acc.fix_group_id.to_string(),
+                    file: acc.file.to_string(),
+                    line: acc.line,
+                    text: acc.text.to_string(),
+                    finding_count: acc.finding_count,
+                    entry_count: acc.entries.len() as u32,
+                    entry_set_id: set_id,
+                    shared_entry_site_count: shared,
+                    choke_point_file: choke.as_ref().map(|c| c.0.to_string()).unwrap_or_default(),
+                    choke_point_line: choke.as_ref().map(|c| c.1).unwrap_or(0),
+                    choke_point_text: choke.as_ref().map(|c| c.2.to_string()).unwrap_or_default(),
+                    choke_point_finding_count: choke.as_ref().map(|c| c.3).unwrap_or(0),
+                    sync_caller_count: 0,
+                    sample_sync_caller: None,
+                },
+                deepest,
+            )
         })
         .collect();
 
-    out.sort_by(|a, b| {
+    out.sort_by(|(a, _), (b, _)| {
         b.entry_count
             .cmp(&a.entry_count)
             .then(b.finding_count.cmp(&a.finding_count))
@@ -145,6 +198,7 @@ struct SiteAcc<'a> {
     finding_count: u32,
     entries: BTreeSet<(&'a str, &'a str)>,
     intermediates: BTreeMap<(&'a str, u32, &'a str), (u32, usize)>,
+    deepest_project_hop: Option<(&'a str, u32)>,
 }
 
 /// An intermediate hop dominates when it covers ≥50% of findings at the site

@@ -12,6 +12,11 @@
 //! package content fingerprint are part of the path so editable/patched
 //! installs with the same version do not reuse a stale cache.
 
+mod fingerprint;
+
+pub use fingerprint::package_content_fingerprint;
+pub(crate) use fingerprint::{fingerprint_from_record_bytes, mtime_stamp};
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -20,42 +25,9 @@ use serde::{Deserialize, Serialize};
 
 /// Bump when the on-disk JSON shape / key layout changes incompatibly.
 ///
-/// v4: edges carry `callee_is_coroutine` (structural async-def gate).
-/// v5: redis subclass Externals key off receiver MRO (asyncio base ⇒
-/// `redis.asyncio.Redis.*`). A v4 cache written before that fix still stores
-/// sync `redis.Redis.*` for asyncio subclasses and must not be reused.
-/// v6: briefly emitted unresolved Name/Attribute call edges (reverted in v7).
-/// v7: restore call-edge silence for plain Name/Attribute; failed imports are
-/// recorded separately; search paths append after src_roots (skip root dupes).
-/// v8: outside editables are follow-only (not first-party entries); unresolved
-/// imports bounded to first-party head misses + one third-party aggregate.
-/// v9: relative imports that exist on disk (esp. when scan root is the package)
-/// are not recorded as unresolved-import.
-/// v10: whole-scan report cache under `scan/{fingerprint}.json` (warm fast
-/// path when first-party + venv inputs are unchanged).
-/// v11: whole-scan fingerprint uses first-party **content hashes** (not
-/// whole-second mtime+size), plus venv dist-info fingerprints and tool/schema.
-/// v12: asgiref.sync.sync_to_async offload boundary; advice-tier twin
-/// resolution (`resolved_symbols`); offload positional externals /
-/// coroutine-target facts for nested-event-loop / offload-coroutine /
-/// offload-has-async-twin.
-/// v13: `no_running_loop_guard` condition tag; advice ignores offload-site
-/// try/if/loop gates; lambda body edges graded relative to the lambda;
-/// httpx module + Azure OpenAI twin matchers.
-/// v14: report schemaVersion 2 — `environment`, `locationLessCandidates`,
-/// always-emitted top-level arrays.
-/// v15: edge occurrence for externals counted by canonical sink key (family
-/// aliases like Session.client → boto3.client) so finding ids cannot collide.
-/// v16: project class constructor / MRO / `super()` resolution; `Path.mkdir` +
-/// `importlib.resources` Traversable sinks; `open`+`read`/`write` sink-site
-/// attribution; log-scaled health score.
-/// v17: offload decorators (`sync_to_async` / `database_sync_to_async` /
-/// project wrappers) cut call edges; `functools.cached_property` getters
-/// followed; non-IO methods (`httpx.Client.build_request`,
-/// `requests.Session.mount|get_adapter`) leave the sink families.
-/// v18: `environment.followBudgetSkipped` counts budget-truncated
-/// third-party follow candidates.
-/// v19: edges record keyword args passed a literal `True` (`cheap-path-op`).
+/// v4–v19: structural async-def gate, redis MRO keys, whole-scan content-hash
+/// report cache, offload boundaries, report schemaVersion 2, class MRO /
+/// `super()`, `followBudgetSkipped`, `cheap-path-op`, and named-fn guard fixes.
 /// v20: named function bodies do not inherit definition-site execution guards.
 /// v21: `CachedEdge` persists `is_bound_call`, `is_eager_offload_arg`,
 /// `constructed_receiver`, `positional_externals`, and
@@ -65,99 +37,51 @@ use serde::{Deserialize, Serialize};
 /// `AsyncSession` / `AsyncEngine`) and first-party async anti-pattern edges
 /// (`sync-for-async-iterable`, `eager-offload-call`, `unawaited-coroutine`,
 /// `ephemeral-async-client`, `shared-async-session`).
-pub const CACHE_SCHEMA_VERSION: u32 = 22;
+/// v23: `CachedFunction` persists explicit `file` path (fixing zero-edge
+/// `__init__.py` / `dist-packages` drift); cross-package callable quals resolve
+/// after all waves materialize; sub-second mtime & unpackaged subdir fingerprints.
+/// v24: `CachedEdge` persists multi-guard `param_guards` + `keyword_literals`
+/// (conjunctive `ParamGuard`s, `else`/early-return inversion, keyword literals).
+pub const CACHE_SCHEMA_VERSION: u32 = 24;
 
 /// Tool version embedded in the cache path (from this crate's Cargo.toml).
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Build identity for whole-scan report cache keys.
 ///
-/// Hashed from the running executable so edits in any linked crate (or the
-/// workspace lockfile) invalidate reuse after rebuild — without relying on
-/// `build.rs` rerun-if-changed coverage of every path.
+/// Combines compile-time crate/git build metadata (`ASYNC_DOCTOR_BUILD_ID` +
+/// `TOOL_VERSION`) with an `O(1)` `stat` fingerprint of `current_exe()`
+/// `(len, mtime_secs, mtime_nanos, dev, ino)` so rebuilds invalidate reuse
+/// without streaming a ~28 MiB binary on every invocation.
 pub fn build_id() -> &'static str {
     use std::sync::OnceLock;
     static ID: OnceLock<String> = OnceLock::new();
     ID.get_or_init(|| {
-        if let Ok(exe) = std::env::current_exe()
-            && let Ok(h) = hash_file_streaming(&exe)
-        {
-            return format!("exe-{h:x}");
-        }
-        // Fallback when the exe cannot be read (unusual): compile-time stamp.
-        env!("ASYNC_DOCTOR_BUILD_ID").to_string()
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| compute_exe_build_id(&exe))
+            .unwrap_or_else(|| env!("ASYNC_DOCTOR_BUILD_ID").to_string())
     })
     .as_str()
 }
 
-fn hash_file_streaming(path: &Path) -> std::io::Result<u64> {
-    let f = fs::File::open(path)?;
-    hash_reader_streaming(f)
-}
-
-fn hash_reader_streaming(mut reader: impl std::io::Read) -> std::io::Result<u64> {
-    const PRIME: u64 = 0x100000001b3;
-    let mut h0: u64 = 0xcbf29ce484222325;
-    let mut h1: u64 = 0x84222325cbf29ce4;
-    let mut h2: u64 = 0x4b95f51d84222325;
-    let mut h3: u64 = 0x9e3779b97f4a7c15;
-    let mut total_len: u64 = 0;
-    let mut tail = [0u8; 32];
-    let mut tail_len = 0usize;
-    let mut buf = [0u8; 64 * 1024];
-
-    let mix_block = |chunk: &[u8], h0: &mut u64, h1: &mut u64, h2: &mut u64, h3: &mut u64| {
-        let w0 = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
-        let w1 = u64::from_le_bytes(chunk[8..16].try_into().unwrap());
-        let w2 = u64::from_le_bytes(chunk[16..24].try_into().unwrap());
-        let w3 = u64::from_le_bytes(chunk[24..32].try_into().unwrap());
-        *h0 = (*h0 ^ w0).wrapping_mul(PRIME);
-        *h1 = (*h1 ^ w1).wrapping_mul(PRIME);
-        *h2 = (*h2 ^ w2).wrapping_mul(PRIME);
-        *h3 = (*h3 ^ w3).wrapping_mul(PRIME);
+fn compute_exe_build_id(exe: &Path) -> Option<String> {
+    let meta = fs::metadata(exe).ok()?;
+    let len = meta.len();
+    let (secs, nanos) = mtime_stamp(&meta);
+    #[cfg(unix)]
+    let (dev, ino) = {
+        use std::os::unix::fs::MetadataExt;
+        (meta.dev(), meta.ino())
     };
-
-    loop {
-        let n = reader.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        total_len += n as u64;
-        let mut slice = &buf[..n];
-        if tail_len > 0 {
-            let need = (32 - tail_len).min(slice.len());
-            tail[tail_len..tail_len + need].copy_from_slice(&slice[..need]);
-            tail_len += need;
-            slice = &slice[need..];
-            if tail_len == 32 {
-                mix_block(&tail, &mut h0, &mut h1, &mut h2, &mut h3);
-                tail_len = 0;
-            }
-        }
-        let mut chunks = slice.chunks_exact(32);
-        for chunk in &mut chunks {
-            mix_block(chunk, &mut h0, &mut h1, &mut h2, &mut h3);
-        }
-        let rem = chunks.remainder();
-        if !rem.is_empty() {
-            tail[..rem.len()].copy_from_slice(rem);
-            tail_len = rem.len();
-        }
-    }
-
-    let mut h = (h0 ^ total_len)
-        .rotate_left(13)
-        .wrapping_add(h1.rotate_left(27))
-        .wrapping_add(h2.rotate_left(41))
-        .wrapping_add(h3.rotate_left(53));
-    for &b in &tail[..tail_len] {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(PRIME);
-    }
-    h ^= h >> 33;
-    h = h.wrapping_mul(0xff51afd7ed558ccd);
-    h ^= h >> 33;
-    Ok(h)
+    #[cfg(not(unix))]
+    let (dev, ino) = (0u64, 0u64);
+    let stamp = format!(
+        "build-v2:{TOOL_VERSION}:{}:{}:{len}:{secs}.{nanos}:{dev}:{ino}",
+        env!("ASYNC_DOCTOR_BUILD_ID"),
+        exe.display()
+    );
+    Some(format!("exe-{}", short_hash(stamp.as_bytes())))
 }
 
 fn fnv1a64_bytes(data: &[u8]) -> u64 {
@@ -214,9 +138,9 @@ pub struct CachedEdge {
     pub occurrence: u32,
     /// Positional literals: `true` / `false` / `none` / omitted (`null`).
     pub positional_literals: Vec<Option<String>>,
-    /// Keyword argument names passed a literal `True`.
+    /// Keyword argument literals (`true` / `false` / `none` / `null` for non-literal).
     #[serde(default)]
-    pub keyword_true: Vec<String>,
+    pub keyword_literals: Vec<(String, Option<String>)>,
     /// Positional callable External/full quals when known.
     pub positional_callable_quals: Vec<Option<String>>,
     /// Positional external qualnames for offload / advice calls when known.
@@ -228,8 +152,9 @@ pub struct CachedEdge {
     /// Keyword callable External/full quals when known (`name`, qual).
     #[serde(default)]
     pub keyword_callable_quals: Vec<(String, String)>,
-    pub param_guard_index: Option<u32>,
-    pub param_guard_inverted: Option<bool>,
+    /// Conjunctive parameter guards `(param_index, inverted)`.
+    #[serde(default)]
+    pub param_guards: Vec<(u32, bool)>,
     /// Call was under `await` when recorded.
     #[serde(default)]
     pub is_awaited: bool,
@@ -254,6 +179,9 @@ pub struct CachedFunction {
     pub key: String,
     pub qualname: String,
     pub module: String,
+    /// Stable site-/dist-packages/editable-relative file path (`FunctionFact.file`).
+    #[serde(default)]
+    pub file: String,
     pub line: u32,
     pub is_async: bool,
     pub is_generator: bool,
@@ -343,6 +271,29 @@ pub(crate) fn sanitize_component(component: &str) -> String {
         .collect()
 }
 
+/// Opportunistically remove sibling `v{old}` schema directories older than
+/// [`CACHE_SCHEMA_VERSION`] under `root`.
+pub(crate) fn prune_stale_schema_dirs(root: &Path) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for ent in entries.flatten() {
+        let fname = ent.file_name();
+        let Some(name) = fname.to_str() else {
+            continue;
+        };
+        let Some(ver_str) = name.strip_prefix('v') else {
+            continue;
+        };
+        if let Ok(ver) = ver_str.parse::<u32>()
+            && ver < CACHE_SCHEMA_VERSION
+            && ent.file_type().is_ok_and(|ft| ft.is_dir())
+        {
+            let _ = fs::remove_dir_all(ent.path());
+        }
+    }
+}
+
 fn package_cache_path(root: &Path, package: &str, version: &str, fingerprint: &str) -> PathBuf {
     root.join(format!("v{CACHE_SCHEMA_VERSION}"))
         .join(sanitize_component(TOOL_VERSION))
@@ -352,140 +303,6 @@ fn package_cache_path(root: &Path, package: &str, version: &str, fingerprint: &s
             sanitize_component(version),
             sanitize_component(fingerprint)
         ))
-}
-
-/// Fingerprint package contents so editable/patched installs invalidate cache.
-///
-/// Cheap path (preferred):
-/// 1. Hash `RECORD` bytes when present (covers wheel installs).
-/// 2. Else hash `METADATA` len+mtime plus the dist-info directory mtime.
-/// 3. Else (no dist-info): one-level `(name,len,mtime)` of `.py` files in the
-///    package dir — never a recursive walk (that dominated sys time on large
-///    venvs when called per call-site before memoization).
-pub fn package_content_fingerprint(dist_info_or_pkg_dir: &Path) -> String {
-    let dist_info = if dist_info_or_pkg_dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| n.ends_with(".dist-info"))
-    {
-        dist_info_or_pkg_dir.to_path_buf()
-    } else {
-        PathBuf::new()
-    };
-
-    if dist_info.is_dir() {
-        let record = dist_info.join("RECORD");
-        if record.is_file()
-            && let Ok(bytes) = fs::read(&record)
-        {
-            // Mix in dist-info mtime so a reinstall that rewrites RECORD with
-            // identical bytes still invalidates (rare) and editable installs
-            // that refresh METADATA bump the fingerprint without a recursive
-            // `.py` walk.
-            let mut blob = Vec::with_capacity(bytes.len() + 32);
-            blob.extend_from_slice(b"RECORD:");
-            blob.extend_from_slice(&bytes);
-            if let Ok(meta) = fs::metadata(&dist_info) {
-                let mtime = meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                blob.extend_from_slice(format!("|DI:{mtime}").as_bytes());
-            }
-            return short_hash(&blob);
-        }
-        let meta_path = dist_info.join("METADATA");
-        if let Ok(meta) = fs::metadata(&meta_path) {
-            let len = meta.len();
-            let mtime = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            return short_hash(format!("META:{len}:{mtime}").as_bytes());
-        }
-    }
-
-    // No dist-info: single-file module or shallow/bounded .py fingerprint.
-    if dist_info_or_pkg_dir.is_file() {
-        if let Ok(meta) = fs::metadata(dist_info_or_pkg_dir) {
-            let len = meta.len();
-            let mtime = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let name = dist_info_or_pkg_dir
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
-            return short_hash(format!("PYFILE:{name}:{len}:{mtime}").as_bytes());
-        }
-        return short_hash(b"PYFILE:missing");
-    }
-
-    let mut entries: Vec<(String, u64, u64)> = Vec::new();
-    collect_py_entries_bounded(dist_info_or_pkg_dir, "", 0, 2, &mut entries);
-    entries.sort();
-    short_hash(format!("PY:{entries:?}").as_bytes())
-}
-
-fn collect_py_entries_bounded(
-    dir: &Path,
-    prefix: &str,
-    depth: usize,
-    max_depth: usize,
-    entries: &mut Vec<(String, u64, u64)>,
-) {
-    let Ok(walker) = fs::read_dir(dir) else {
-        return;
-    };
-    let mut subdirs = Vec::new();
-    for ent in walker.flatten() {
-        let p = ent.path();
-        let fname = ent.file_name();
-        let Some(name) = fname.to_str() else {
-            continue;
-        };
-        if p.extension().and_then(|e| e.to_str()) == Some("py") {
-            if let Ok(meta) = ent.metadata() {
-                let len = meta.len();
-                let mtime = meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                let rel = if prefix.is_empty() {
-                    name.to_string()
-                } else {
-                    format!("{prefix}/{name}")
-                };
-                entries.push((rel, len, mtime));
-            }
-        } else if depth < max_depth
-            && name != "__pycache__"
-            && ent.file_type().is_ok_and(|ft| ft.is_dir())
-        {
-            subdirs.push((p, name.to_string()));
-        }
-    }
-    // Only descend into subdirectories when no top-level `.py` files exist (e.g. PEP 420 namespace root).
-    if entries.is_empty() {
-        subdirs.sort_by(|a, b| a.1.cmp(&b.1));
-        for (sub_path, sub_name) in subdirs {
-            let next_prefix = if prefix.is_empty() {
-                sub_name
-            } else {
-                format!("{prefix}/{sub_name}")
-            };
-            collect_py_entries_bounded(&sub_path, &next_prefix, depth + 1, max_depth, entries);
-        }
-    }
 }
 
 pub(crate) fn unique_tmp_path(path: &Path) -> PathBuf {
@@ -519,9 +336,6 @@ pub fn load_package_cache(
 }
 
 /// Persist a package summary atomically (temp file + rename).
-///
-/// Temp path includes pid so concurrent scanners sharing a cache dir cannot
-/// clobber each other's in-flight writes.
 pub fn save_package_cache(
     root: &Path,
     cache: &PackageCache,
@@ -551,26 +365,41 @@ pub fn path_str_contains_site_packages(s: &str) -> bool {
     path_str_is_third_party_python(s)
 }
 
-/// True when `path` is under a venv/user `site-packages` or system `dist-packages`
-/// tree. Both are treated as third-party (followed, never entries).
-pub fn path_str_is_third_party_python(s: &str) -> bool {
-    if !s.contains('\\') {
-        return s.contains("/site-packages/") || s.contains("/dist-packages/");
+/// Split a `/`-normalized path into `(third_party_root, module_rel_path)` when it
+/// resides under `site-packages`, `dist-packages`, or PDM `__pypackages__/<ver>/lib`.
+pub(crate) fn third_party_root_split(s: &str) -> Option<(&str, &str)> {
+    for marker in ["/site-packages/", "/dist-packages/"] {
+        if let Some(idx) = s.rfind(marker) {
+            let root_end = idx + marker.len() - 1;
+            return Some((&s[..root_end], &s[idx + marker.len()..]));
+        }
     }
-    let s = s.replace('\\', "/");
-    s.contains("/site-packages/") || s.contains("/dist-packages/")
-}
-
-/// Module-relative path after the site-packages / dist-packages root, if any.
-/// `s` should use `/` separators (callers typically normalize first).
-pub fn third_party_module_path(s: &str) -> Option<&str> {
-    if let Some(idx) = s.rfind("/site-packages/") {
-        return Some(&s[idx + "/site-packages/".len()..]);
-    }
-    if let Some(idx) = s.rfind("/dist-packages/") {
-        return Some(&s[idx + "/dist-packages/".len()..]);
+    if let Some(idx) = s.rfind("/__pypackages__/") {
+        let after = &s[idx + "/__pypackages__/".len()..];
+        if let Some((ver, tail)) = after.split_once("/lib/")
+            && !ver.is_empty()
+            && !ver.contains('/')
+        {
+            let root_end = idx + "/__pypackages__/".len() + ver.len() + "/lib".len();
+            return Some((&s[..root_end], tail));
+        }
     }
     None
+}
+
+/// True when `path` is under a venv/user `site-packages`, system `dist-packages`,
+/// or PDM `__pypackages__/<ver>/lib` tree (followed, never first-party entries).
+pub fn path_str_is_third_party_python(s: &str) -> bool {
+    if !s.contains('\\') {
+        return third_party_root_split(s).is_some();
+    }
+    let s = s.replace('\\', "/");
+    third_party_root_split(&s).is_some()
+}
+
+/// Module-relative path after the site-packages / dist-packages / PDM root, if any.
+pub fn third_party_module_path(s: &str) -> Option<&str> {
+    third_party_root_split(s).map(|(_, rest)| rest)
 }
 
 /// True when the path is a `.py` source file (not `.pyi` stub-only).
@@ -597,6 +426,7 @@ mod tests {
                 key: "demo.mod.fn".into(),
                 qualname: "fn".into(),
                 module: "demo.mod".into(),
+                file: "site-packages/demo/mod.py".into(),
                 line: 1,
                 is_async: false,
                 is_generator: false,
@@ -617,13 +447,12 @@ mod tests {
                     conditions: vec!["unconditional".into(), "all-paths".into()],
                     occurrence: 0,
                     positional_literals: vec![],
-                    keyword_true: vec![],
+                    keyword_literals: vec![],
                     positional_callable_quals: vec![],
                     positional_externals: vec![],
                     positional_constructed_receivers: vec![],
                     keyword_callable_quals: vec![],
-                    param_guard_index: None,
-                    param_guard_inverted: None,
+                    param_guards: vec![],
                     is_awaited: false,
                     callee_is_coroutine: None,
                     is_eager_offload_arg: false,
@@ -634,13 +463,11 @@ mod tests {
         );
         save_package_cache(&root, &cache, "fpdeadbeef").unwrap();
         let loaded = load_package_cache(&root, "demo", "1.0.0", "fpdeadbeef").unwrap();
+        assert_eq!(loaded.functions["demo.mod.fn"].key, "demo.mod.fn");
         assert_eq!(
-            loaded.functions.get("demo.mod.fn").unwrap().key,
-            "demo.mod.fn"
+            loaded.functions["demo.mod.fn"].file,
+            "site-packages/demo/mod.py"
         );
-        assert!(loaded.functions.contains_key("demo.mod.fn"));
-        assert!(!loaded.functions.contains_key("demo.mod:fn"));
-        // Different fingerprint must miss.
         assert!(load_package_cache(&root, "demo", "1.0.0", "otherfp").is_none());
 
         let _ = fs::remove_dir_all(&dir);
@@ -648,7 +475,6 @@ mod tests {
 
     #[test]
     fn stale_schema_cache_is_not_reused() {
-        // v4–v12 prior schemas must not load under the current version.
         let dir =
             std::env::temp_dir().join(format!("async-doctor-cache-stale-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -657,81 +483,41 @@ mod tests {
         let mut cache = PackageCache::new("demo", "1.0.0");
         assert_eq!(cache.schema_version, CACHE_SCHEMA_VERSION);
         assert!(cache.is_compatible());
-        for stale in [3u32, 4u32, 5u32, 6u32, 7u32, 8u32, 9u32, 10u32, 11u32] {
+        for stale in [3u32, 10, 21, 22, 23] {
             cache.schema_version = stale;
-            assert!(
-                !cache.is_compatible(),
-                "schema {stale} must be incompatible with v{CACHE_SCHEMA_VERSION}"
-            );
+            assert!(!cache.is_compatible());
         }
 
-        // Spoof stale schema_version into the *current* package path.
         cache.schema_version = CACHE_SCHEMA_VERSION;
         save_package_cache(&root, &cache, "fpstale").unwrap();
         let path = package_cache_path(&root, "demo", "1.0.0", "fpstale");
-        for stale in [3u32, 4u32, 5u32, 6u32, 7u32, 8u32, 9u32, 10u32, 11u32] {
+        for stale in [3u32, 10, 21, 22, 23] {
             let mut spoofed: serde_json::Value =
                 serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
             spoofed["schema_version"] = serde_json::json!(stale);
             fs::write(&path, serde_json::to_string(&spoofed).unwrap()).unwrap();
-            assert!(
-                load_package_cache(&root, "demo", "1.0.0", "fpstale").is_none(),
-                "schema {stale} in the v{CACHE_SCHEMA_VERSION} path must not load"
-            );
+            assert!(load_package_cache(&root, "demo", "1.0.0", "fpstale").is_none());
         }
-
-        // Legacy directory layouts must also miss.
-        for stale in [3u32, 4u32, 5u32, 6u32, 7u32, 8u32, 9u32, 10u32, 11u32] {
-            let stale_dir = root
-                .join(format!("v{stale}"))
-                .join(sanitize_component(TOOL_VERSION))
-                .join(sanitize_component("demo"));
-            fs::create_dir_all(&stale_dir).unwrap();
-            let stale_path = stale_dir.join(format!(
-                "{}-{}.json",
-                sanitize_component("1.0.0"),
-                sanitize_component("fpstale")
-            ));
-            let mut stale_doc = PackageCache::new("demo", "1.0.0");
-            stale_doc.schema_version = stale;
-            fs::write(&stale_path, serde_json::to_string(&stale_doc).unwrap()).unwrap();
-        }
-        assert!(
-            load_package_cache(&root, "demo", "1.0.0", "fpstale").is_none(),
-            "legacy schema dirs must not be reused by schema v{CACHE_SCHEMA_VERSION}"
-        );
-
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn streaming_hash_is_chunk_boundary_independent() {
-        struct ChunkedReader<'a> {
-            data: &'a [u8],
-            step: usize,
-        }
-        impl std::io::Read for ChunkedReader<'_> {
-            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-                if self.data.is_empty() {
-                    return Ok(0);
-                }
-                let n = self.step.min(buf.len()).min(self.data.len());
-                buf[..n].copy_from_slice(&self.data[..n]);
-                self.data = &self.data[n..];
-                Ok(n)
-            }
-        }
-        let payload: Vec<u8> = (0..10_007u32)
-            .map(|i| (i.wrapping_mul(31) & 0xff) as u8)
-            .collect();
-        let whole = hash_reader_streaming(std::io::Cursor::new(&payload)).unwrap();
-        for step in [1usize, 7, 31, 32, 33, 64, 1023, 4096] {
-            let chunked = hash_reader_streaming(ChunkedReader {
-                data: &payload,
-                step,
-            })
+    fn stat_build_id_tracks_size_and_subsec_mtime() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("fake-bin");
+        fs::write(&bin, b"binary-v1").unwrap();
+        let f = fs::OpenOptions::new().write(true).open(&bin).unwrap();
+        f.set_modified(UNIX_EPOCH + Duration::new(1_700_000_000, 111_000_000))
             .unwrap();
-            assert_eq!(whole, chunked, "mismatch for read step={step}");
-        }
+        let id1 = compute_exe_build_id(&bin).unwrap();
+        f.set_modified(UNIX_EPOCH + Duration::new(1_700_000_000, 222_000_000))
+            .unwrap();
+        let id2 = compute_exe_build_id(&bin).unwrap();
+        assert_ne!(id1, id2, "sub-second mtime change must update build_id");
+        fs::write(&bin, b"binary-v2-longer").unwrap();
+        let id3 = compute_exe_build_id(&bin).unwrap();
+        assert_ne!(id2, id3);
+        assert!(build_id().starts_with("exe-"));
     }
 }

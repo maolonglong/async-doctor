@@ -2,6 +2,9 @@
 //! - `dangling-task` (correctness)
 //! - `ephemeral-async-client` (performance)
 //! - `shared-async-session` (correctness)
+//! - `offload-stateful-session` / `useless-local-async-lock` / `swallowed-cancelled-error` (see `llm_rules`)
+
+mod llm_rules;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -12,18 +15,21 @@ use crate::id::{FindingIdParts, fix_group_id};
 use crate::report::{Advice, AdviceCategory, ChainStep, Entry, EntryLabel, Fix};
 
 use super::grade::{
-    PathToEntry, chain_step_for, resolution_for_edge, shortest_paths_to_async_entries,
-    unique_site_finding_id,
+    ClassInitIndex, ItemSpanMap, PathToEntry, chain_step_for, collect_item_spans,
+    resolution_for_edge, shortest_paths_to_async_entries, unique_site_finding_id,
 };
 
 pub(super) const RULE_DANGLING_TASK: &str = "dangling-task";
 pub(super) const RULE_EPHEMERAL_ASYNC_CLIENT: &str = "ephemeral-async-client";
 pub(super) const RULE_SHARED_ASYNC_SESSION: &str = "shared-async-session";
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn collect_anti_pattern_advice(
     facts: &ProjectFacts,
     reverse: &[Vec<usize>],
     include_non_production: bool,
+    class_inits: &ClassInitIndex,
+    item_spans: &mut ItemSpanMap,
     advice: &mut Vec<Advice>,
     emitted_sites: &mut HashMap<String, (FunctionId, String, u32)>,
     emitted: &mut HashSet<String>,
@@ -32,6 +38,8 @@ pub(super) fn collect_anti_pattern_advice(
         facts,
         reverse,
         include_non_production,
+        class_inits,
+        item_spans,
         advice,
         emitted_sites,
         emitted,
@@ -40,6 +48,8 @@ pub(super) fn collect_anti_pattern_advice(
         facts,
         reverse,
         include_non_production,
+        class_inits,
+        item_spans,
         advice,
         emitted_sites,
         emitted,
@@ -48,16 +58,31 @@ pub(super) fn collect_anti_pattern_advice(
         facts,
         reverse,
         include_non_production,
+        class_inits,
+        item_spans,
+        advice,
+        emitted_sites,
+        emitted,
+    );
+    llm_rules::collect_llm_advice(
+        facts,
+        reverse,
+        include_non_production,
+        class_inits,
+        item_spans,
         advice,
         emitted_sites,
         emitted,
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_dangling_task_advice(
     facts: &ProjectFacts,
     reverse: &[Vec<usize>],
     include_non_production: bool,
+    class_inits: &ClassInitIndex,
+    item_spans: &mut ItemSpanMap,
     advice: &mut Vec<Advice>,
     emitted_sites: &mut HashMap<String, (FunctionId, String, u32)>,
     emitted: &mut HashSet<String>,
@@ -106,6 +131,10 @@ fn collect_dangling_task_advice(
             ) else {
                 continue;
             };
+            item_spans.insert(
+                id.clone(),
+                collect_item_spans(facts, class_inits, &path, edge),
+            );
             advice.push(Advice {
                 id,
                 rule: RULE_DANGLING_TASK.to_string(),
@@ -134,10 +163,13 @@ fn collect_dangling_task_advice(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_ephemeral_async_client_advice(
     facts: &ProjectFacts,
     reverse: &[Vec<usize>],
     include_non_production: bool,
+    class_inits: &ClassInitIndex,
+    item_spans: &mut ItemSpanMap,
     advice: &mut Vec<Advice>,
     emitted_sites: &mut HashMap<String, (FunctionId, String, u32)>,
     emitted: &mut HashSet<String>,
@@ -193,6 +225,10 @@ fn collect_ephemeral_async_client_advice(
             ) else {
                 continue;
             };
+            item_spans.insert(
+                id.clone(),
+                collect_item_spans(facts, class_inits, &path, edge),
+            );
             advice.push(Advice {
                 id,
                 rule: RULE_EPHEMERAL_ASYNC_CLIENT.to_string(),
@@ -223,10 +259,13 @@ fn collect_ephemeral_async_client_advice(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_shared_async_session_advice(
     facts: &ProjectFacts,
     reverse: &[Vec<usize>],
     include_non_production: bool,
+    class_inits: &ClassInitIndex,
+    item_spans: &mut ItemSpanMap,
     advice: &mut Vec<Advice>,
     emitted_sites: &mut HashMap<String, (FunctionId, String, u32)>,
     emitted: &mut HashSet<String>,
@@ -278,6 +317,10 @@ fn collect_shared_async_session_advice(
             ) else {
                 continue;
             };
+            item_spans.insert(
+                id.clone(),
+                collect_item_spans(facts, class_inits, &path, edge),
+            );
             advice.push(Advice {
                 id,
                 rule: RULE_SHARED_ASYNC_SESSION.to_string(),
@@ -309,7 +352,7 @@ fn collect_shared_async_session_advice(
     }
 }
 
-fn build_advice_chain(
+pub(super) fn build_advice_chain(
     facts: &ProjectFacts,
     path: &PathToEntry,
     edge: &crate::graph::CallEdge,

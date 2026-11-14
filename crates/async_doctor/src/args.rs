@@ -53,6 +53,10 @@ pub struct Cli {
     #[arg(default_value = ".")]
     pub path: PathBuf,
 
+    /// Python interpreter or virtualenv prefix to use for module and async-twin resolution.
+    #[arg(long, value_name = "PATH")]
+    pub python: Option<PathBuf>,
+
     /// Output format.
     #[arg(long, value_enum, default_value_t = Format::Text)]
     pub format: Format,
@@ -131,9 +135,15 @@ pub enum Command {
         /// Project directory or `.py` file to scan (default: current directory).
         #[arg(long, default_value = ".")]
         path: PathBuf,
+        /// Python interpreter or virtualenv prefix to use while locating the site.
+        #[arg(long, value_name = "PATH")]
+        python: Option<PathBuf>,
         /// Output format (`text` or `json`).
         #[arg(long, value_enum, default_value_t = WhyFormat::Text)]
         format: WhyFormat,
+        /// Show every matching chain when >5 entries share a sink/rule.
+        #[arg(long)]
+        expand: bool,
         /// Include non-production entries while locating the site.
         #[arg(long)]
         include_non_production: bool,

@@ -4,6 +4,13 @@
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+// Short page decay returns freed Salsa wave pages to the OS promptly between waves.
+#[cfg(not(target_env = "msvc"))]
+#[allow(non_upper_case_globals)]
+#[unsafe(export_name = "_rjem_malloc_conf")]
+pub static malloc_conf: Option<&'static u8> =
+    Some(&b"dirty_decay_ms:1000,muzzy_decay_ms:1000\0"[0]);
+
 mod args;
 mod baseline;
 mod changed;
@@ -15,7 +22,7 @@ mod skill_cmd;
 mod suppress;
 mod text;
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::Instant;
@@ -45,13 +52,17 @@ fn run() -> anyhow::Result<ExitCode> {
         Some(Command::Why {
             location,
             path,
+            python,
             format,
+            expand,
             include_non_production,
             show_unresolved,
         }) => help_cmd::run_why(
             &location,
             &path,
+            python.as_deref(),
             format,
+            expand,
             include_non_production,
             show_unresolved,
         ),
@@ -73,23 +84,18 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
         include_non_production: cli.include_non_production,
         show_unresolved: cli.show_unresolved,
     };
+    let resolved_python = cli.python.as_deref().map(resolve_cli_path);
+    let scan_opts = async_doctor_ty::ScanOptions {
+        analyze: options,
+        python: resolved_python,
+        cache_dir: None,
+    };
     let t_start = Instant::now();
     // Absolute so bare `file.py` is not treated as having an empty parent.
     // Keep the original CLI path for `why --path` so relative inputs (and
     // symlink leaves) stay short and runnable instead of long `../` climbs.
     let path = resolve_cli_path(&cli.path);
-    let mut report = async_doctor_ty::scan_path_with_options(&path, options)
-        .with_context(|| format!("failed to scan `{}`", path.display()))?;
-    let elapsed = t_start.elapsed();
-
-    rewrite_why_commands(&mut report, &cli.path);
-
-    if !report.complete {
-        for skipped in &report.skipped {
-            eprintln!("warning: skipped {skipped}");
-        }
-        eprintln!("warning: analysis incomplete (complete=false)");
-    }
+    std::fs::metadata(&path).with_context(|| format!("failed to scan `{}`", path.display()))?;
 
     let scan_root = if path.is_file() {
         path.parent().unwrap_or(path.as_path()).to_path_buf()
@@ -99,17 +105,6 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
     let scan_root = dunce::canonicalize(&scan_root).unwrap_or(scan_root);
     let single_file = path.is_file().then_some(path.as_path());
 
-    let suppress_out = suppress::apply_scoped(report, &scan_root, single_file)?;
-    for m in &suppress_out.missing_reason {
-        eprintln!(
-            "warning: {}:{}: `# async-doctor: ignore[{}]` requires a reason \
-             (`# async-doctor: ignore[{}]: <why>`)",
-            m.file, m.line, m.rule, m.rule
-        );
-    }
-    let suppressed_by_ignore = suppress_out.suppressed_findings;
-    let mut report = suppress_out.report;
-
     // Prefer git toplevel for SARIF %SRCROOT%; fall back to scan root.
     let mut repo_root_for_sarif = if matches!(cli.format, Format::Sarif) {
         changed::repo_root_for(&path).ok()
@@ -117,29 +112,73 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
         None
     };
 
-    if let Some(ref_spec) = &cli.changed {
+    let pre_changed = cli.changed.as_ref().map(|ref_spec| {
         let git_ref = if ref_spec.is_empty() || ref_spec == "AUTO" {
             None
         } else {
             Some(ref_spec.as_str())
         };
-        match changed::resolve_changed(&path, git_ref) {
-            ChangedSet::Filter {
-                files,
-                repo_root,
-                note,
-            } => {
-                if let Some(note) = note {
-                    eprintln!("note: {note}");
-                }
-                repo_root_for_sarif = Some(repo_root.clone());
-                report = changed::filter_report(report, &files, &scan_root, &repo_root);
-            }
-            ChangedSet::FullScan { note } => {
+        changed::resolve_changed(&path, git_ref)
+    });
+
+    let short_circuit_clean = match &pre_changed {
+        Some(ChangedSet::Filter {
+            files,
+            repo_root,
+            note,
+        }) => {
+            if let Some(note) = note {
                 eprintln!("note: {note}");
             }
+            repo_root_for_sarif = Some(repo_root.clone());
+            !changed::has_python_or_config_changes(files)
         }
-    }
+        Some(ChangedSet::FullScan { note }) => {
+            eprintln!("note: {note}");
+            false
+        }
+        None => false,
+    };
+
+    let (mut report, suppressed_by_ignore, elapsed) = if short_circuit_clean {
+        if let Some(py) = &scan_opts.python {
+            std::fs::metadata(py)
+                .with_context(|| format!("invalid Python environment `{}`", py.display()))?;
+        }
+        (Report::empty_complete(), 0u32, t_start.elapsed())
+    } else {
+        let mut report = async_doctor_ty::scan_path_with_scan_options(&path, &scan_opts)
+            .with_context(|| format!("failed to scan `{}`", path.display()))?;
+        let elapsed = t_start.elapsed();
+
+        rewrite_why_commands(&mut report, &cli.path, cli.python.as_deref());
+
+        if !report.complete {
+            for skipped in &report.skipped {
+                eprintln!("warning: skipped {skipped}");
+            }
+            eprintln!("warning: analysis incomplete (complete=false)");
+        }
+
+        let suppress_out = suppress::apply_scoped(report, &scan_root, single_file)?;
+        for m in &suppress_out.missing_reason {
+            eprintln!(
+                "warning: {}:{}: `# async-doctor: ignore[{}]` requires a reason \
+                 (`# async-doctor: ignore[{}]: <why>`)",
+                m.file, m.line, m.rule, m.rule
+            );
+        }
+        let suppressed_by_ignore = suppress_out.suppressed_findings;
+        let mut report = suppress_out.report;
+
+        if let Some(ChangedSet::Filter {
+            files, repo_root, ..
+        }) = &pre_changed
+        {
+            report = changed::filter_report(report, files, &scan_root, repo_root);
+        }
+        (report, suppressed_by_ignore, elapsed)
+    };
 
     let writing_baseline = cli.write_baseline.is_some();
     if let Some(path) = &cli.write_baseline {
@@ -191,18 +230,13 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
             Format::Markdown => markdown::write_markdown(
                 &report,
                 markdown::MarkdownOptions {
+                    expand: cli.expand,
                     suppressed_by_baseline,
                     suppressed_by_ignore,
                     elapsed: Some(elapsed),
                 },
             )?,
-            Format::Json => {
-                let stdout = std::io::stdout();
-                let mut out = std::io::BufWriter::with_capacity(64 * 1024, stdout.lock());
-                serde_json::to_writer_pretty(&mut out, &report)?;
-                writeln!(out)?;
-                out.flush()?;
-            }
+            Format::Json => write_json_stdout(&report)?,
             Format::Sarif => {
                 let src_root = repo_root_for_sarif
                     .as_deref()
@@ -224,12 +258,27 @@ fn run_scan(cli: Cli) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::from(exit_code as u8))
 }
 
+pub(crate) fn write_json_stdout<T: serde::Serialize>(value: &T) -> anyhow::Result<()> {
+    let stdout = std::io::stdout();
+    let is_tty = stdout.is_terminal();
+    let mut out = std::io::BufWriter::with_capacity(64 * 1024, stdout.lock());
+    if is_tty {
+        serde_json::to_writer_pretty(&mut out, value)?;
+    } else {
+        serde_json::to_writer(&mut out, value)?;
+    }
+    writeln!(out)?;
+    out.flush()?;
+    Ok(())
+}
+
 pub(crate) fn extract_why_locator(why: &str) -> Option<&str> {
     let rest = why.strip_prefix("async-doctor why ")?.trim();
-    let loc = rest
-        .split_once(" --path ")
+    let loc = rest.split_once(" --path ").map(|(l, _)| l).unwrap_or(rest);
+    let loc = loc
+        .split_once(" --python ")
         .map(|(l, _)| l)
-        .unwrap_or(rest)
+        .unwrap_or(loc)
         .trim();
     let loc = loc
         .strip_prefix('"')
@@ -239,8 +288,9 @@ pub(crate) fn extract_why_locator(why: &str) -> Option<&str> {
     (!loc.is_empty() && loc.contains(':')).then_some(loc)
 }
 
-pub(crate) fn rewrite_why_commands(report: &mut Report, scan_path: &Path) {
+pub(crate) fn rewrite_why_commands(report: &mut Report, scan_path: &Path, python: Option<&Path>) {
     let path_arg = cli_path_arg(scan_path);
+    let python_arg = python.map(cli_path_arg);
     let rewrite = |why: &mut String| {
         let Some(loc) = extract_why_locator(why) else {
             return;
@@ -250,7 +300,10 @@ pub(crate) fn rewrite_why_commands(report: &mut Report, scan_path: &Path) {
         } else {
             loc.to_string()
         };
-        *why = format!("async-doctor why {loc_arg} --path {path_arg}");
+        *why = match &python_arg {
+            Some(py) => format!("async-doctor why {loc_arg} --path {path_arg} --python {py}"),
+            None => format!("async-doctor why {loc_arg} --path {path_arg}"),
+        };
     };
     for f in &mut report.findings {
         rewrite(&mut f.why);

@@ -31,8 +31,15 @@ impl DoctorSystem {
         }
     }
 
-    pub(crate) fn snapshot_read_paths(&self) -> Vec<SystemPathBuf> {
-        self.read_paths.lock().unwrap().iter().cloned().collect()
+    pub(crate) fn take_newly_read_paths(&self) -> Vec<SystemPathBuf> {
+        std::mem::take(&mut *self.read_paths.lock().unwrap())
+            .into_iter()
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_read_paths_count(&self) -> usize {
+        self.read_paths.lock().unwrap().len()
     }
 
     pub(crate) fn fresh(&self) -> Self {

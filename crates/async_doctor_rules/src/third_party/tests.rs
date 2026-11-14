@@ -1,5 +1,7 @@
 //! Third-party sink table unit tests.
 
+mod gaps;
+
 use async_doctor_core::SinkTable;
 
 use super::BuiltinSinkTable;

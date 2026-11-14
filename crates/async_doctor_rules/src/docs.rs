@@ -62,32 +62,34 @@ so latency spikes and timeouts pile up across the process. Prefer the async twin
     RuleDoc {
         id: "blocking-socket",
         title: "Blocking socket / DNS / SSL",
-        summary: "Sync socket, DNS/SSL, or `smtplib`/`ftplib` stalls the loop.",
+        summary: "Sync socket, DNS, `SSLContext.wrap_socket` / `SSLSocket`, or `smtplib` / `ftplib` stalls the loop.",
         body: "\
-BSD sockets, blocking DNS, SSL handshakes, and sync `smtplib` / `ftplib` clients\n\
-resolve on the calling thread. Inside `async def`, that thread is the event loop.\n\
-Use asyncio helpers / `aiosmtplib`, or run the sync call in a worker thread.",
+BSD sockets, blocking DNS, TLS handshakes/reads/writes, and sync `smtplib` /\n\
+`ftplib` clients resolve on the calling thread. Inside `async def`, that thread\n\
+is the event loop. Use asyncio helpers / `aiosmtplib`, or run the sync call in\n\
+a worker thread.",
         fix: "\
-- Prefer `asyncio.open_connection` / asyncio servers / `loop.getaddrinfo`.\n\
+- Prefer `asyncio.open_connection(..., ssl=...)` / asyncio servers / `loop.getaddrinfo`.\n\
 - Or `await asyncio.to_thread(socket.create_connection, ...)`.",
     },
     RuleDoc {
         id: "blocking-http",
         title: "Blocking HTTP / RPC / cloud client",
-        summary: "Sync HTTP, RPC, messaging, and cloud/AI SDKs (`urllib`, `requests`, sync `httpx`, `boto3`, `openai`, `anthropic`, `elasticsearch`, `kafka`, sync `grpc`) block the loop.",
+        summary: "Sync HTTP, RPC, messaging, and cloud/AI/vector SDKs (`urllib`, `http.client`, `requests`, sync `httpx`, `boto3`, `openai`, `anthropic`, `groq`, `ollama`, `qdrant_client`, `elasticsearch`, `kafka`, `confluent_kafka`, sync `grpc`) block the loop.",
         body: "\
 Network and service round-trips are often tens to hundreds of milliseconds. Sync\n\
-HTTP clients, RPC stubs, and cloud/AI/search/messaging SDKs hold the event loop\n\
-for the whole wait. Switch to the async client twin, or offload the call.",
+HTTP clients, RPC stubs, and cloud/AI/search/vector/messaging SDKs hold the event\n\
+loop for the whole wait. Switch to the async client twin, or offload the call.",
         fix: "\
-- Use `httpx.AsyncClient`, `aiohttp`, `AsyncOpenAI`, `AsyncAnthropic`,\n\
-  `AsyncElasticsearch`, `aioboto3`, `aiokafka`, or `grpc.aio`.\n\
+- Use `httpx.AsyncClient`, `aiohttp`, `AsyncOpenAI`, `AsyncAnthropic` /\n\
+  `AsyncAnthropicBedrock` / `AsyncAnthropicVertex`, `AsyncGroq`, `ollama.AsyncClient`,\n\
+  `AsyncQdrantClient`, `AsyncElasticsearch`, `aioboto3`, `aiokafka`, or `grpc.aio`.\n\
 - Or `await asyncio.to_thread(requests.get, url)`.",
     },
     RuleDoc {
         id: "blocking-subprocess",
         title: "Blocking subprocess",
-        summary: "`subprocess.run` / `Popen.wait` / `os.system` block until exit.",
+        summary: "`subprocess.run` / `Popen.wait` / `os.system` / `os.waitpid` block until exit.",
         body: "\
 Waiting on a child process from the event-loop thread prevents other tasks from\n\
 running for the entire child lifetime.",
@@ -99,12 +101,13 @@ running for the entire child lifetime.",
     RuleDoc {
         id: "blocking-file",
         title: "Blocking file / path IO",
-        summary: "`open`, path/resource IO (`Path.mkdir`, `importlib.resources`), walks, archives, and `input` block on IO.",
+        summary: "`open`, `io` / `os` file IO, `pathlib.Path`, `importlib.resources`, `shutil`, walks, archives, and `input` block on IO.",
         body: "\
-Disk IO (including `pathlib` reads/writes/`mkdir`/`unlink`, `importlib.resources`\n\
-`Traversable` reads, `glob`, `zipfile` / `tarfile`, and blocking `input()`) can\n\
-stall under load or on network filesystems. Inside `async def`, use async helpers\n\
-or offload sync calls.",
+Disk IO (including `io.BufferedReader` / `FileIO`, `os.read` / `write` / `fsync`,\n\
+`pathlib.Path` reads/writes/walks/mutations, `importlib.resources` `Traversable`\n\
+reads, `shutil` copies/archives, `glob`, `zipfile` / `tarfile`, and blocking\n\
+`input()`) can stall under load or on network filesystems. Inside `async def`,\n\
+use async helpers or offload sync calls.",
         fix: "\
 - Use `aiofiles` / AnyIO file APIs where practical.\n\
 - Or `await asyncio.to_thread(path.read_text)` / `to_thread(open, ...)`.",
@@ -125,15 +128,34 @@ task. Prefer asyncio primitives, or confine blocking waits to worker threads.",
     RuleDoc {
         id: "blocking-db",
         title: "Blocking database / cache driver",
-        summary: "Sync SQL, document, and KV database drivers (`sqlite3`, `psycopg`, `pymysql`, `pymongo`, sync `redis`, sync `sqlalchemy`) block on queries.",
+        summary: "Sync SQL, document, and KV database drivers (`sqlite3`, `psycopg`, `pymysql`, `pymongo`, sync `redis` / `RedisCluster`, sync `valkey`, sync `sqlalchemy` / `sqlmodel`) block on queries.",
         body: "\
-Sync SQL, MongoDB, and Redis drivers perform wire or disk IO on the calling\n\
+Sync SQL, MongoDB, and Redis/Valkey drivers perform wire or disk IO on the calling\n\
 thread. From `async def`, that blocks the event loop for every query or command.\n\
-Prefer async drivers/sessions, or offload.",
+Prefer async drivers/sessions, or offload a self-contained sync unit-of-work\n\
+function that opens, commits, and closes its own `Session` or `Connection` inside\n\
+the worker thread. Never dispatch bound methods of a shared/request sync\n\
+`Session` or `sqlite3.Connection` (`check_same_thread=True`) across pool threads.",
         fix: "\
-- Switch to an async driver (`AsyncSession`, `psycopg.AsyncConnection`, `asyncpg`,\n\
-  `aiomysql`, `motor`, `redis.asyncio`).\n\
-- Or wrap sync calls: `await asyncio.to_thread(session.execute, ...)`.",
+- Switch to an async driver or session (`AsyncSession`, `sqlmodel` `AsyncSession`,\n\
+  `aiosqlite`, `psycopg.AsyncConnection`, `asyncpg`, `aiomysql`, `motor`,\n\
+  `pymongo.AsyncMongoClient`, `redis.asyncio`, `valkey.asyncio.Valkey`).\n\
+- Or offload a self-contained sync unit-of-work function: `await asyncio.to_thread(run_sync_query, ...)`\n\
+  where `run_sync_query` opens, commits, and closes its own `Session` / `Connection` in the worker thread.",
+    },
+    RuleDoc {
+        id: "blocking-cpu",
+        title: "Slow CPU-bound password KDF (candidate only)",
+        summary: "Password KDFs (`bcrypt`, `argon2`, `hashlib.pbkdf2_hmac`, `hashlib.scrypt`) are intentionally slow; reported as candidates.",
+        body: "\
+Password hashing functions are tuned to burn tens to hundreds of milliseconds of\n\
+CPU per call while holding or contending on the event-loop thread. Because cost\n\
+parameters and call frequency vary by environment, async-doctor reports them\n\
+strictly as `slow-kdf` candidates — never findings, and never failing the exit\n\
+code by default.",
+        fix: "\
+- Offload password hashing/verification with `await asyncio.to_thread(bcrypt.checkpw, ...)`\n\
+  or `await asyncio.to_thread(ph.verify, ...)` (or a `ProcessPoolExecutor` if GIL-bound).",
     },
     RuleDoc {
         id: "unresolved-call",
@@ -160,7 +182,9 @@ Explicit exception to design decision #2 (twins as fix hints only): advice fires
 at cut offload sites so nothing is double-reported with blocking findings.",
         fix: "\
 - Replace the sync client with its async twin (`httpx.AsyncClient`,\n\
-  `redis.asyncio`, `AsyncOpenAI`, `AsyncAnthropic`, `AsyncElasticsearch`,\n\
+  `redis.asyncio`, `valkey.asyncio.Valkey`, `AsyncOpenAI`, `AsyncAnthropic` /\n\
+  `AsyncAnthropicBedrock` / `AsyncAnthropicVertex`, `AsyncGroq`,\n\
+  `ollama.AsyncClient`, `AsyncQdrantClient`, `AsyncElasticsearch`,\n\
   `psycopg.AsyncConnection`, `grpc.aio`, `AsyncSession` / `AsyncEngine`)\n\
   and await it directly.\n\
 - Keep the offload if the function must also run from sync-only callers.",
@@ -285,6 +309,57 @@ runtime). This is correctness advice and never fails the exit code.",
 - Open a separate `AsyncSession` / connection per concurrent task from a shared\n\
   `async_sessionmaker` / connection pool, or await the queries sequentially.",
     },
+    RuleDoc {
+        id: "offload-stateful-session",
+        title: "Offload of a bound stateful sync DB session or connection method (advice)",
+        summary: "A bound method of `sqlalchemy.orm.Session`, `sqlmodel.Session`, or `sqlite3.Connection` / `Cursor` is dispatched directly to a worker thread.",
+        body: "\
+Sync `sqlalchemy.orm.Session` and `sqlmodel.Session` instances hold mutable\n\
+identity-map and transaction state that is not thread-safe across pool threads,\n\
+and `sqlite3.Connection` / `sqlite3.Cursor` default to `check_same_thread=True`\n\
+(raising `ProgrammingError` when used on a different thread than the one that\n\
+opened the connection). Dispatching `asyncio.to_thread(session.execute, ...)`\n\
+crosses thread boundaries on an existing handle instead of isolating the unit of\n\
+work inside the worker thread. This is correctness advice and never fails the\n\
+exit code.",
+        fix: "\
+- Offload a self-contained sync unit-of-work function (`await asyncio.to_thread(run_query, engine, ...)`)\n\
+  that opens, commits, and closes its own `Session` or `Connection` inside the worker thread.\n\
+- Or migrate to `sqlalchemy.ext.asyncio.AsyncSession` / `aiosqlite`.",
+    },
+    RuleDoc {
+        id: "useless-local-async-lock",
+        title: "Unshared per-call async lock or semaphore (advice)",
+        summary: "`asyncio.Lock` / `Semaphore` is freshly constructed per call inside `async def` without sharing across tasks or closures.",
+        body: "\
+Constructing `asyncio.Lock()`, `asyncio.Semaphore(...)`, `asyncio.BoundedSemaphore(...)`,\n\
+or `anyio.Lock()` / `Semaphore(...)` / `CapacityLimiter(...)` inside an `async def`\n\
+and only entering it locally (`async with asyncio.Lock():` or an unescaped local\n\
+`lock = asyncio.Lock(); async with lock:`) creates a distinct primitive on every\n\
+call. No concurrent caller can contend on that instance, so mutual exclusion or\n\
+concurrency limiting is a no-op. Locks shared with nested closures or passed to\n\
+helper tasks are excluded. This is correctness advice and never fails the exit code.",
+        fix: "\
+- Store the `Lock` / `Semaphore` on a shared instance (`self._lock` in `__init__`),\n\
+  lifespan state, or module scope so concurrent coroutines contend on the same primitive.",
+    },
+    RuleDoc {
+        id: "swallowed-cancelled-error",
+        title: "Swallowed asyncio.CancelledError inside async def (advice)",
+        summary: "`except asyncio.CancelledError:` (or bare `except:` / `except BaseException:` over an `await`) exits without re-raising.",
+        body: "\
+In Python 3.8+, `asyncio.CancelledError` inherits from `BaseException` to drive\n\
+structured cancellation (`asyncio.timeout`, `asyncio.wait_for`, `asyncio.TaskGroup`,\n\
+and client disconnect cleanup). Catching `CancelledError` (or bare `except:` /\n\
+`except BaseException:` without an earlier `CancelledError` re-raise) and returning\n\
+or falling through without `raise` leaves the task's cancellation count un-cleared\n\
+and breaks enclosing timeouts and `TaskGroup`s. Top-level `Task` and `Lifecycle`\n\
+entries and `Task.uncancel()` scopes are excluded. This is correctness advice and\n\
+never fails the exit code.",
+        fix: "\
+- Run cleanup in `finally:` or re-raise `raise` at the end of `except asyncio.CancelledError:`.\n\
+- Catch `except Exception:` instead of bare `except:` / `except BaseException:` when you only want application errors.",
+    },
 ];
 
 /// Look up a rule by id (`blocking-sleep`) or docs anchor (`#blocking-sleep`).
@@ -316,12 +391,14 @@ mod tests {
     #[test]
     fn every_stdlib_rule_constant_has_docs() {
         use crate::{
-            RULE_BLOCKING_DB, RULE_BLOCKING_FILE, RULE_BLOCKING_HTTP, RULE_BLOCKING_LOCK,
-            RULE_BLOCKING_SLEEP, RULE_BLOCKING_SOCKET, RULE_BLOCKING_SUBPROCESS,
-            RULE_DANGLING_TASK, RULE_EAGER_OFFLOAD_CALL, RULE_EPHEMERAL_ASYNC_CLIENT,
-            RULE_NESTED_EVENT_LOOP, RULE_OFFLOAD_COROUTINE, RULE_OFFLOAD_HAS_ASYNC_TWIN,
-            RULE_SHARED_ASYNC_SESSION, RULE_SYNC_FOR_ASYNC_ITERABLE, RULE_SYNC_WITH_ASYNC_CM,
-            RULE_UNAWAITED_COROUTINE,
+            RULE_BLOCKING_CPU, RULE_BLOCKING_DB, RULE_BLOCKING_FILE, RULE_BLOCKING_HTTP,
+            RULE_BLOCKING_LOCK, RULE_BLOCKING_SLEEP, RULE_BLOCKING_SOCKET,
+            RULE_BLOCKING_SUBPROCESS, RULE_DANGLING_TASK, RULE_EAGER_OFFLOAD_CALL,
+            RULE_EPHEMERAL_ASYNC_CLIENT, RULE_NESTED_EVENT_LOOP, RULE_OFFLOAD_COROUTINE,
+            RULE_OFFLOAD_HAS_ASYNC_TWIN, RULE_OFFLOAD_STATEFUL_SESSION, RULE_SHARED_ASYNC_SESSION,
+            RULE_SWALLOWED_CANCELLED_ERROR, RULE_SYNC_FOR_ASYNC_ITERABLE, RULE_SYNC_WITH_ASYNC_CM,
+            RULE_UNAWAITED_COROUTINE, RULE_USELESS_LOCAL_ASYNC_LOCK, STDLIB_SINKS,
+            THIRD_PARTY_SINKS,
         };
         for id in [
             RULE_BLOCKING_SLEEP,
@@ -331,6 +408,7 @@ mod tests {
             RULE_BLOCKING_FILE,
             RULE_BLOCKING_LOCK,
             RULE_BLOCKING_DB,
+            RULE_BLOCKING_CPU,
             RULE_OFFLOAD_HAS_ASYNC_TWIN,
             RULE_NESTED_EVENT_LOOP,
             RULE_OFFLOAD_COROUTINE,
@@ -341,8 +419,32 @@ mod tests {
             RULE_DANGLING_TASK,
             RULE_EPHEMERAL_ASYNC_CLIENT,
             RULE_SHARED_ASYNC_SESSION,
+            RULE_OFFLOAD_STATEFUL_SESSION,
+            RULE_USELESS_LOCAL_ASYNC_LOCK,
+            RULE_SWALLOWED_CANCELLED_ERROR,
         ] {
             assert!(rule_doc(id).is_some(), "missing RuleDoc for {id}");
+        }
+        for sink in STDLIB_SINKS.iter().chain(THIRD_PARTY_SINKS.iter()) {
+            assert!(
+                rule_doc(sink.rule).is_some(),
+                "sink {} references undocumented rule {}",
+                sink.qualname,
+                sink.rule
+            );
+        }
+
+        let rules_md = include_str!("../../../docs/rules.md");
+        assert!(
+            rules_md.lines().count() <= 500,
+            "docs/rules.md must stay <= 500 lines"
+        );
+        for doc in RULE_DOCS {
+            let heading = format!("## {}", doc.id);
+            assert!(
+                rules_md.lines().any(|line| line.trim() == heading),
+                "docs/rules.md missing heading `{heading}`"
+            );
         }
     }
 

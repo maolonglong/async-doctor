@@ -327,7 +327,7 @@ fn threading_lock_acquire_sink() {
 fn sqlite3_connect_sink() {
     let dir = temp_project(&[(
         "db.py",
-        "import sqlite3\n\nasync def handler():\n    sqlite3.connect(':memory:')\n",
+        "import sqlite3\n\nasync def handler():\n    sqlite3.connect('app.db')\n",
     )]);
     let report = scan_path(&dir).unwrap();
     assert_eq!(report.findings.len(), 1, "{:?}", report.findings);

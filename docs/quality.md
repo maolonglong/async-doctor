@@ -38,16 +38,15 @@ save test-profile artifacts. Concurrent cold-cache detail:
 
 | Area | Grade | Why | Updated |
 |---|---|---|---|
-| `async_doctor` CLI / reporters | A- | Dedicated regression coverage across whole-file suppressions, single-file scope, `--changed`/`--diff`, `--fail-on`, `why --format json`, Markdown, and SARIF 2.1.0 schema validation | 2026-11-11 |
-| `async_doctor_ty` extract / scan / cache | A- | Pre-indexed site-packages metadata, cross-package follow-target retention, hardened whole-scan fingerprint (`scan-cache-v5`), and 100-trial concurrent cold-cache parity | 2026-11-11 |
-| `async_doctor_core` propagate / report | A- | Bound-method param indexing, multi-hop param guards, edge-precise higher-order callback binding, and zero-clone `analyze_owned` propagation | 2026-11-11 |
-| `async_doctor_rules` sinks / twins | A- | Aligned `blocking-http` vs `blocking-db` rule docs with tightened `pymysql` / `pymongo` / `grpc` non-IO exclusions | 2026-11-11 |
-| Docs / agent map | B+ | Synced CLI, JSON contract, rules, architecture, and benchmark tables; `check_docs.py` enforced | 2026-11-11 |
+| `async_doctor` CLI / reporters | A | `--python` end-to-end, stateless ignore-candidate suppression, piped compact JSON, sync-caller fan-in in text/`why`, span-aware `--changed`, `.pre-commit-hooks.yaml`, and `action.yml` | 2026-11-13 |
+| `async_doctor_ty` extract / scan / cache | A | Auto-discovered PDM/Poetry/Pipenv/`--python` environments (`env_discovery.rs`), multi-guard + inverted `ParamGuard` & `keyword_literals` (`CACHE_SCHEMA_VERSION` 24), `scan-cache-v8`, and modular sub-580L files | 2026-11-13 |
+| `async_doctor_core` propagate / report | A | Conjunction `ParamGuard` pruning, transitive sync-caller fan-in (`syncCallerCount`), `FunctionFact.end_line` + `Class.__init__` span tracking (`item_spans`), and 6 high-precision async anti-pattern advice rules | 2026-11-13 |
+| `async_doctor_rules` sinks / twins | A | Expanded third-party sinks/twins (`httpx` module verbs, `boto3`/`botocore` + `Waiter.wait` + `StreamingBody`, `sqlmodel`, `RedisCluster`, `valkey`, `pymongo` collection ops, `AnthropicBedrock`/`AnthropicVertex`, `confluent_kafka`, `groq`, `ollama`, `qdrant_client`), non-IO exclusions, and 3 LLM async correctness advice docs | 2026-11-13 |
+| Docs / agent map | A- | Synced CLI, JSON contract, rules, architecture, bundled skill, and completed exec plans; `check_docs.py` enforced with zero warnings | 2026-11-13 |
 
 ## Debt tracker
 
 | Debt | Where | Cost of leaving it | Added |
 |---|---|---|---|
-| Several core modules sit in the 700–779 line band (`pass2.rs`, `resolve.rs`, `suppress.rs`, `families.rs`, `cache.rs`, `propagate/mod.rs`) | `crates/` | Under the 800-line ceiling, but split by responsibility before adding new features to those files | 2026-11-11 |
 | GBK / legacy-encoded sources skipped with a warning | `encoding.rs` | Those files invisible to analysis | 2026-11-01 |
 | Serial pass-2 panic rollback does not undo changes to existing functions / `follow_targets` (deliberate) | `pass2.rs` | Partial facts after panic; documented behavior | 2026-11-01 |

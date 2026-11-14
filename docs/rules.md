@@ -1,7 +1,7 @@
 # async-doctor rules
 
-Stable rule ids for findings. Use `async-doctor explain <rule-id>` for the same
-text in the terminal. Inline suppressions: `# async-doctor: ignore[<rule-id>]: <reason>`.
+Stable rule ids for findings, candidates, and advice. Use `async-doctor explain <rule-id>`
+for the same text in the terminal. Inline suppressions: `# async-doctor: ignore[<rule-id>]: <reason>`.
 
 ## blocking-sleep
 
@@ -11,21 +11,24 @@ text in the terminal. Inline suppressions: `# async-doctor: ignore[<rule-id>]: <
 
 ## blocking-socket
 
-Sync socket IO, blocking DNS (`getaddrinfo`), SSL handshake, or sync
+Sync socket IO (`recv*`, `send*`, `sendfile`), blocking DNS (`getaddrinfo`),
+`SSLContext.wrap_socket` / `SSLSocket` handshakes and reads/writes, or sync
 `smtplib` / `ftplib` clients on the loop thread.
 
-**Fix:** asyncio connection/server APIs, `aiosmtplib` / async FTP, or offload
-with `asyncio.to_thread`.
+**Fix:** asyncio connection/server/datagram APIs (`open_connection(..., ssl=...)`),
+`aiosmtplib` / async FTP, or offload with `asyncio.to_thread`.
 
 ## blocking-http
 
-Sync HTTP, RPC, messaging, and cloud/AI SDKs (`urllib`, `requests`, sync
-`httpx` / `urllib3`, `boto3` / `botocore`, `openai`, `anthropic`,
-`elasticsearch`, `kafka`, sync `grpc`).
+Sync HTTP, RPC, messaging, and cloud/AI/vector SDKs (`urllib`, `http.client`,
+`requests`, sync `httpx` / `urllib3`, `boto3` / `botocore`, `openai`,
+`anthropic` / `AnthropicBedrock` / `AnthropicVertex`, `groq`, `ollama`,
+`qdrant_client`, `elasticsearch`, `kafka`, `confluent_kafka`, sync `grpc`).
 
 **Fix:** `httpx.AsyncClient` / `aiohttp` / `AsyncOpenAI` / `AsyncAnthropic` /
-`AsyncElasticsearch` / `aioboto3` / `aiokafka` / `grpc.aio`, or
-`await asyncio.to_thread(...)`.
+`AsyncAnthropicBedrock` / `AsyncAnthropicVertex` / `AsyncGroq` /
+`ollama.AsyncClient` / `AsyncQdrantClient` / `AsyncElasticsearch` /
+`aioboto3` / `aiokafka` / `grpc.aio`, or `await asyncio.to_thread(...)`.
 
 **Notes:**
 
@@ -33,41 +36,45 @@ Sync HTTP, RPC, messaging, and cloud/AI SDKs (`urllib`, `requests`, sync
   builds a `Request` object, `httpx.Client.mount` registers transports, and
   `requests.Session.mount` / `requests.Session.get_adapter` are
   adapter-registry lookups.
-- `openai` / `anthropic` `with_options` / `copy` return new clients — no
-  request. `grpc` credential constructors (`ssl_channel_credentials`, etc.) and
-  `.future(...)` calls are not blocking RPCs.
-- Sync `boto3` / `botocore` client and resource API calls (including dynamic
-  methods such as `get_object` / `get_item`) are reported under `blocking-http`
-  with an `aioboto3` / `aiobotocore` fix hint. Meta helpers (`get_paginator`,
-  `get_waiter`, `can_paginate`, `generate_presigned_url`, `meta`) are not IO and
-  stay clean. `aioboto3.*` / `aiobotocore.*` qualnames (including
-  `Session.client` / `Session.resource` and `async with` receivers) are
-  classified as async counterparts (never findings). Sync `boto3-stubs.*` /
-  `botocore-stubs.*` package roots normalize to `boto3` / `botocore`.
-- `kafka-python` consumer local-state mutators and metrics snapshots do no
-  broker RPC: `pause`/`resume`/`seek`/`assignment`/`subscription`/`paused`/
-  `metrics`/`bootstrap_connected` on `KafkaConsumer`, and `metrics` /
-  `bootstrap_connected` on `KafkaProducer` do not report.
+- `openai` / `anthropic` (including Bedrock/Vertex) / `groq` `with_options` and
+  `copy` return new clients — no request. `qdrant_client.models.*` and
+  `ollama.Message` data models do not report. `grpc` credential constructors
+  (`ssl_channel_credentials`, etc.) and `.future(...)` calls are not blocking RPCs.
+- Sync `boto3` / `botocore` client/resource API calls, `Waiter.wait`, and
+  `botocore.response.StreamingBody.{read, iter_lines, iter_chunks}` report under
+  `blocking-http` with an `aioboto3` / `aiobotocore` fix hint. Meta helpers
+  (`get_paginator`, `get_waiter`, `can_paginate`, `generate_presigned_url`,
+  `generate_presigned_post`, `meta`) are not IO and stay clean. `aioboto3.*` /
+  `aiobotocore.*` qualnames are classified as async counterparts (never findings).
+  Sync `boto3-stubs.*` / `botocore-stubs.*` package roots normalize to `boto3` / `botocore`.
+- `kafka-python` consumer local-state mutators (`pause`/`resume`/`seek`/
+  `assignment`/`subscription`/`paused`/`metrics`/`bootstrap_connected`) and
+  `confluent_kafka.Producer.produce` (local C buffer enqueue) do not report;
+  `confluent_kafka` `Producer.flush` and `Consumer.{poll, consume}` report.
 
 ## blocking-subprocess
 
-`subprocess.run` / `Popen.wait` / `os.system` wait on the event-loop thread.
+`subprocess.run` / `Popen.wait` / `os.system` / `os.waitpid` wait on the
+event-loop thread (`subprocess.Popen(...)` construction itself is not a finding).
 
 **Fix:** `asyncio.create_subprocess_*` and await communicate/wait, or offload.
 
 ## blocking-file
 
-`open`, path read/write/mutation (`pathlib.Path.read_text` / `write_text` /
-`mkdir` / `unlink` / `rename` / `touch`), `importlib.resources` /
-`importlib_resources` `Traversable` reads (`files(...).joinpath(...).read_text` /
-`read_bytes` / `open` / `iterdir`), directory walks (`os.listdir` /
-`pathlib.Path.iterdir` / `glob`), archives (`zipfile` / `tarfile`), and
-blocking `input()` on the loop.
+`open`, `io.BufferedReader` / `io.FileIO`, raw fd ops (`os.read` / `write` /
+`pread` / `pwrite` / `fsync` / `fdatasync`), path read/write/mutation
+(`pathlib.Path.read_text` / `write_text` / `mkdir` / `unlink` / `rename` /
+`walk` / `touch`), `importlib.resources` `Traversable` reads, `shutil` file and
+archive helpers, directory walks (`os.listdir` / `pathlib.Path.iterdir` / `glob`),
+archives (`zipfile` / `tarfile`), and blocking `input()` on the loop.
 
 **Fix:** async file helpers, or `await asyncio.to_thread(...)`.
 
 **Notes:**
 
+- Abstract typing protocols (`typing.IO` / `BinaryIO` / `TextIO`) and `tempfile`
+  constructors are never findings because callers may bind in-memory buffers or
+  cheap handles.
 - Cheap idempotent path ops are `cheap-path-op` candidates, not findings:
   `Path.mkdir(exist_ok=True)`, `os.makedirs(exist_ok=True)`,
   `Path.unlink(missing_ok=True)` (flag must be a literal `True`, keyword or its
@@ -115,21 +122,45 @@ waits to workers.
 ## blocking-db
 
 Sync SQL, document, and KV database drivers (`sqlite3`, `psycopg` / `psycopg2`,
-`pymysql`, `pymongo`, sync `redis`, sync `sqlalchemy`).
+`pymysql`, `pymongo`, sync `redis` / `RedisCluster`, sync `valkey`, sync
+`sqlalchemy` / `sqlmodel`).
 
-**Fix:** async driver/session (`AsyncSession`, `psycopg.AsyncConnection`,
-`asyncpg`, `aiomysql`, `motor`, `redis.asyncio`), or
-`await asyncio.to_thread(...)`.
+**Fix:** switch to the async driver/session (`AsyncSession`,
+`sqlmodel.ext.asyncio.session.AsyncSession`, `aiosqlite`,
+`psycopg.AsyncConnection`, `asyncpg`, `aiomysql`, `motor` /
+`pymongo.AsyncMongoClient`, `redis.asyncio`, `valkey.asyncio.Valkey`), or
+offload a **self-contained sync unit-of-work function**
+(`await asyncio.to_thread(run_sync_query, ...)`) that opens, commits, and closes
+its own `Session` / `Connection` inside the worker thread.
 
 **Notes:**
 
+- Never pass bound methods of a request-scoped or shared sync `Session` or
+  `sqlite3.Connection` into `asyncio.to_thread`: `sqlite3.Connection` defaults
+  to `check_same_thread=True` and raises `ProgrammingError` on pool threads, and
+  SQLAlchemy/SQLModel sync `Session` instances are not thread-safe across
+  worker threads.
 - `AsyncSession.run_sync` runs sync work on a greenlet in the event-loop thread
   — it is **not** a thread offload and is not treated as one.
 - Pure helpers and handle getters do not report: `pymysql.err.*` /
   `pymysql.constants.*` / `pymysql.converters.*` / `escape_string` / `Binary`,
-  and `pymongo` database/collection handle getters (`get_database`,
-  `get_collection`, `with_options`, `codec_options`, `read_preference`,
-  `write_concern`, `read_concern`) perform no wire IO.
+  `sqlalchemy` / `sqlmodel` identity-map mutators (`add`, `expunge`, `expire`),
+  sync `redis` / `valkey` `Pipeline` / `ClusterPipeline` command buffering (only
+  `.execute()` does IO), and `pymongo` database/collection handle getters
+  (`get_database`, `get_collection`, `with_options`, `codec_options`,
+  `read_preference`, `write_concern`, `read_concern`).
+
+## blocking-cpu
+
+**Candidate (`slow-kdf`)** — never fails the exit code by default.
+
+Password hashing and key-derivation functions (`bcrypt.hashpw` / `checkpw`,
+`argon2.PasswordHasher.hash` / `verify`, `hashlib.pbkdf2_hmac` / `scrypt`) are
+tuned to burn tens to hundreds of milliseconds of CPU per call. Because cost
+parameters vary by caller, they report strictly as candidates.
+
+**Fix:** offload with `await asyncio.to_thread(bcrypt.checkpw, ...)` /
+`await asyncio.to_thread(ph.verify, ...)` (or a `ProcessPoolExecutor`).
 
 ## unresolved-call
 
@@ -143,19 +174,22 @@ exit code by itself. Inspect, add types, or offload if the call is sync IO.
 An offload boundary (`asyncio.to_thread`, `run_in_executor`,
 `anyio.to_thread.run_sync`, `starlette.concurrency.run_in_threadpool`,
 `asgiref.sync.sync_to_async`, `channels.db.database_sync_to_async`, inferred
-wrappers) cuts a sync call that only
-reaches sinks with a high-confidence same-package async twin
-(`httpx.AsyncClient` including module-level `httpx.get`/`post`/…,
-`redis.asyncio` including distributed locks, `openai.AsyncOpenAI`,
-`openai.AsyncAzureOpenAI`, `anthropic.AsyncAnthropic`,
+wrappers) cuts a sync call that only reaches sinks with a high-confidence
+same-package async twin (`httpx.AsyncClient` including module-level
+`httpx.get`/`post`/`put`/`patch`/`delete`/`head`/`options`/`request`/`stream`,
+`redis.asyncio` including `RedisCluster` and distributed locks,
+`valkey.asyncio.Valkey`, `openai.AsyncOpenAI`, `openai.AsyncAzureOpenAI`,
+`anthropic.AsyncAnthropic` / `AsyncAnthropicBedrock` / `AsyncAnthropicVertex`,
+`groq.AsyncGroq`, `ollama.AsyncClient`, `qdrant_client.AsyncQdrantClient`,
 `elasticsearch.AsyncElasticsearch` needing `aiohttp`,
 `psycopg.AsyncConnection`, `grpc.aio`, and `sqlalchemy.ext.asyncio.AsyncSession` /
-`AsyncEngine` when `greenlet` plus an async SQL driver such as `asyncpg`,
-`psycopg`, `aiosqlite`, `aiomysql`, or `asyncmy` are installed). The twin and
-its `needs` / `any_needs` must resolve in the scanned venv. The offload site's
-own try/if/loop conditions do not suppress advice. Skipped when the offloaded
-function is also called from sync-only code, or when any reached sink is
-excluded (pymongo, requests, boto3, file IO, subprocess, CPU work).
+`AsyncEngine` or `sqlmodel.ext.asyncio.session.AsyncSession` when `greenlet`
+plus an async SQL driver such as `asyncpg`, `psycopg`, `aiosqlite`, `aiomysql`,
+or `asyncmy` are installed). The twin and its `needs` / `any_needs` must resolve
+in the scanned venv. The offload site's own try/if/loop conditions do not
+suppress advice. Skipped when the offloaded function is also called from
+sync-only code, or when any reached sink is excluded (`pymongo`, `requests`,
+`boto3`, `sqlite3`, `confluent_kafka`, file IO, subprocess, CPU/KDF work).
 
 **Why:** the offload already avoids blocking the loop, but the async twin
 removes the thread hop and keeps cancellation/context on the event loop.
@@ -298,3 +332,51 @@ reported.
 
 **Fix:** open a separate session/connection per concurrent task (via
 `async_sessionmaker` or `pool.acquire()`), or `await` the operations sequentially.
+
+## offload-stateful-session
+
+**Advice (correctness)** — never fails the exit code.
+
+A bound method of a stateful synchronous database handle
+(`sqlalchemy.orm.Session`, `sqlmodel.Session`, `sqlite3.Connection`, or
+`sqlite3.Cursor`) is passed directly to an offload boundary such as
+`asyncio.to_thread(session.execute, ...)` or `loop.run_in_executor(None, conn.execute, ...)`.
+Sync `Session` objects hold non-thread-safe identity-map and transaction state,
+and `sqlite3` handles enforce `check_same_thread=True` by default
+(`ProgrammingError` across pool threads). Offloading a self-contained sync
+function or thread-safe `Engine` / `scoped_session` is not reported.
+
+**Fix:** offload a self-contained sync unit-of-work function that opens, commits,
+and closes its own `Session` / `Connection` inside the worker thread, or migrate
+to `AsyncSession` / `aiosqlite`.
+
+## useless-local-async-lock
+
+**Advice (correctness)** — never fails the exit code.
+
+`asyncio.Lock()`, `asyncio.Semaphore(...)`, `asyncio.BoundedSemaphore(...)`, or
+`anyio.Lock()` / `Semaphore(...)` / `CapacityLimiter(...)` is freshly constructed
+inside an `async def` and entered via `async with` without escaping to any
+nested closure, task argument, attribute, return value, or global/module binding.
+Every call allocates a private lock instance that no other coroutine can see, so
+mutual exclusion or concurrency limiting is a no-op.
+
+**Fix:** allocate the `Lock` / `Semaphore` once on shared state (`self._lock` in
+`__init__`, lifespan state, or module scope) so concurrent coroutines contend on
+the same primitive.
+
+## swallowed-cancelled-error
+
+**Advice (correctness)** — never fails the exit code.
+
+Inside an `async def`, `except asyncio.CancelledError:` (or bare `except:` /
+`except BaseException:` guarding an `await` / `async with` / `async for` block
+without a preceding `CancelledError` handler) can exit normally or `return`
+without re-raising. Swallowing `CancelledError` leaves cancellation state
+uncleared and breaks `asyncio.timeout`, `asyncio.wait_for`, and
+`asyncio.TaskGroup`. Top-level `Task` and `Lifecycle` entries, `except Exception:`
+handlers, and `Task.uncancel()` scopes are not reported.
+
+**Fix:** move cleanup to `finally:` or end `except asyncio.CancelledError:` with
+`raise`; use `except Exception:` instead of bare `except:` / `except BaseException:`
+for application errors.

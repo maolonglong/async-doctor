@@ -600,6 +600,7 @@ fn m2_cache_fingerprint_invalidates_on_content_change() {
             key: "demo.f".into(),
             qualname: "f".into(),
             module: "demo".into(),
+            file: "site-packages/demo/__init__.py".into(),
             line: 1,
             is_async: false,
             is_generator: false,

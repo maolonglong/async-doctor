@@ -1,18 +1,24 @@
 //! `explain` and `why` subcommands — agent-facing long-form help.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
 
 use anyhow::{Context, bail};
-use async_doctor_core::{AnalyzeOptions, EXIT_FINDINGS, EXIT_OK, Report, SCHEMA_VERSION};
+use async_doctor_core::{
+    Advice, AnalyzeOptions, Candidate, ChainStep, EXIT_FINDINGS, EXIT_OK, Finding, Report,
+    SCHEMA_VERSION, primary_sink_step,
+};
 use async_doctor_rules::rule_doc;
 use serde_json::json;
 
 use crate::args::WhyFormat;
 use crate::paths::{normalize_path, paths_equal, resolve_cli_path};
 use crate::text::{write_advice, write_candidate, write_finding};
+
+const WHY_GROUP_CAP_THRESHOLD: usize = 5;
+const WHY_GROUP_SHOWN: usize = 3;
 
 pub fn run_explain(rule: &str) -> anyhow::Result<ExitCode> {
     let Some(doc) = rule_doc(rule) else {
@@ -27,7 +33,9 @@ pub fn run_explain(rule: &str) -> anyhow::Result<ExitCode> {
 pub fn run_why(
     location: &str,
     path: &Path,
+    python: Option<&Path>,
     format: WhyFormat,
+    expand: bool,
     include_non_production: bool,
     show_unresolved: bool,
 ) -> anyhow::Result<ExitCode> {
@@ -39,10 +47,16 @@ pub fn run_why(
         show_unresolved,
     };
     let abs_path = resolve_cli_path(path);
-    let mut report = async_doctor_ty::scan_path_with_options(&abs_path, options)
+    let resolved_python = python.map(resolve_cli_path);
+    let scan_opts = async_doctor_ty::ScanOptions {
+        analyze: options,
+        python: resolved_python,
+        cache_dir: None,
+    };
+    let mut report = async_doctor_ty::scan_path_with_scan_options(&abs_path, &scan_opts)
         .with_context(|| format!("failed to scan `{}`", abs_path.display()))?;
     // Same rewrite and inline-suppression pass the default scan applies.
-    crate::rewrite_why_commands(&mut report, path);
+    crate::rewrite_why_commands(&mut report, path, python);
     let scan_root = if abs_path.is_file() {
         abs_path
             .parent()
@@ -53,7 +67,8 @@ pub fn run_why(
     };
     let scan_root = dunce::canonicalize(&scan_root).unwrap_or(scan_root);
     let single_file = abs_path.is_file().then_some(abs_path.as_path());
-    let report = crate::suppress::apply_scoped(report, &scan_root, single_file)?.report;
+    let mut report = crate::suppress::apply_scoped(report, &scan_root, single_file)?.report;
+    report.refresh_sink_sites();
 
     let matches = findings_at(&report, &file, line);
     let code = if matches.findings.is_empty() {
@@ -62,7 +77,6 @@ pub fn run_why(
         EXIT_FINDINGS
     };
 
-    let mut out = std::io::stdout().lock();
     if matches!(format, WhyFormat::Json) {
         let mut seen_rules = BTreeSet::new();
         for f in &matches.findings {
@@ -106,11 +120,11 @@ pub fn run_why(
             "advice": matches.advice,
             "rules": rules,
         });
-        serde_json::to_writer_pretty(&mut out, &doc)?;
-        writeln!(out)?;
+        crate::write_json_stdout(&doc)?;
         return Ok(ExitCode::from(code as u8));
     }
 
+    let mut out = std::io::stdout().lock();
     if matches.findings.is_empty() && matches.candidates.is_empty() && matches.advice.is_empty() {
         writeln!(
             out,
@@ -131,62 +145,171 @@ pub fn run_why(
         matches.candidates.len(),
         matches.advice.len()
     )?;
-    for f in &matches.findings {
-        write_finding(&mut out, f)?;
-        writeln!(out, "Hop resolution:")?;
-        for (i, step) in f.chain.iter().enumerate() {
-            let res = if step.resolution.is_empty() {
-                "(unspecified)"
-            } else {
-                step.resolution.as_str()
-            };
-            writeln!(out, "  {}. {}:{} — {res}", i + 1, step.file, step.line)?;
+
+    let mut distinct_docs = Vec::new();
+    let mut seen_rule_ids: HashSet<&'static str> = HashSet::new();
+    let mut record_rule = |r: &str| {
+        if let Some(doc) = rule_doc(r)
+            && seen_rule_ids.insert(doc.id)
+        {
+            distinct_docs.push(doc);
         }
-        writeln!(out)?;
-        if let Some(doc) = rule_doc(&f.rule) {
-            writeln!(out, "{}", doc.explain_text())?;
+    };
+
+    for group in group_by_sink_and_rule(&matches.findings, finding_sink_key) {
+        record_rule(&group[0].rule);
+        let (_, sink_file, sink_line) = finding_sink_key(group[0]);
+        let shown = if !expand && group.len() > WHY_GROUP_CAP_THRESHOLD {
+            WHY_GROUP_SHOWN
+        } else {
+            group.len()
+        };
+        for f in group.iter().take(shown) {
+            write_finding(&mut out, f)?;
+            write_hop_resolution(&mut out, &f.chain)?;
+        }
+        if group.len() > shown {
+            writeln!(
+                out,
+                "... and {} more entries (pass --expand to list all)\n",
+                group.len() - shown
+            )?;
+        }
+        if let Some(site) = report.sink_sites.iter().find(|s| {
+            s.fix_group_id == group[0].fix.fix_group_id
+                && s.file == sink_file
+                && s.line == sink_line
+        }) && site.sync_caller_count > 0
+        {
+            let caller_s = if site.sync_caller_count == 1 { "" } else { "s" };
+            let reach_verb = if site.sync_caller_count == 1 {
+                "reaches"
+            } else {
+                "reach"
+            };
+            match site.sample_sync_caller.as_deref() {
+                Some(sample) if !sample.is_empty() => writeln!(
+                    out,
+                    "Sync callers: {} sync caller{caller_s} also {reach_verb} this helper (e.g. {sample}) — offloading at the async caller preserves sync callers.\n",
+                    site.sync_caller_count
+                )?,
+                _ => writeln!(
+                    out,
+                    "Sync callers: {} sync caller{caller_s} also {reach_verb} this helper — offloading at the async caller preserves sync callers.\n",
+                    site.sync_caller_count
+                )?,
+            }
         }
     }
-    for c in &matches.candidates {
-        write_candidate(&mut out, c)?;
-        writeln!(out, "Hop resolution:")?;
-        for (i, step) in c.chain.iter().enumerate() {
-            let res = if step.resolution.is_empty() {
-                "(unspecified)"
-            } else {
-                step.resolution.as_str()
-            };
-            writeln!(out, "  {}. {}:{} — {res}", i + 1, step.file, step.line)?;
+
+    for group in group_by_sink_and_rule(&matches.candidates, candidate_sink_key) {
+        record_rule(&group[0].rule);
+        let shown = if !expand && group.len() > WHY_GROUP_CAP_THRESHOLD {
+            WHY_GROUP_SHOWN
+        } else {
+            group.len()
+        };
+        for c in group.iter().take(shown) {
+            write_candidate(&mut out, c)?;
+            write_hop_resolution(&mut out, &c.chain)?;
         }
-        writeln!(out)?;
-        if let Some(doc) = rule_doc(&c.rule) {
-            writeln!(out, "{}", doc.explain_text())?;
+        if group.len() > shown {
+            writeln!(
+                out,
+                "... and {} more entries (pass --expand to list all)\n",
+                group.len() - shown
+            )?;
         }
     }
-    for a in &matches.advice {
-        write_advice(&mut out, a)?;
-        writeln!(out, "Hop resolution:")?;
-        for (i, step) in a.chain.iter().enumerate() {
-            let res = if step.resolution.is_empty() {
-                "(unspecified)"
-            } else {
-                step.resolution.as_str()
-            };
-            writeln!(out, "  {}. {}:{} — {res}", i + 1, step.file, step.line)?;
+
+    for group in group_by_sink_and_rule(&matches.advice, advice_sink_key) {
+        record_rule(&group[0].rule);
+        let shown = if !expand && group.len() > WHY_GROUP_CAP_THRESHOLD {
+            WHY_GROUP_SHOWN
+        } else {
+            group.len()
+        };
+        for a in group.iter().take(shown) {
+            write_advice(&mut out, a)?;
+            write_hop_resolution(&mut out, &a.chain)?;
         }
-        writeln!(out)?;
-        if let Some(doc) = rule_doc(&a.rule) {
-            writeln!(out, "{}", doc.explain_text())?;
+        if group.len() > shown {
+            writeln!(
+                out,
+                "... and {} more entries (pass --expand to list all)\n",
+                group.len() - shown
+            )?;
         }
+    }
+
+    for doc in distinct_docs {
+        writeln!(out, "{}", doc.explain_text())?;
     }
 
     Ok(ExitCode::from(code as u8))
 }
 
+fn write_hop_resolution(out: &mut impl Write, chain: &[ChainStep]) -> anyhow::Result<()> {
+    writeln!(out, "Hop resolution:")?;
+    for (i, step) in chain.iter().enumerate() {
+        let res = if step.resolution.is_empty() {
+            "(unspecified)"
+        } else {
+            step.resolution.as_str()
+        };
+        writeln!(out, "  {}. {}:{} — {res}", i + 1, step.file, step.line)?;
+    }
+    writeln!(out)?;
+    Ok(())
+}
+
+fn finding_sink_key(f: &Finding) -> (&str, &str, u32) {
+    let (file, line) = primary_sink_step(f)
+        .map(|(_, s)| (s.file.as_str(), s.line))
+        .unwrap_or((f.entry.file.as_str(), f.entry.line));
+    (f.rule.as_str(), file, line)
+}
+
+fn candidate_sink_key(c: &Candidate) -> (&str, &str, u32) {
+    let (file, line) = c
+        .chain
+        .last()
+        .map(|s| (s.file.as_str(), s.line))
+        .unwrap_or((c.entry.file.as_str(), c.entry.line));
+    (c.rule.as_str(), file, line)
+}
+
+fn advice_sink_key(a: &Advice) -> (&str, &str, u32) {
+    let (file, line) = a
+        .chain
+        .last()
+        .map(|s| (s.file.as_str(), s.line))
+        .unwrap_or((a.entry.file.as_str(), a.entry.line));
+    (a.rule.as_str(), file, line)
+}
+
+fn group_by_sink_and_rule<'a, T>(
+    items: &'a [T],
+    key_fn: fn(&'a T) -> (&'a str, &'a str, u32),
+) -> Vec<Vec<&'a T>> {
+    let mut keys: Vec<(&'a str, &'a str, u32)> = Vec::new();
+    let mut groups: Vec<Vec<&'a T>> = Vec::new();
+    for item in items {
+        let key = key_fn(item);
+        if let Some(pos) = keys.iter().position(|k| *k == key) {
+            groups[pos].push(item);
+        } else {
+            keys.push(key);
+            groups.push(vec![item]);
+        }
+    }
+    groups
+}
+
 struct SiteMatches {
-    findings: Vec<async_doctor_core::Finding>,
-    candidates: Vec<async_doctor_core::Candidate>,
-    advice: Vec<async_doctor_core::Advice>,
+    findings: Vec<Finding>,
+    candidates: Vec<Candidate>,
+    advice: Vec<Advice>,
 }
 
 fn findings_at(report: &Report, file: &str, line: u32) -> SiteMatches {
@@ -241,9 +364,13 @@ fn why_matches(why: &str, file: &str, line: u32) -> bool {
 
 fn parse_location(location: &str) -> anyhow::Result<(String, u32)> {
     let location = location.trim();
-    // Allow accidental `--path …` suffix if the user pasted the full why line.
+    // Allow accidental `--path …` or `--python …` suffix if the user pasted the full why line.
     let location = location
         .split_once(" --path ")
+        .map(|(l, _)| l)
+        .unwrap_or(location);
+    let location = location
+        .split_once(" --python ")
         .map(|(l, _)| l)
         .unwrap_or(location)
         .trim();

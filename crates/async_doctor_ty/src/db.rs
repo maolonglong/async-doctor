@@ -25,7 +25,6 @@ use ty_python_semantic::lint::{LintRegistry, RuleSelection};
 use ty_python_semantic::{
     AnalysisSettings, Program, PythonEnvironment, PythonVersionWithSource, default_lint_registry,
 };
-use ty_site_packages::SysPrefixPathOrigin;
 
 #[salsa::db]
 #[derive(Clone)]
@@ -78,16 +77,11 @@ impl AsyncDoctorDb {
             scan_environment: ScanEnvironment::none(),
         };
 
-        let environment = resolve_environment(&db.system, project_root, python)?;
-        let site_packages = match &environment {
-            Some(env) => env
-                .site_packages_paths(&db.system)
-                .context("failed to resolve site-packages paths")?
-                .into_vec(),
-            None => Vec::new(),
-        };
-        db.scan_environment =
-            crate::env_info::summarize_environment(environment.as_ref(), &site_packages);
+        let discovered_env =
+            crate::env_discovery::discover_environment(&db.system, project_root, python)?;
+        let site_packages = discovered_env.site_packages.clone();
+        db.scan_environment = crate::env_info::summarize_discovered_environment(&discovered_env);
+        let environment = discovered_env.python_environment;
         let python_version = environment
             .as_ref()
             .and_then(PythonEnvironment::python_version_from_metadata)
@@ -202,11 +196,10 @@ impl AsyncDoctorDb {
             .collect()
     }
 
-    /// Clear `ParsedModule` ASTs for all system files read so far on this DB,
-    /// without invoking platform allocator pressure-relief walks (safe inside
-    /// multi-threaded worker loops).
+    /// Drain newly read system paths and clear their `ParsedModule` ASTs so
+    /// periodic wave clears stay O(delta) rather than O(W^2).
     pub(crate) fn clear_parsed_modules_only(&self) {
-        let paths = self.system.snapshot_read_paths();
+        let paths = self.system.take_newly_read_paths();
         let py_ver = self.program_settings.python_version.version;
         for p in paths {
             if let Some(file) = self.files.try_system(self, &p) {
@@ -214,95 +207,6 @@ impl AsyncDoctorDb {
                 ruff_db::parsed::parsed_module(self, pf).clear();
             }
         }
-    }
-}
-
-/// Hint the platform allocator to mark freed magazine pages reusable after bulk
-/// AST or Salsa arena drops.
-pub(crate) fn release_freed_memory() {
-    #[cfg(target_os = "macos")]
-    unsafe {
-        unsafe extern "C" {
-            fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
-        }
-        malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
-    }
-}
-
-/// Resolve the Python environment for `project_root` (no `--python` override).
-pub(crate) fn resolve_environment_for_project(
-    system: &dyn System,
-    project_root: &SystemPath,
-) -> anyhow::Result<Option<PythonEnvironment>> {
-    resolve_environment(system, project_root, None)
-}
-
-fn resolve_environment(
-    system: &dyn System,
-    project_root: &SystemPath,
-    python: Option<&SystemPath>,
-) -> anyhow::Result<Option<PythonEnvironment>> {
-    match python {
-        Some(selected) => {
-            let prefix = sys_prefix_from_python_arg(system, selected);
-            let env = PythonEnvironment::new(&prefix, SysPrefixPathOrigin::PythonCliFlag, system)
-                .with_context(|| format!("invalid Python environment `{selected}`"))?;
-            Ok(Some(env))
-        }
-        None => {
-            // Prefer VIRTUAL_ENV / conda / `.venv` via ty's discover.
-            // uv and poetry in-project virtualenvs typically use `.venv`.
-            let discovered = PythonEnvironment::discover(Some(project_root), system)
-                .context("Python environment discovery failed")?;
-
-            // discover only auto-probes `.venv`. Also try `venv/` (common alias),
-            // and retry `.venv` when discover returned None.
-            if discovered.is_some() {
-                // When VIRTUAL_ENV is set, keep discover's result.
-                if system.env_var("VIRTUAL_ENV").is_ok() {
-                    return Ok(discovered);
-                }
-                // Prefer an in-project `venv/` when present and discover fell
-                // through to a non-local environment (`.venv` missing/broken).
-                let venv = project_root.join("venv");
-                if system.is_directory(&venv)
-                    && let Ok(env) =
-                        PythonEnvironment::new(&venv, SysPrefixPathOrigin::LocalVenv, system)
-                {
-                    // Only override when discover did not already pick `.venv`.
-                    let dot_venv = project_root.join(".venv");
-                    if !system.is_directory(&dot_venv) {
-                        return Ok(Some(env));
-                    }
-                }
-                return Ok(discovered);
-            }
-
-            for name in ["venv", ".venv"] {
-                let path = project_root.join(name);
-                if system.is_directory(&path)
-                    && let Ok(env) =
-                        PythonEnvironment::new(&path, SysPrefixPathOrigin::LocalVenv, system)
-                {
-                    return Ok(Some(env));
-                }
-            }
-            Ok(None)
-        }
-    }
-}
-
-/// Map a `--python`-style path to a sys.prefix directory.
-///
-/// Interpreters live at `<prefix>/bin/python`; a directory argument is used as-is.
-fn sys_prefix_from_python_arg(system: &dyn System, path: &SystemPath) -> SystemPathBuf {
-    if system.is_file(path) {
-        path.parent()
-            .and_then(SystemPath::parent)
-            .unwrap_or(path)
-            .to_path_buf()
-    } else {
-        path.to_path_buf()
     }
 }
 
@@ -392,5 +296,9 @@ impl AsyncDoctorDb {
 
     pub(crate) fn reset_fresh_empty_count() {
         FRESH_EMPTY_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn pending_read_paths_count(&self) -> usize {
+        self.system.pending_read_paths_count()
     }
 }

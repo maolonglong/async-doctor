@@ -68,12 +68,39 @@ pub static ASYNC_TWINS: &[AsyncTwinEntry] = &[
             TwinMatcher::Prefix("redis.StrictRedis."),
             TwinMatcher::Prefix("redis.client.Redis."),
             TwinMatcher::Prefix("redis.client.StrictRedis."),
+            TwinMatcher::Prefix("redis.RedisCluster."),
+            TwinMatcher::Prefix("redis.cluster.RedisCluster."),
             TwinMatcher::Prefix("redis.PubSub."),
             TwinMatcher::Prefix("redis.client.PubSub."),
             TwinMatcher::Prefix("redis.Lock."),
             TwinMatcher::Prefix("redis.lock.Lock."),
             TwinMatcher::Exact("redis.client.Pipeline.execute"),
             TwinMatcher::Prefix("redis.client.Pipeline.execute"),
+            TwinMatcher::Prefix("redis.Pipeline.execute"),
+            TwinMatcher::Prefix("redis.ClusterPipeline.execute"),
+            TwinMatcher::Prefix("redis.cluster.ClusterPipeline.execute"),
+        ],
+    },
+    AsyncTwinEntry {
+        symbol: "valkey.asyncio.Valkey",
+        needs: &[],
+        any_needs: &[],
+        confidence: TwinConfidence::High,
+        matchers: &[
+            TwinMatcher::Prefix("valkey.Valkey."),
+            TwinMatcher::Prefix("valkey.StrictValkey."),
+            TwinMatcher::Prefix("valkey.client.Valkey."),
+            TwinMatcher::Prefix("valkey.client.StrictValkey."),
+            TwinMatcher::Prefix("valkey.ValkeyCluster."),
+            TwinMatcher::Prefix("valkey.cluster.ValkeyCluster."),
+            TwinMatcher::Prefix("valkey.PubSub."),
+            TwinMatcher::Prefix("valkey.client.PubSub."),
+            TwinMatcher::Prefix("valkey.Lock."),
+            TwinMatcher::Prefix("valkey.lock.Lock."),
+            TwinMatcher::Prefix("valkey.Pipeline.execute"),
+            TwinMatcher::Prefix("valkey.client.Pipeline.execute"),
+            TwinMatcher::Prefix("valkey.ClusterPipeline.execute"),
+            TwinMatcher::Prefix("valkey.cluster.ClusterPipeline.execute"),
         ],
     },
     // Prefer Azure twin before the generic OpenAI resources prefix.
@@ -100,6 +127,35 @@ pub static ASYNC_TWINS: &[AsyncTwinEntry] = &[
             TwinMatcher::Prefix("openai.resources."),
         ],
     },
+    // Prefer Bedrock / Vertex twins before generic Anthropic.
+    AsyncTwinEntry {
+        symbol: "anthropic.AsyncAnthropicBedrock",
+        needs: &[],
+        any_needs: &[],
+        confidence: TwinConfidence::High,
+        matchers: &[
+            TwinMatcher::Prefix("anthropic.AnthropicBedrock."),
+            TwinMatcher::Exact("anthropic.AnthropicBedrock"),
+            TwinMatcher::Prefix("anthropic.lib.bedrock.AnthropicBedrock."),
+            TwinMatcher::Exact("anthropic.lib.bedrock.AnthropicBedrock"),
+            TwinMatcher::Prefix("anthropic.lib.bedrock._client.AnthropicBedrock."),
+            TwinMatcher::Exact("anthropic.lib.bedrock._client.AnthropicBedrock"),
+        ],
+    },
+    AsyncTwinEntry {
+        symbol: "anthropic.AsyncAnthropicVertex",
+        needs: &[],
+        any_needs: &[],
+        confidence: TwinConfidence::High,
+        matchers: &[
+            TwinMatcher::Prefix("anthropic.AnthropicVertex."),
+            TwinMatcher::Exact("anthropic.AnthropicVertex"),
+            TwinMatcher::Prefix("anthropic.lib.vertex.AnthropicVertex."),
+            TwinMatcher::Exact("anthropic.lib.vertex.AnthropicVertex"),
+            TwinMatcher::Prefix("anthropic.lib.vertex._client.AnthropicVertex."),
+            TwinMatcher::Exact("anthropic.lib.vertex._client.AnthropicVertex"),
+        ],
+    },
     AsyncTwinEntry {
         symbol: "anthropic.AsyncAnthropic",
         needs: &[],
@@ -109,6 +165,55 @@ pub static ASYNC_TWINS: &[AsyncTwinEntry] = &[
             TwinMatcher::Prefix("anthropic.Anthropic."),
             TwinMatcher::Exact("anthropic.Anthropic"),
             TwinMatcher::Prefix("anthropic.resources."),
+        ],
+    },
+    AsyncTwinEntry {
+        symbol: "groq.AsyncGroq",
+        needs: &[],
+        any_needs: &[],
+        confidence: TwinConfidence::High,
+        matchers: &[
+            TwinMatcher::Exact("groq.Groq"),
+            TwinMatcher::Prefix("groq.Groq."),
+            TwinMatcher::Exact("groq._client.Groq"),
+            TwinMatcher::Prefix("groq._client.Groq."),
+            TwinMatcher::Prefix("groq.resources."),
+        ],
+    },
+    AsyncTwinEntry {
+        symbol: "ollama.AsyncClient",
+        needs: &[],
+        any_needs: &[],
+        confidence: TwinConfidence::High,
+        matchers: &[
+            TwinMatcher::Exact("ollama.Client"),
+            TwinMatcher::Prefix("ollama.Client."),
+            TwinMatcher::Exact("ollama._client.Client"),
+            TwinMatcher::Prefix("ollama._client.Client."),
+            TwinMatcher::Exact("ollama.chat"),
+            TwinMatcher::Exact("ollama.generate"),
+            TwinMatcher::Exact("ollama.embed"),
+            TwinMatcher::Exact("ollama.embeddings"),
+            TwinMatcher::Exact("ollama.list"),
+            TwinMatcher::Exact("ollama.show"),
+            TwinMatcher::Exact("ollama.pull"),
+            TwinMatcher::Exact("ollama.push"),
+            TwinMatcher::Exact("ollama.create"),
+            TwinMatcher::Exact("ollama.delete"),
+            TwinMatcher::Exact("ollama.copy"),
+            TwinMatcher::Exact("ollama.ps"),
+        ],
+    },
+    AsyncTwinEntry {
+        symbol: "qdrant_client.AsyncQdrantClient",
+        needs: &[],
+        any_needs: &[],
+        confidence: TwinConfidence::High,
+        matchers: &[
+            TwinMatcher::Exact("qdrant_client.QdrantClient"),
+            TwinMatcher::Prefix("qdrant_client.QdrantClient."),
+            TwinMatcher::Exact("qdrant_client.qdrant_client.QdrantClient"),
+            TwinMatcher::Prefix("qdrant_client.qdrant_client.QdrantClient."),
         ],
     },
     AsyncTwinEntry {
@@ -172,6 +277,16 @@ pub static ASYNC_TWINS: &[AsyncTwinEntry] = &[
             TwinMatcher::Prefix("sqlalchemy.engine.base.Connection."),
         ],
     },
+    AsyncTwinEntry {
+        symbol: "sqlmodel.ext.asyncio.session.AsyncSession",
+        needs: &["greenlet"],
+        any_needs: SQLALCHEMY_ASYNC_DRIVERS,
+        confidence: TwinConfidence::High,
+        matchers: &[
+            TwinMatcher::Prefix("sqlmodel.Session."),
+            TwinMatcher::Prefix("sqlmodel.orm.session.Session."),
+        ],
+    },
 ];
 
 /// Every symbol that advice may need to resolve in the scanned venv.
@@ -200,7 +315,6 @@ pub fn async_twin_for_sink(qualname: &str) -> Option<AsyncTwinHit> {
             continue;
         }
         if twin.matchers.iter().any(|m| m.matches(qualname)) {
-            // openai.resources / anthropic.resources may include Async* paths.
             if qualname.contains("Async") {
                 return None;
             }
@@ -228,27 +342,31 @@ impl TwinMatcher {
 /// Families that must never produce `offload-has-async-twin` advice.
 pub fn is_excluded_from_twin_advice(qualname: &str) -> bool {
     let q = qualname;
-    // pymongo — motor is a different package (not same-package twin).
-    if q.starts_with("pymongo.") {
-        return true;
-    }
-    // requests — twin is httpx/aiohttp (different package).
-    if q.starts_with("requests.") {
-        return true;
-    }
-    // boto3 / botocore — aioboto3 is a different package.
-    if crate::is_sync_boto_package_qual(q) {
+    // Different-package or non-drop-in async drivers.
+    if q.starts_with("pymongo.")
+        || q.starts_with("requests.")
+        || q.starts_with("sqlite3.")
+        || q.starts_with("_sqlite3.")
+        || q.starts_with("psycopg2.")
+        || q.starts_with("confluent_kafka.")
+        || q.starts_with("kafka.")
+        || q.starts_with("http.client.")
+        || crate::is_sync_boto_package_qual(q)
+    {
         return true;
     }
     // File IO / pathlib / os filesystem.
     if q.starts_with("builtins.open")
         || q == "open"
         || q.starts_with("io.")
+        || q.starts_with("_io.")
         || q.starts_with("pathlib.")
         || q.starts_with("os.")
             && (q.contains("open")
                 || q.contains("read")
                 || q.contains("write")
+                || q.contains("fsync")
+                || q.contains("fdatasync")
                 || q.contains("stat")
                 || q.contains("listdir")
                 || q.contains("walk")
@@ -262,10 +380,10 @@ pub fn is_excluded_from_twin_advice(qualname: &str) -> bool {
         return true;
     }
     // Subprocess / system.
-    if q.starts_with("subprocess.") || q == "os.system" || q == "os.popen" {
+    if q.starts_with("subprocess.") || q == "os.system" || q == "os.popen" || q == "os.waitpid" {
         return true;
     }
-    // CPU / sleep / locks — not IO twins.
+    // CPU / KDF / sleep / locks — not IO twins.
     if q.starts_with("time.sleep")
         || q.starts_with("time.sleep_ns")
         || q.starts_with("_thread.")
@@ -273,6 +391,9 @@ pub fn is_excluded_from_twin_advice(qualname: &str) -> bool {
         || q.starts_with("queue.")
         || q.starts_with("concurrent.futures.Future.result")
         || q.starts_with("hashlib.")
+        || q.starts_with("_hashlib.")
+        || q.starts_with("bcrypt.")
+        || q.starts_with("argon2.")
         || q.starts_with("hmac.")
         || q.starts_with("zlib.")
         || q.starts_with("bz2.")
@@ -282,10 +403,6 @@ pub fn is_excluded_from_twin_advice(qualname: &str) -> bool {
         || q.starts_with("json.load")
         || q.starts_with("json.dump")
     {
-        return true;
-    }
-    // psycopg2 is sync-only (different from psycopg 3).
-    if q.starts_with("psycopg2.") {
         return true;
     }
     false
@@ -331,6 +448,10 @@ mod tests {
             "subprocess.run",
             "time.sleep",
             "psycopg2.connect",
+            "sqlite3.Connection.execute",
+            "confluent_kafka.Consumer.poll",
+            "bcrypt.hashpw",
+            "argon2.PasswordHasher.verify",
         ] {
             assert!(
                 async_twin_for_sink(q).is_none(),

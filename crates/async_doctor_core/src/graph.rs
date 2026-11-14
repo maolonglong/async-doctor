@@ -151,8 +151,8 @@ pub struct CallEdge {
     pub is_offload_wrapper: bool,
     /// Positional argument literals when known (`None` = unknown / non-literal).
     pub positional_literals: Vec<Option<LiteralArg>>,
-    /// Keyword argument names passed a literal `True` (`exist_ok=True`).
-    pub keyword_true: Vec<String>,
+    /// Keyword argument literals by parameter name (`None` = passed non-literal).
+    pub keyword_literals: Vec<(String, Option<LiteralArg>)>,
     /// Positional arguments that resolve to project/followed functions (higher-order).
     pub positional_callables: Vec<Option<FunctionId>>,
     /// Positional arguments that resolve to external qualnames (offload targets
@@ -165,9 +165,10 @@ pub struct CallEdge {
     /// Keyword arguments that resolve to project functions (`fn=block`, including
     /// `partial` / bound methods). Cheap call-context for higher-order kwargs.
     pub keyword_callables: Vec<(String, FunctionId)>,
-    /// When set, this edge only executes when positional parameter `index` is
-    /// truthy (`if param:`) or falsy (`if not param:` when `inverted`).
-    pub param_guard: Option<ParamGuard>,
+    /// Conjunctive parameter-controlled guards on this edge (`if a: if b:`,
+    /// `if a and b:`, `else:`, or post-`if not a: return`). All must hold for
+    /// this edge to execute.
+    pub param_guards: Vec<ParamGuard>,
     /// True when this call is the *direct* operand of `await` / `async for` /
     /// `async with`. Nested argument calls stay `false`.
     ///
@@ -202,10 +203,19 @@ pub struct CallEdge {
 /// Parameter-controlled branch guarding a call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ParamGuard {
-    /// Positional parameter index in the enclosing function.
+    /// Parameter index in [`FunctionFact::param_names`] of the enclosing function.
     pub index: u32,
-    /// When true, the branch is `if not param:` (taken when param is falsy).
+    /// When true, the branch requires the parameter to be falsy (`if not param:`).
     pub inverted: bool,
+}
+
+impl ParamGuard {
+    pub fn inverted(self) -> Self {
+        Self {
+            index: self.index,
+            inverted: !self.inverted,
+        }
+    }
 }
 
 /// A decorator reference recorded during pass-2 extraction. Whether it is an
@@ -224,6 +234,8 @@ pub struct FunctionFact {
     pub id: FunctionId,
     pub file: String,
     pub line: u32,
+    /// Inclusive end line of this function's AST span (`0` falls back to `line`).
+    pub end_line: u32,
     /// Module-relative dotted path without the function (`pkg.mod`), or empty for scripts.
     pub module: String,
     /// Scope-qualified name: `Class.method`, `outer.inner` for nested defs, or bare name.

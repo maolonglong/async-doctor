@@ -35,34 +35,41 @@ Exit codes and JSON field meanings live in [`docs/json-contract.md`](docs/json-c
 
 ### `crates/async_doctor`
 
-Binary crate: clap args (`args.rs` — including `--changed` / `--diff`, `--fail-on`,
-and `why --format json`), path resolution, whole-file inline
-`# async-doctor: ignore[…]` suppressions (`suppress.rs`), git `--changed` /
-baseline filters (`changed.rs`, `baseline.rs`), text / Markdown / JSON / SARIF
-reporters (`text/`, `markdown.rs`, `sarif.rs`), `explain` / `why` (`help_cmd.rs`),
-and `install-skill` (`skill_cmd.rs`). Depends on `async_doctor_ty` for scanning
-and `async_doctor_core` for report types. Non-MSVC builds use jemalloc.
+Binary crate: clap args (`args.rs` — including `--python`, `--changed` / `--diff`,
+`--fail-on`, and `why --format json`), path resolution, whole-file inline
+`# async-doctor: ignore[…]` suppressions (`suppress.rs`, `suppress/lexer.rs` —
+consuming `Report.ignore_candidate_files` directly with no process-global state),
+git `--changed` / baseline filters (`changed.rs`, `baseline.rs`), text /
+Markdown / JSON / SARIF reporters (`text/`, `markdown.rs`, `sarif.rs`),
+`explain` / `why` (`help_cmd.rs`), and `install-skill` (`skill_cmd.rs`). Depends
+on `async_doctor_ty` for scanning and `async_doctor_core` for report types.
+Non-MSVC builds use jemalloc.
 
 **API boundary:** the published CLI surface. Exit codes: see
 [`docs/json-contract.md`](docs/json-contract.md).
 
 ### `crates/async_doctor_ty`
 
-Only crate allowed to depend on Astral `ty_*` / `ruff_*`. Owns `AsyncDoctorDb`,
-search-path / editable / pyright-extra discovery (`search_paths.rs`,
-`doctor_system.rs`), encoding skips (`encoding.rs`), environment summary for
-reports (`env_info.rs`), and twin resolution against the scanned venv
+Only crate allowed to depend on Astral `ty_*` / `ruff_*`. Owns `AsyncDoctorDb`
+(`db.rs`), interpreter/venv discovery (`env_discovery.rs` — resolving `--python`,
+`VIRTUAL_ENV`, ancestor `.venv`/`venv`, PDM PEP 582 `__pypackages__`, external
+Poetry and Pipenv virtualenvs, `CONDA_PREFIX`, and `PATH` `python3`/`python`
+while filtering ephemeral `uvx`/`pipx` tool venvs), search-path / editable /
+pyright-extra discovery (`search_paths.rs`, `doctor_system.rs`), encoding skips
+(`encoding.rs`), environment summary (`env_info.rs`, including
+`unresolvedThirdPartyModules`), and twin resolution against the scanned venv
 (`twin_resolve.rs`).
 
 `extract/`: path discovery (`files.rs`, `path.rs`), pass-1 function collection
-(`functions.rs`), pass-2 typed edges (`pass2.rs` — default parallel path caps
-workers at 8, clears `ParsedModule` ASTs after per-file visits and at wave-level
-200-file intervals without cross-worker eviction, and runs in coordinated
-2,500-file waves where all workers share one `Storage` per wave and drop it to
-refcount 0 between waves, with a shared read-only pass-1 function slice and
-pre-indexed `SiteRootIndex`), per-file `CallCollector` (`extract/collector/`),
-and third-party follow with budget (`follow.rs`).
-Package cache: `cache.rs`. Whole-scan report cache: `scan_cache.rs`.
+(`functions.rs`, recording `FunctionFact.end_line`), pass-2 typed edges
+(`pass2.rs` / `pass2/` — default parallel path caps workers at 8, clears
+`ParsedModule` ASTs after per-file visits and at wave-level 200-file intervals
+without cross-worker eviction, and runs in coordinated 2,500-file waves where
+all workers share one `Storage` per wave and drop it to refcount 0 between
+waves, with a shared read-only pass-1 function slice and pre-indexed
+`SiteRootIndex`), per-file `CallCollector` (`extract/collector/`, including
+`llm_advice.rs`), and third-party follow with budget (`follow.rs`).
+Package cache: `cache.rs` / `cache/`. Whole-scan report cache: `scan_cache.rs`.
 Site-packages helpers: `sitepkgs/`. See
 [docs/notes/2026-11-salsa-fresh-empty-rss.md](docs/notes/2026-11-salsa-fresh-empty-rss.md).
 
@@ -97,36 +104,47 @@ under parallel tests — pass an explicit cache dir instead.
 
 **Whole-scan cache key** (`scan_cache.rs` / `scan_input_fingerprint`): bypassed
 on single-file targets (`path.is_file()`) and never saved when `!report.complete`.
-On directory scans, hashes schema version (`scan-cache-v5`), tool version, build
-id, analyze options (`include_non_production`, `show_unresolved`), follow budget,
-scan-root path, every first-party `.py` / `.pyi` content hash, ancestor and
-project discovery config files (`pyproject.toml` / pyright / ruff), active
-`VIRTUAL_ENV` / `CONDA_PREFIX` / ancestor `.venv` identity, `.pth` / editable
-finder / loose site-packages `.py` inputs, outside-root `extraPaths` / editable
-`.py`/`.pyi` content hashes, and each installed dist-info content fingerprint.
-Package-cache schema is `CACHE_SCHEMA_VERSION` 22: it persists cross-package
-`follow_targets` referenced by analyzed edges alongside `is_bound_call`,
-`is_eager_offload_arg`, `constructed_receiver`, `positional_externals`,
-`positional_constructed_receivers`, decorator qualnames, and literal-`True`
-keyword args so warm runs match cold runs bit-for-bit; a whole-scan cache hit
-preserves `environment.followBudgetSkipped` while re-detecting the rest of
-`environment`.
+On directory scans, hashes schema version (`scan-cache-v8`), tool version, build
+id, analyze options (`include_non_production`, `show_unresolved`), explicit
+`--python` override, follow budget, scan-root path, every first-party `.py` /
+`.pyi` content hash, ancestor and project discovery config files
+(`pyproject.toml` / pyright / ruff), resolved interpreter/venv identity
+(`--python` / `VIRTUAL_ENV` / `.venv` / PDM `__pypackages__` / Poetry / Pipenv /
+`CONDA_PREFIX` / `PATH` `python3`), `.pth` / editable finder / loose
+site-packages `.py` inputs, outside-root `extraPaths` / editable `.py`/`.pyi`
+content hashes, and each installed dist-info content fingerprint. `ScanCacheFile`
+persists `item_spans` while `scan_input_fingerprint_with_python` recomputes
+`ignore_candidate_files` (`Option<Vec<PathBuf>>`) and restores both onto `Report`
+(`#[serde(skip)]` on JSON output) so warm `--changed` and unused-suppression
+checks match cold scans without process-global state. Package-cache schema is
+`CACHE_SCHEMA_VERSION` 24:
+it persists cross-package `follow_targets` referenced by analyzed edges alongside
+`is_bound_call`, `is_eager_offload_arg`, `constructed_receiver`,
+`positional_externals`, `positional_constructed_receivers`, decorator qualnames,
+literal-`True` keyword args, multi-guard `param_guards`, and `keyword_literals`
+so warm runs match cold runs bit-for-bit; a whole-scan cache hit preserves
+`environment.followBudgetSkipped` and `environment.unresolvedThirdPartyModules`
+while re-detecting the rest of `environment`.
 
 ### `crates/async_doctor_core`
 
 Call graph types (`graph.rs`: `ProjectFacts`, `CallEdge`, `ConditionTag`,
-`AnalyzeOptions`, `DecoratorRef`, `OffloadKind`; `FunctionFact.offload_decorator`
-and `is_offload_wrapper` drive offload-edge materialization), stable finding ids (`id.rs`), environment report struct
-(`environment.rs`), sink-site grouping (`sink_sites.rs`), and report schema
+`ParamGuard`, `AnalyzeOptions`, `DecoratorRef`, `OffloadKind`;
+`FunctionFact.offload_decorator`, `is_offload_wrapper`, and `end_line` drive
+offload-edge materialization and span-aware `--changed` filtering), stable
+finding ids (`id.rs`), environment report struct (`environment.rs`), sink-site
+grouping with sync-caller fan-in (`sink_sites.rs`), and report schema
 (`report.rs`: `Report`, `Finding`, `Candidate`, `Advice`, `SCHEMA_VERSION`).
 
 `propagate/`: mark sinks, materialize higher-order bindings
-(`higher_order.rs`), reverse BFS + condition reconciliation (`grade.rs`),
-special findings (`special.rs`: nested event loop, offload-coroutine,
-sync-with-async-cm, sync-for-async-iterable, unawaited-coroutine,
-eager-offload-call), and non-blocking advice (`advice.rs`:
-offload-has-async-twin; `anti_pattern_advice.rs`: dangling-task,
-ephemeral-async-client, shared-async-session).
+(`higher_order.rs`), reverse BFS + multi-guard condition reconciliation + merged
+open/read-write chain attribution (`grade.rs`, `grade/merge.rs`), special
+findings (`special.rs`: nested event loop, offload-coroutine, sync-with-async-cm,
+sync-for-async-iterable, unawaited-coroutine, eager-offload-call), and
+non-blocking advice (`advice.rs`: offload-has-async-twin;
+`anti_pattern_advice.rs` and `anti_pattern_advice/llm_rules.rs`: dangling-task,
+ephemeral-async-client, shared-async-session, offload-stateful-session,
+useless-local-async-lock, swallowed-cancelled-error).
 
 **Architecture invariant:** this crate must not depend on ty or ruff.
 

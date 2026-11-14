@@ -17,7 +17,7 @@ use ty_python_semantic::types::{Type, TypeDefinition};
 use super::CallCollector;
 use super::async_anti_patterns::decorator_preserves_coroutine;
 use crate::extract::constants::body_has_yield;
-use crate::extract::helpers::{is_partial_call, module_of_definition};
+use crate::extract::helpers::module_of_definition;
 
 fn is_known_non_callable_instance_qual(qualname: &str) -> bool {
     matches!(
@@ -212,13 +212,23 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             return;
         }
         let callable_idx = kind.callable_arg_index();
-        let Some(arg) = offload_call.arguments.args.get(callable_idx) else {
+        let target_idx = if offload_call
+            .arguments
+            .args
+            .get(callable_idx)
+            .is_some_and(|a| self.is_context_run_callable(a))
+        {
+            callable_idx + 1
+        } else {
+            callable_idx
+        };
+        let Some(arg) = offload_call.arguments.args.get(target_idx) else {
             return;
         };
         let Expr::Call(inner) = arg else {
             return;
         };
-        if is_partial_call(inner) {
+        if self.is_partial_call_ctx(inner) {
             return;
         }
         if !self.call_arg_returns_provably_non_callable(arg, inner) {

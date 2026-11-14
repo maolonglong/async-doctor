@@ -10,9 +10,12 @@ use std::time::Duration;
 use async_doctor_core::{EnvironmentKind, Finding, Report, SinkSiteSummary, summarize_sink_sites};
 
 use crate::paths::display_fs_path;
-use crate::text::{entry_headline, sink_label};
+use crate::text::{TOP_ADVICE_SHOWN, entry_headline, sink_label};
+
+const TOP_MARKDOWN_GROUPS_SHOWN: usize = 15;
 
 pub struct MarkdownOptions {
+    pub expand: bool,
     pub suppressed_by_baseline: u32,
     pub suppressed_by_ignore: u32,
     pub elapsed: Option<Duration>,
@@ -33,6 +36,20 @@ fn write_markdown_to(
 ) -> anyhow::Result<()> {
     writeln!(out, "# async-doctor\n")?;
     write_env_line(out, report)?;
+    if !report.complete {
+        if report.skipped.is_empty() {
+            writeln!(
+                out,
+                "> **Warning:** Incomplete analysis (`complete=false`) — results may omit findings.\n"
+            )?;
+        } else {
+            writeln!(
+                out,
+                "> **Warning:** Incomplete analysis (`complete=false`; {} skipped) — results may omit findings.\n",
+                report.skipped.len()
+            )?;
+        }
+    }
 
     if let Some(msg) = &report.message {
         writeln!(out, "{msg}")?;
@@ -70,20 +87,36 @@ fn write_markdown_to(
         }
         writeln!(out, "\n")?;
     } else {
-        write_findings_section(out, report)?;
+        write_findings_section(out, report, opts.expand)?;
     }
 
     if !report.advice.is_empty() {
-        writeln!(
-            out,
-            "## Advice ({}) — does not fail the run\n",
-            report.advice.len()
-        )?;
-        for a in &report.advice {
+        let total = report.advice.len();
+        if opts.expand || total <= TOP_ADVICE_SHOWN {
+            writeln!(out, "## Advice ({total}) — does not fail the run\n")?;
+            for a in &report.advice {
+                writeln!(
+                    out,
+                    "- **`[advice:{}]`** `{}` (`{}:{}`) — {}",
+                    a.rule, a.entry.name, a.entry.file, a.entry.line, a.fix.hint
+                )?;
+            }
+        } else {
             writeln!(
                 out,
-                "- **`[advice:{}]`** `{}` (`{}:{}`) — {}",
-                a.rule, a.entry.name, a.entry.file, a.entry.line, a.fix.hint
+                "## Advice ({total}) — showing top {TOP_ADVICE_SHOWN} (pass `--expand` for all); does not fail the run\n"
+            )?;
+            for a in report.advice.iter().take(TOP_ADVICE_SHOWN) {
+                writeln!(
+                    out,
+                    "- **`[advice:{}]`** `{}` (`{}:{}`) — {}",
+                    a.rule, a.entry.name, a.entry.file, a.entry.line, a.fix.hint
+                )?;
+            }
+            writeln!(
+                out,
+                "- _…and {} more advice item(s) (pass `--expand` to list all)_",
+                total - TOP_ADVICE_SHOWN
             )?;
         }
         writeln!(out)?;
@@ -154,7 +187,11 @@ fn write_env_line(out: &mut impl Write, report: &Report) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn write_findings_section(out: &mut impl Write, report: &Report) -> anyhow::Result<()> {
+fn write_findings_section(
+    out: &mut impl Write,
+    report: &Report,
+    expand: bool,
+) -> anyhow::Result<()> {
     let findings = &report.findings;
     let computed_sites;
     let sites: &[SinkSiteSummary] = if !report.sink_sites.is_empty() {
@@ -204,7 +241,8 @@ fn write_findings_section(out: &mut impl Write, report: &Report) -> anyhow::Resu
         out,
         "| Rule | Sink site | Call | Findings | Entries |\n| --- | --- | --- | ---: | ---: |"
     )?;
-    for s in sites.iter().take(15) {
+    let site_limit = if expand { sites.len() } else { 15 };
+    for s in sites.iter().take(site_limit) {
         let call = s
             .text
             .split_whitespace()
@@ -222,7 +260,14 @@ fn write_findings_section(out: &mut impl Write, report: &Report) -> anyhow::Resu
     let mut ordered: Vec<_> = groups.into_iter().collect();
     ordered.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(b.0)));
 
-    for (_, group) in ordered {
+    let shown_groups = if expand {
+        ordered.len()
+    } else {
+        ordered.len().min(TOP_MARKDOWN_GROUPS_SHOWN)
+    };
+    let omitted_groups = ordered.len().saturating_sub(shown_groups);
+
+    for (_, group) in ordered.into_iter().take(shown_groups) {
         let rep = group[0];
         let sink = sink_label(rep).unwrap_or("sink");
         writeln!(
@@ -248,6 +293,12 @@ fn write_findings_section(out: &mut impl Write, report: &Report) -> anyhow::Resu
             writeln!(out, "  {pipe} {}:{}  {}", step.file, step.line, step.text)?;
         }
         writeln!(out, "```\n</details>\n")?;
+    }
+    if omitted_groups > 0 {
+        writeln!(
+            out,
+            "_…and {omitted_groups} more fix group(s) (pass `--expand` to list all)_\n"
+        )?;
     }
     Ok(())
 }

@@ -2,7 +2,7 @@
 
 use std::fs;
 
-use super::helpers::clone_fixture;
+use super::helpers::{clone_fixture, temp_project};
 use crate::scan_path;
 
 #[test]
@@ -157,4 +157,256 @@ fn p1_boto_meta_helpers_excluded() {
         "get_object must still fire: {names:?}"
     );
     let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn sqlite_in_memory_suppressed_while_disk_sqlite_still_reports() {
+    let dir = temp_project(&[(
+        "db.py",
+        r#"
+import sqlite3
+
+async def mem_basic_ok():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE t (x INT)")
+    cur = conn.cursor()
+    cur.execute("INSERT INTO t VALUES (1)")
+    cur.fetchall()
+    conn.commit()
+    conn.close()
+
+async def mem_uri_ok():
+    conn = sqlite3.connect("file:memdb1?mode=memory&cache=shared", uri=True)
+    with conn:
+        conn.execute("SELECT 1")
+    conn2 = sqlite3.connect("file::memory:?cache=shared", uri=True)
+    conn2.cursor().execute("SELECT 1")
+
+async def mem_with_inline_ok():
+    with sqlite3.connect(":memory:") as conn:
+        conn.execute("SELECT 1")
+    sqlite3.connect(":memory:").execute("SELECT 1")
+
+async def disk_blocks():
+    conn = sqlite3.connect("app.db")
+    conn.execute("SELECT 1")
+
+async def uri_false_mode_memory_blocks():
+    conn = sqlite3.connect("file:memdb1?mode=memory", uri=False)
+    conn.execute("SELECT 1")
+
+async def reassigned_to_disk_blocks():
+    conn = sqlite3.connect(":memory:")
+    conn = sqlite3.connect("app.db")
+    conn.execute("SELECT 1")
+
+async def conditional_mem_only_blocks(flag: bool):
+    conn = sqlite3.connect("app.db")
+    if flag:
+        conn = sqlite3.connect(":memory:")
+    conn.execute("SELECT 1")
+"#,
+    )]);
+    let report = scan_path(&dir).unwrap();
+    let _ = fs::remove_dir_all(&dir);
+
+    let names: std::collections::BTreeSet<_> = report
+        .findings
+        .iter()
+        .map(|f| f.entry.name.as_str())
+        .collect();
+    for clean in ["mem_basic_ok", "mem_uri_ok", "mem_with_inline_ok"] {
+        assert!(
+            !names.contains(clean),
+            "{clean} uses in-memory SQLite and must not emit blocking-db: {:?}",
+            report.findings
+        );
+    }
+    for blocked in [
+        "disk_blocks",
+        "uri_false_mode_memory_blocks",
+        "reassigned_to_disk_blocks",
+        "conditional_mem_only_blocks",
+    ] {
+        assert!(
+            names.contains(blocked),
+            "{blocked} touches disk SQLite and must report blocking-db: {names:?}"
+        );
+    }
+}
+
+#[test]
+fn nonblocking_socket_suppressed_and_reblocking_reports() {
+    let dir = temp_project(&[(
+        "sock.py",
+        r#"
+import socket
+
+async def setblocking_false_ok(addr: tuple[str, int]):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setblocking(False)
+    sock.connect(addr)
+    sock.send(b"ping")
+    sock.recv(1024)
+    sock.sendto(b"ping", addr)
+    sock.recvfrom(1024)
+    sock.accept()
+
+async def settimeout_zero_ok():
+    s1 = socket.socket()
+    s1.settimeout(0)
+    s1.recv(64)
+    s2 = socket.socket()
+    s2.settimeout(0.0)
+    s2.send(b"ok")
+
+async def default_socket_blocks():
+    sock = socket.socket()
+    sock.recv(1024)
+
+async def reblocked_true_blocks():
+    sock = socket.socket()
+    sock.setblocking(False)
+    sock.setblocking(True)
+    sock.recv(1024)
+
+async def nonzero_timeout_blocks():
+    sock = socket.socket()
+    sock.settimeout(0)
+    sock.settimeout(2.5)
+    sock.recv(1024)
+
+async def branch_only_nonblocking_blocks(flag: bool):
+    sock = socket.socket()
+    if flag:
+        sock.setblocking(False)
+    sock.recv(1024)
+
+async def reassigned_socket_blocks():
+    sock = socket.socket()
+    sock.setblocking(False)
+    sock = socket.socket()
+    sock.recv(1024)
+"#,
+    )]);
+    let report = scan_path(&dir).unwrap();
+    let _ = fs::remove_dir_all(&dir);
+
+    let names: std::collections::BTreeSet<_> = report
+        .findings
+        .iter()
+        .map(|f| f.entry.name.as_str())
+        .collect();
+    for clean in ["setblocking_false_ok", "settimeout_zero_ok"] {
+        assert!(
+            !names.contains(clean),
+            "{clean} uses non-blocking socket and must stay clean: {:?}",
+            report.findings
+        );
+    }
+    for blocked in [
+        "default_socket_blocks",
+        "reblocked_true_blocks",
+        "nonzero_timeout_blocks",
+        "branch_only_nonblocking_blocks",
+        "reassigned_socket_blocks",
+    ] {
+        assert!(
+            names.contains(blocked),
+            "{blocked} may block and must report blocking-socket: {names:?}"
+        );
+    }
+}
+
+#[test]
+fn tarfile_addfile_union_buffers_and_buffered_io_base() {
+    let dir = temp_project(&[
+        (".venv/pyvenv.cfg", "home = /usr/bin\n"),
+        (".venv/lib/python3.12/site-packages/PIL/__init__.py", ""),
+        (
+            ".venv/lib/python3.12/site-packages/PIL/Image.py",
+            "import builtins\ndef open(fp, mode='r'):\n    return builtins.open('header.bin', 'rb')\n",
+        ),
+        (
+            "archives.py",
+            r#"
+import io
+import tarfile
+from PIL import Image
+
+async def tar_addfile_inmem_ok():
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        ti = tarfile.TarInfo("hello.txt")
+        tf.addfile(ti)
+        tf.addfile(ti, None)
+        tf.addfile(ti, io.BytesIO(b"hello"))
+        tf.addfile(ti, fileobj=io.BytesIO(b"world"))
+
+async def tar_addfile_disk_fileobj_blocks(stream: io.BufferedIOBase):
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        ti = tarfile.TarInfo("hello.txt")
+        tf.addfile(ti, fileobj=stream)
+
+async def tar_disk_archive_addfile_blocks():
+    with tarfile.open("out.tar", mode="w") as tf:
+        ti = tarfile.TarInfo("hello.txt")
+        tf.addfile(ti, io.BytesIO(b"hello"))
+
+async def union_all_inmem_ok(flag: bool):
+    buf: io.BytesIO | io.StringIO = io.BytesIO(b"x") if flag else io.StringIO("x")
+    Image.open(buf)
+    raw: io.BytesIO | bytearray = io.BytesIO(b"x") if flag else bytearray(b"x")
+    Image.open(raw)
+
+async def union_mixed_with_file_blocks(buf: io.BytesIO | io.TextIOWrapper):
+    Image.open(buf)
+
+async def buffered_iobase_blocks(stream: io.BufferedIOBase):
+    Image.open(stream)
+
+async def buffered_reader_from_open_blocks():
+    f = open("image.png", "rb")
+    Image.open(f)
+"#,
+        ),
+    ]);
+    let report = scan_path(&dir).unwrap();
+    let _ = fs::remove_dir_all(&dir);
+
+    let names: std::collections::BTreeSet<_> = report
+        .findings
+        .iter()
+        .map(|f| f.entry.name.as_str())
+        .collect();
+    for clean in ["tar_addfile_inmem_ok", "union_all_inmem_ok"] {
+        assert!(
+            !names.contains(clean),
+            "{clean} is strictly in-memory and must stay clean: {:?}",
+            report.findings
+        );
+    }
+    for blocked in [
+        "tar_addfile_disk_fileobj_blocks",
+        "tar_disk_archive_addfile_blocks",
+        "union_mixed_with_file_blocks",
+        "buffered_iobase_blocks",
+    ] {
+        assert!(
+            names.contains(blocked),
+            "{blocked} can perform disk IO and must report: {names:?}"
+        );
+    }
+    let open_findings: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.entry.name == "buffered_reader_from_open_blocks")
+        .collect();
+    assert!(
+        open_findings
+            .iter()
+            .any(|f| f.chain.iter().any(|s| s.text.contains("Image.open"))),
+        "Image.open on BufferedReader from open('rb') must not be skipped as BytesIO: {open_findings:?}"
+    );
 }

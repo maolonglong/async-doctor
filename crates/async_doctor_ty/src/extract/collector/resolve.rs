@@ -1,26 +1,21 @@
 //! Callee resolution: project defs, externals, offloads, and follow targets.
 
-use std::path::PathBuf;
+mod external;
+mod follow_target;
+
+use std::sync::OnceLock;
 
 use async_doctor_core::{CallEdge, CallKind, CalleeRef, FunctionId, OffloadKind, SinkTable};
-use async_doctor_rules::{BuiltinSinkTable, aws_op_method_name};
+use async_doctor_rules::BuiltinSinkTable;
 use ruff_db::files::FilePath;
 use ruff_db::parsed::parsed_module;
 use ruff_python_ast::Expr;
 use ruff_text_size::TextRange;
-use std::sync::OnceLock;
 use ty_python_core::definition::DefinitionKind;
 use ty_python_semantic::types::{Type, TypeDefinition};
 use ty_python_semantic::{
     HasType, ImportAliasResolution, definitions_for_attribute, definitions_for_name,
 };
-
-use crate::sitepkgs::{FollowTarget, is_followable_site_packages_py};
-
-fn is_under_followable_extra(path: &str, roots: &[std::path::PathBuf]) -> bool {
-    let p = std::path::Path::new(path);
-    roots.iter().any(|r| p.starts_with(r))
-}
 
 fn is_get_event_loop_qual(qualname: &str) -> bool {
     matches!(
@@ -71,6 +66,15 @@ fn external_occurrence_key(qualname: &str) -> String {
     if qualname.starts_with("shared-async-session:") {
         return "Eshared-async-session".to_string();
     }
+    if qualname.starts_with("offload-stateful-session:") {
+        return "Eoffload-stateful-session".to_string();
+    }
+    if qualname.starts_with("useless-local-async-lock:") {
+        return "Euseless-local-async-lock".to_string();
+    }
+    if qualname.starts_with("swallowed-cancelled-error:") {
+        return "Eswallowed-cancelled-error".to_string();
+    }
     static SINKS: OnceLock<BuiltinSinkTable> = OnceLock::new();
     let sinks = SINKS.get_or_init(BuiltinSinkTable::new);
     let key = sinks
@@ -82,10 +86,7 @@ fn external_occurrence_key(qualname: &str) -> String {
 
 use super::CallCollector;
 use crate::extract::ctx::DefKey;
-use crate::extract::helpers::{
-    is_asyncio_redis_type, is_getattr_call, is_redis_commands_mixin, is_sync_redis_type,
-    module_of_definition, normalize_asyncio_redis_type, qualname_from_definition,
-};
+use crate::extract::helpers::is_getattr_call;
 use crate::extract::path::relative_display;
 
 impl<'a, 'db> CallCollector<'a, 'db> {
@@ -98,11 +99,12 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         is_offload_wrapper: bool,
         callee_is_coroutine: Option<bool>,
     ) {
-        // Bare generator call (`g = gen()`) must not propagate; only when consumed.
+        // Bare generator call (`g = gen()`) must not propagate; only when consumed
+        // or entered as a context manager (`with cm():` / `async with acm():`).
         if let CalleeRef::Project(id) = &callee
             && self.function(*id).is_generator
             && !self.consuming_generator
-            && kind != CallKind::GeneratorConsume
+            && !matches!(kind, CallKind::GeneratorConsume | CallKind::WithEnter)
         {
             return;
         }
@@ -140,14 +142,14 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             occurrence,
             is_offload_wrapper,
             positional_literals: std::mem::take(&mut self.pending_literals),
-            keyword_true: std::mem::take(&mut self.pending_keyword_true),
+            keyword_literals: std::mem::take(&mut self.pending_keyword_literals),
             positional_callables: std::mem::take(&mut self.pending_callables),
             positional_externals: std::mem::take(&mut self.pending_externals),
             positional_constructed_receivers: std::mem::take(
                 &mut self.pending_constructed_receivers,
             ),
             keyword_callables: std::mem::take(&mut self.pending_keyword_callables),
-            param_guard: self.active_param_guard,
+            param_guards: self.active_param_guards.clone(),
             is_awaited: self.pending_is_awaited,
             callee_is_coroutine,
             is_eager_offload_arg: self.in_eager_offload_arg,
@@ -312,128 +314,6 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         })
     }
 
-    pub(crate) fn type_instance_qualname(&self, expr: &Expr) -> Option<String> {
-        // Cheap branch narrowing: isinstance / is not None on a local name.
-        if let Expr::Name(n) = expr
-            && let Some(fact) = self.narrowed_locals.get(n.id.as_str())
-        {
-            match fact {
-                crate::extract::helpers::NarrowFact::IsInstance(ty) => {
-                    return Some(ty.clone());
-                }
-                crate::extract::helpers::NarrowFact::NotNone => {
-                    // Fall through to ty, then drop None-ish union members below.
-                }
-            }
-        }
-        let ty = expr.inferred_type(self.model)?;
-        let env = self.model.program_environment();
-        let mut name = self.type_to_instance_qualname(ty, &env)?;
-        if let Expr::Name(n) = expr
-            && matches!(
-                self.narrowed_locals.get(n.id.as_str()),
-                Some(crate::extract::helpers::NarrowFact::NotNone)
-            )
-            && (name.ends_with("None") || name.contains("None |") || name.contains("| None"))
-        {
-            // Defensive: if display still mentions None, prefer ty union filter.
-            if let Some(union) = ty.as_union() {
-                let env = self.model.program_environment();
-                for elem in union.elements(self.model.db()).iter() {
-                    if let Some(n) = self.type_to_instance_qualname(*elem, &env)
-                        && !n.ends_with("None")
-                        && n != "None"
-                    {
-                        name = n;
-                        break;
-                    }
-                }
-            }
-        }
-        Some(name)
-    }
-
-    /// Resolve a concrete instance qualname, including union receivers.
-    ///
-    /// For `Pipeline | ClusterPipeline` (all asyncio redis) → asyncio Pipeline.
-    /// Mixed asyncio/sync redis → `None` (caller must not fall back to a sync
-    /// mixin sink; prefer unresolved/candidate).
-    pub(crate) fn type_to_instance_qualname(
-        &self,
-        ty: Type<'_>,
-        env: &ty_python_semantic::ProgramEnvironment<'_>,
-    ) -> Option<String> {
-        if let Some(union) = ty.as_union() {
-            let mut names: Vec<String> = Vec::new();
-            for elem in union.elements(self.model.db()).iter() {
-                // Skip trivial None/Never noise in Optional unions.
-                if matches!(elem, Type::Never) {
-                    continue;
-                }
-                if let Some(n) = self.type_to_instance_qualname(*elem, env) {
-                    names.push(n);
-                } else if elem.definition(self.model.db(), env).is_some() {
-                    // Element has a definition we couldn't name — treat as opaque.
-                    names.push(String::new());
-                }
-            }
-            names.sort();
-            names.dedup();
-            names.retain(|n| !n.is_empty());
-            if names.is_empty() {
-                return None;
-            }
-            let all_asyncio = names.iter().all(|n| is_asyncio_redis_type(n));
-            let any_asyncio = names.iter().any(|n| is_asyncio_redis_type(n));
-            let any_sync_redis = names.iter().any(|n| is_sync_redis_type(n));
-            if all_asyncio {
-                // Prefer Pipeline when any member is a Pipeline.
-                if names.iter().any(|n| n.contains("Pipeline")) {
-                    return Some("redis.asyncio.client.Pipeline".to_string());
-                }
-                return Some("redis.asyncio.client.Redis".to_string());
-            }
-            if any_asyncio && any_sync_redis {
-                // Mixed → do not pick a sync sink; signal via None so callers
-                // avoid mixin→Redis normalization (emit unresolved instead).
-                return None;
-            }
-            if names.len() == 1 {
-                return Some(names.into_iter().next().unwrap());
-            }
-            // Only collapse a multi-arm non-redis union when every arm comes
-            // from the same root package and agrees on async-ness (e.g.
-            // `PosixPath | WindowsPath` or `Redis | RedisCluster`). Mixed
-            // sync/async or cross-package unions (`Client | AsyncClient`) must
-            // not guess a sync arm.
-            let is_async_arm =
-                |s: &str| s.contains("Async") || s.contains("aio") || s.contains("asyncio");
-            let first_root = names[0].split('.').next().unwrap_or("");
-            let first_async = is_async_arm(&names[0]);
-            let homogeneous = names.iter().all(|n| {
-                n.split('.').next().unwrap_or("") == first_root && is_async_arm(n) == first_async
-            });
-            if homogeneous {
-                return names.into_iter().next();
-            }
-            return None;
-        }
-
-        let def = ty.definition(self.model.db(), env)?;
-        match def {
-            TypeDefinition::StaticClass(definition) | TypeDefinition::DynamicClass(definition) => {
-                let name = definition.name(self.model.db())?;
-                let module = module_of_definition(self.model, definition)?;
-                Some(format!("{module}.{name}"))
-            }
-            TypeDefinition::Function(_) => None,
-            TypeDefinition::Module(module) => {
-                Some(module.name(self.model.db()).as_str().to_string())
-            }
-            _ => None,
-        }
-    }
-
     pub(crate) fn resolve_non_project_callee(
         &mut self,
         func: &Expr,
@@ -476,68 +356,6 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 })
             }
             _ => None,
-        }
-    }
-
-    pub(crate) fn note_follow_target(&mut self, func: &Expr, qualname: &str) {
-        if self.follow_targets.contains_key(qualname) {
-            return;
-        }
-        let resolved = match func {
-            Expr::Name(name) => definitions_for_name(
-                self.model,
-                name.id.as_str(),
-                name.into(),
-                ImportAliasResolution::ResolveAliases,
-            ),
-            Expr::Attribute(attr) => definitions_for_attribute(self.model, attr),
-            _ => Vec::new(),
-        };
-        let mut defs: Vec<ty_python_core::definition::Definition<'db>> =
-            resolved.iter().filter_map(|r| r.definition()).collect();
-        if defs.is_empty()
-            && let Some(ty) = func.inferred_type(self.model)
-        {
-            let env = self.model.program_environment();
-            if let Some(TypeDefinition::Function(def)) = ty.definition(self.model.db(), &env) {
-                defs.push(def);
-            }
-        }
-        for def in defs {
-            let file = def.file(self.model.db());
-            let FilePath::System(sys) = file.path(self.model.db()) else {
-                continue;
-            };
-            if !is_followable_site_packages_py(sys.as_str())
-                && !is_under_followable_extra(sys.as_str(), self.followable_extra_roots)
-            {
-                continue;
-            }
-            let kind = def.kind(self.model.db());
-            let DefinitionKind::Function(fdef) = kind else {
-                continue;
-            };
-            let parsed = parsed_module(self.model.db(), def.python_file(self.model.db()))
-                .load(self.model.db());
-            let node = fdef.node(&parsed);
-            let std_path = PathBuf::from(sys.as_str());
-            let (pkg, ver, fp) = self
-                .package_meta
-                .meta_for_path(&std_path)
-                .map(|(n, v, f)| (Some(n), Some(v), Some(f)))
-                .unwrap_or((None, None, None));
-            self.follow_targets.insert(
-                qualname.to_string(),
-                FollowTarget {
-                    qualname: qualname.to_string(),
-                    path: sys.to_path_buf(),
-                    name_start: u32::from(node.name.range.start()),
-                    package_name: pkg,
-                    package_version: ver,
-                    package_fingerprint: fp,
-                },
-            );
-            return;
         }
     }
 
@@ -635,146 +453,5 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             name_start: u32::from(node.name.range.start()),
         };
         self.def_get(&key)
-    }
-
-    pub(crate) fn external_qualname(&mut self, func: &Expr) -> Option<String> {
-        // For attributes, ALWAYS prefer `{receiver_type}.{attr}` over the
-        // defining class. Mixin-inherited methods (e.g. redis CoreCommands.set
-        // on a Pipeline instance) must key off the *receiver* so Pipeline
-        // buffering is not mistaken for Redis IO.
-        if let Expr::Attribute(attr) = func {
-            // Prefer bindings from `async with r.pipeline() as pipe`.
-            if let Expr::Name(n) = attr.value.as_ref()
-                && let Some(recv) = self.async_with_receivers.get(n.id.as_str())
-            {
-                return Some(format!("{recv}.{}", attr.attr.as_str()));
-            }
-            // Explicit `isinstance(x, Cls)` branch narrowing overrides wider
-            // union inference on `x`.
-            if let Expr::Name(n) = attr.value.as_ref()
-                && let Some(crate::extract::helpers::NarrowFact::IsInstance(recv)) =
-                    self.narrowed_locals.get(n.id.as_str()).cloned()
-            {
-                let recv = if is_asyncio_redis_type(&recv) {
-                    normalize_asyncio_redis_type(&recv)
-                } else {
-                    recv
-                };
-                return Some(format!("{recv}.{}", attr.attr.as_str()));
-            }
-            // Union receivers (Pipeline | ClusterPipeline, Redis | RedisCluster).
-            if let Some(ty) = attr.value.inferred_type(self.model) {
-                let env = self.model.program_environment();
-                if ty.as_union().is_some() {
-                    match self.type_to_instance_qualname(ty, &env) {
-                        Some(recv) => {
-                            let recv = if is_asyncio_redis_type(&recv) {
-                                normalize_asyncio_redis_type(&recv)
-                            } else {
-                                recv
-                            };
-                            return Some(format!("{recv}.{}", attr.attr.as_str()));
-                        }
-                        None => {
-                            // Mixed asyncio|sync (or unnameable union): never fall
-                            // through to CoreCommands → sync Redis.
-                            if self.expr_looks_like_asyncio_redis(&attr.value) {
-                                return Some(format!(
-                                    "redis.asyncio.client.Pipeline.{}",
-                                    attr.attr.as_str()
-                                ));
-                            }
-                            return None;
-                        }
-                    }
-                }
-            }
-            // boto3 clients are dynamically typed (stubs often return `object`).
-            // Prefer syntactic receivers before weak typed `{object}.get_object`.
-            // Never synthesize sync botocore ops for aioboto3/aiobotocore receivers
-            // (incl. `async with session.client(...) as x` / awaited calls on them).
-            if aws_op_method_name(attr.attr.as_str())
-                && !self.expr_is_aio_boto_receiver(&attr.value)
-                && !(self.pending_is_awaited && self.expr_binds_aio_boto(&attr.value))
-                && self.expr_is_boto_factory_or_receiver(&attr.value)
-            {
-                return Some(format!("botocore.client.BaseClient.{}", attr.attr.as_str()));
-            }
-            if let Some(recv) = self.type_instance_qualname(&attr.value) {
-                let recv = if is_asyncio_redis_type(&recv) {
-                    normalize_asyncio_redis_type(&recv)
-                } else {
-                    recv
-                };
-                // Known redis receivers (Redis / Pipeline / asyncio): prefer
-                // receiver over mixin defining class.
-                if is_asyncio_redis_type(&recv) || is_sync_redis_type(&recv) {
-                    return Some(format!("{recv}.{}", attr.attr.as_str()));
-                }
-                // Project subclass / `super()` inside an override: map through
-                // the MRO defining class so sync-sink status is inherited;
-                // async defs stay on the asyncio key.
-                if let Some(mapped) = self.attribute_redis_mixin_sink(attr) {
-                    return Some(mapped);
-                }
-                return Some(format!("{recv}.{}", attr.attr.as_str()));
-            }
-            // dist-packages / weak typing: still recognize asyncio redis receivers.
-            if self.expr_looks_like_asyncio_redis(&attr.value) {
-                return Some(format!("redis.asyncio.client.Redis.{}", attr.attr.as_str()));
-            }
-            // Do not map bare CoreCommands without a typed non-redis receiver:
-            // untyped Pipeline shares that mixin and must stay non-sink.
-        }
-
-        // Prefer definitions_for_* → file_to_module + name + enclosing class.
-        let resolved = match func {
-            Expr::Name(name) => definitions_for_name(
-                self.model,
-                name.id.as_str(),
-                name.into(),
-                ImportAliasResolution::ResolveAliases,
-            ),
-            Expr::Attribute(attr) => definitions_for_attribute(self.model, attr),
-            _ => Vec::new(),
-        };
-
-        for r in &resolved {
-            if let Some(def) = r.definition()
-                && let Some(q) = qualname_from_definition(self.model, def)
-            {
-                // Bare redis mixin defs (no Attribute receiver context) are not
-                // sync-IO evidence — Pipeline buffering shares those mixins.
-                if is_redis_commands_mixin(&q) {
-                    continue;
-                }
-                return Some(q);
-            }
-        }
-
-        if let Some(q) = self.resolve_uninstalled_resource_qualname(func) {
-            return Some(q);
-        }
-
-        let ty = func.inferred_type(self.model)?;
-        let env = self.model.program_environment();
-        match ty.definition(self.model.db(), &env)? {
-            TypeDefinition::Function(def) => {
-                let q = qualname_from_definition(self.model, def)?;
-                if is_redis_commands_mixin(&q) {
-                    return None;
-                }
-                Some(q)
-            }
-            TypeDefinition::Module(module) => {
-                Some(module.name(self.model.db()).as_str().to_string())
-            }
-            TypeDefinition::StaticClass(def) | TypeDefinition::DynamicClass(def) => {
-                let name = def.name(self.model.db())?;
-                let module = module_of_definition(self.model, def)?;
-                Some(format!("{module}.{name}"))
-            }
-            _ => None,
-        }
     }
 }

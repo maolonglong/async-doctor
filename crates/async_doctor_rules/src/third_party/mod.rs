@@ -85,35 +85,71 @@ fn is_async_counterpart_raw(q: &str) -> bool {
     if q.starts_with("aiohttp.") {
         return true;
     }
-    // redis.asyncio
-    if q.starts_with("redis.asyncio.") || (q.starts_with("redis.") && q.contains(".asyncio.")) {
+    // redis.asyncio / valkey.asyncio
+    if q == "redis.asyncio"
+        || q.starts_with("redis.asyncio.")
+        || (q.starts_with("redis.") && q.contains(".asyncio."))
+        || q == "valkey.asyncio"
+        || q.starts_with("valkey.asyncio.")
+        || (q.starts_with("valkey.") && q.contains(".asyncio."))
+    {
         return true;
     }
-    // sqlalchemy async
+    // sqlalchemy / sqlmodel async
     if q.contains("AsyncSession")
         || q.contains("AsyncEngine")
         || q.contains("AsyncConnection")
         || q.starts_with("sqlalchemy.ext.asyncio.")
+        || q.starts_with("sqlmodel.ext.asyncio.")
     {
         return true;
     }
-    // databases / asyncpg / motor / aiomysql / aiobotocore / aioboto3
+    // async DB / file / AWS / messaging packages
     // (`aioboto3-stubs.*` is normalized before this via [`normalize_third_party`]).
     if q.starts_with("asyncpg.")
         || q.starts_with("motor.")
         || q.starts_with("aiomysql.")
+        || q.starts_with("asyncmy.")
+        || q.starts_with("aiosqlite.")
+        || q.starts_with("aiokafka.")
+        || q.starts_with("aiosmtplib.")
         || is_aioboto_package_qual(q)
         || q.starts_with("aiofiles.")
     {
         return true;
     }
-    // openai / anthropic async clients
+    // pymongo native async client (PyMongo 4.9+)
+    if q.starts_with("pymongo.asynchronous.")
+        || q == "pymongo.AsyncMongoClient"
+        || q.starts_with("pymongo.AsyncMongoClient.")
+        || (q.starts_with("pymongo.") && q.split('.').any(|s| s.starts_with("Async")))
+    {
+        return true;
+    }
+    // openai / anthropic / groq / ollama / qdrant_client async clients
     if q.starts_with("openai.AsyncOpenAI")
         || q.starts_with("openai.AsyncAzureOpenAI")
         || q.contains("AsyncOpenAI")
         || q.starts_with("anthropic.AsyncAnthropic")
         || q.starts_with("anthropic.AsyncAnthropicBedrock")
+        || q.starts_with("anthropic.AsyncAnthropicVertex")
         || q.contains("AsyncAnthropic")
+        || q == "groq.AsyncGroq"
+        || q.starts_with("groq.AsyncGroq.")
+        || (q.starts_with("groq.") && q.split('.').any(|s| s.starts_with("Async")))
+        || q == "ollama.AsyncClient"
+        || q.starts_with("ollama.AsyncClient.")
+        || (q.starts_with("ollama.") && q.split('.').any(|s| s.starts_with("Async")))
+        || q == "qdrant_client.AsyncQdrantClient"
+        || q.starts_with("qdrant_client.AsyncQdrantClient.")
+        || q.starts_with("qdrant_client.async_qdrant_client.")
+        || (q.starts_with("qdrant_client.") && q.split('.').any(|s| s.starts_with("Async")))
+    {
+        return true;
+    }
+    // confluent_kafka experimental aio clients
+    if q.starts_with("confluent_kafka.")
+        && (q.contains(".aio.") || q.split('.').any(|s| s.starts_with("AIO")))
     {
         return true;
     }
@@ -143,7 +179,7 @@ fn is_async_counterpart_raw(q: &str) -> bool {
 }
 
 fn lookup_third_party_with_norm(qualname: &str, normalized: &str) -> Option<SinkHit> {
-    // Pipeline buffering methods are never sinks (even if aliased to Redis.*).
+    // Pipeline buffering methods are never sinks (even if aliased to Redis.* / Valkey.*).
     if is_redis_pipeline_buffering(qualname) {
         return None;
     }
@@ -179,7 +215,9 @@ fn normalize_third_party(qualname: &str) -> Cow<'_, str> {
         ("urllib3._request_methods.", "urllib3."),
         ("urllib3.connectionpool.", "urllib3."),
         ("httpx._client.", "httpx."),
+        ("httpx._api.", "httpx."),
         ("redis.client.", "redis."),
+        ("valkey.client.", "valkey."),
         // Never map mixin `redis.commands.core.CoreCommands.*` → `redis.Redis.*`:
         // that turns asyncio-pipeline / union-receiver fallbacks into false
         // sync Redis sinks. Receiver-typed Externals already key off Redis /
@@ -187,9 +225,17 @@ fn normalize_third_party(qualname: &str) -> Cow<'_, str> {
         ("sqlalchemy.engine.base.", "sqlalchemy.engine."),
         ("sqlalchemy.orm.session.", "sqlalchemy.orm."),
         ("sqlalchemy.orm.query.", "sqlalchemy.orm."),
+        ("sqlmodel.orm.session.", "sqlmodel."),
         ("boto3.resources.factory.", "boto3."),
         ("kafka.producer.kafka.", "kafka."),
         ("kafka.consumer.group.", "kafka."),
+        ("confluent_kafka.cimpl.", "confluent_kafka."),
+        ("groq._client.", "groq."),
+        ("ollama._client.", "ollama."),
+        ("qdrant_client.qdrant_client.", "qdrant_client."),
+        ("qdrant_client.async_qdrant_client.", "qdrant_client."),
+        ("bcrypt._bcrypt.", "bcrypt."),
+        ("argon2._password_hasher.", "argon2."),
         ("elasticsearch.client.", "elasticsearch."),
         ("pymongo.collection.", "pymongo."),
         ("pymongo.database.", "pymongo."),

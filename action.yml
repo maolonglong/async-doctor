@@ -1,0 +1,106 @@
+name: "async-doctor"
+description: "Zero-config static analysis for sync/blocking IO reachable from Python async def code."
+author: "Shaolong Chen"
+
+branding:
+  icon: "activity"
+  color: "orange"
+
+inputs:
+  path:
+    description: "Project directory or single .py file to scan."
+    required: false
+    default: "."
+  version:
+    description: "async-doctor PyPI version (e.g. '0.1.3' or 'latest')."
+    required: false
+    default: "latest"
+  args:
+    description: "Optional CLI flags passed to async-doctor (e.g. '--changed --fail-on none')."
+    required: false
+    default: ""
+  sarif:
+    description: "Generate SARIF 2.1.0 and upload to GitHub Code Scanning ('true' or 'false')."
+    required: false
+    default: "false"
+  sarif-file:
+    description: "Output path for SARIF report when sarif is 'true'."
+    required: false
+    default: "async-doctor.sarif"
+  summary:
+    description: "Append GitHub-Flavored Markdown report to GITHUB_STEP_SUMMARY ('true' or 'false')."
+    required: false
+    default: "true"
+
+outputs:
+  exit-code:
+    description: "Exit code returned by async-doctor (0 = clean, 1 = findings/unused ignores, 2 = error)."
+    value: ${{ steps.scan.outputs.exit-code }}
+  sarif-file:
+    description: "Path to the generated SARIF 2.1.0 file when sarif is enabled."
+    value: ${{ steps.scan.outputs.sarif-file }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install uv
+      uses: astral-sh/setup-uv@v7
+
+    - name: Run async-doctor
+      id: scan
+      shell: bash
+      env:
+        INPUT_PATH: ${{ inputs.path }}
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_ARGS: ${{ inputs.args }}
+        INPUT_SARIF: ${{ inputs.sarif }}
+        INPUT_SARIF_FILE: ${{ inputs.sarif-file }}
+        INPUT_SUMMARY: ${{ inputs.summary }}
+      run: |
+        set -uo pipefail
+        ver="${INPUT_VERSION#v}"
+        if [[ -z "$ver" || "$ver" == "latest" ]]; then
+          pkg="async-doctor"
+        else
+          pkg="async-doctor==${ver}"
+        fi
+
+        extra_args=()
+        if [[ -n "$INPUT_ARGS" ]]; then
+          # Intentional word splitting for CLI flag string (inputs passed via env, not shell eval).
+          read -r -a extra_args <<< "$INPUT_ARGS"
+        fi
+
+        if [[ "$INPUT_SARIF" == "true" ]]; then
+          uvx --from "$pkg" async-doctor --format sarif "${extra_args[@]}" "$INPUT_PATH" > "$INPUT_SARIF_FILE"
+          rc=$?
+          echo "sarif-file=$INPUT_SARIF_FILE" >> "$GITHUB_OUTPUT"
+        else
+          uvx --from "$pkg" async-doctor "${extra_args[@]}" "$INPUT_PATH"
+          rc=$?
+        fi
+
+        if [[ "$INPUT_SUMMARY" == "true" && -n "${GITHUB_STEP_SUMMARY:-}" && " ${extra_args[*]} " != *" --format "* && " ${extra_args[*]} " != *" -f "* ]]; then
+          uvx --from "$pkg" async-doctor --format markdown "${extra_args[@]}" "$INPUT_PATH" >> "$GITHUB_STEP_SUMMARY" || true
+        fi
+
+        echo "exit-code=$rc" >> "$GITHUB_OUTPUT"
+        if [[ "$INPUT_SARIF" != "true" && $rc -ne 0 ]]; then
+          exit "$rc"
+        fi
+        if [[ $rc -eq 2 ]]; then
+          exit 2
+        fi
+
+    - name: Upload SARIF to GitHub Code Scanning
+      if: inputs.sarif == 'true'
+      uses: github/codeql-action/upload-sarif@v4
+      with:
+        sarif_file: ${{ inputs.sarif-file }}
+
+    - name: Enforce async-doctor exit status after SARIF upload
+      if: inputs.sarif == 'true' && steps.scan.outputs.exit-code != '0'
+      shell: bash
+      env:
+        SCAN_EXIT_CODE: ${{ steps.scan.outputs.exit-code }}
+      run: exit "$SCAN_EXIT_CODE"

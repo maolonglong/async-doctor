@@ -7,8 +7,10 @@ mod calls;
 mod concurrency_anti_patterns;
 mod constructors;
 mod control_flow;
+mod depends;
 mod eager_offload;
 mod imports;
+mod llm_advice;
 mod locals;
 pub(crate) mod loop_guards;
 mod nonblocking;
@@ -70,7 +72,7 @@ pub(crate) struct CallCollector<'a, 'db> {
     pub(super) off_loop_thread_depth: u32,
     /// Try-body saw `get_running_loop` / `get_event_loop` (for except-RuntimeError tagging).
     pub(super) try_saw_get_loop: bool,
-    pub(super) active_param_guard: Option<ParamGuard>,
+    pub(super) active_param_guards: Vec<ParamGuard>,
     /// True while visiting an expression that consumes a generator.
     pub(super) consuming_generator: bool,
     pub(super) in_lambda: bool,
@@ -94,7 +96,7 @@ pub(crate) struct CallCollector<'a, 'db> {
     pub(super) occurrence_counter: HashMap<(FunctionId, String), u32>,
     /// Literals for the call currently being recorded (set by handle_call).
     pub(super) pending_literals: Vec<Option<LiteralArg>>,
-    pub(super) pending_keyword_true: Vec<String>,
+    pub(super) pending_keyword_literals: Vec<(String, Option<LiteralArg>)>,
     /// Positional callables for the call currently being recorded.
     pub(super) pending_callables: Vec<Option<FunctionId>>,
     /// Positional external qualnames for the call currently being recorded.
@@ -174,6 +176,16 @@ pub(crate) struct CallCollector<'a, 'db> {
     pub(super) nonlocal_or_global_names: HashSet<String>,
     /// Locals bound to stateful async DB sessions/connections in the current function.
     pub(super) local_stateful_sessions: HashSet<String>,
+    /// Locals bound to `:memory:` / `mode=memory` `sqlite3` connections or cursors.
+    pub(super) in_memory_sqlite_vars: HashSet<String>,
+    /// Locals bound to `socket.socket` instances proven in non-blocking mode.
+    pub(super) nonblocking_socket_vars: HashSet<String>,
+    /// Local name -> unwrapped callable expression from `functools.partial(...)`.
+    pub(super) local_partials: HashMap<String, &'a Expr>,
+    /// Locals bound to `contextvars.copy_context()` / `contextvars.Context()`.
+    pub(super) context_locals: HashSet<String>,
+    /// Function-local async lock/semaphore bindings proven unshared across closures/calls.
+    pub(super) unshared_local_locks: HashMap<String, &'static str>,
 }
 
 /// One enclosing `def` scope for nested-def offload-wrapper detection.
@@ -241,7 +253,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             no_running_loop_depth: 0,
             off_loop_thread_depth: 0,
             try_saw_get_loop: false,
-            active_param_guard: None,
+            active_param_guards: Vec::new(),
             consuming_generator: false,
             in_lambda: false,
             skip_lambda_body: false,
@@ -254,7 +266,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             redis_family_memo: HashMap::new(),
             occurrence_counter: HashMap::new(),
             pending_literals: Vec::new(),
-            pending_keyword_true: Vec::new(),
+            pending_keyword_literals: Vec::new(),
             pending_callables: Vec::new(),
             pending_externals: Vec::new(),
             pending_constructed_receivers: Vec::new(),
@@ -286,6 +298,11 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             local_ephemeral_clients: HashMap::new(),
             nonlocal_or_global_names: HashSet::new(),
             local_stateful_sessions: HashSet::new(),
+            in_memory_sqlite_vars: HashSet::new(),
+            nonblocking_socket_vars: HashSet::new(),
+            local_partials: HashMap::new(),
+            context_locals: HashSet::new(),
+            unshared_local_locks: HashMap::new(),
         }
     }
 
@@ -424,7 +441,8 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         if self.fn_scopes.len() < 2 {
             return;
         }
-        let Some(Expr::Name(n)) = call.arguments.args.first() else {
+        let Some(Expr::Name(n)) = self.effective_offload_callable(call.arguments.args.as_ref(), 0)
+        else {
             return;
         };
         if let Some(owner) = self.enclosing_param_scope(n.id.as_str()) {

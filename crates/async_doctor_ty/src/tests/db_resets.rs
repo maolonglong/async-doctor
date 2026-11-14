@@ -93,3 +93,89 @@ fn multi_wave_pass2_resolves_cross_wave_edges_and_bounds_resets() {
         "expected 2 coordinated wave resets for {total} files, got {resets}"
     );
 }
+
+#[test]
+fn clear_parsed_modules_drains_read_paths_incrementally() {
+    use ruff_db::Db as SourceDb;
+    use ruff_db::files::system_path_to_file;
+    use ruff_db::source::source_text;
+    use ruff_db::system::SystemPathBuf;
+
+    let dir = temp_project(&[
+        ("a.py", "async def fa():\n    return 1\n"),
+        ("b.py", "async def fb():\n    return 2\n"),
+    ]);
+    let root = SystemPathBuf::from_path_buf(dir.clone()).unwrap();
+    let db = crate::AsyncDoctorDb::open(&root, None).unwrap();
+    let _ = db.system();
+    db.clear_parsed_modules_only();
+    assert_eq!(
+        db.pending_read_paths_count(),
+        0,
+        "initial clear must drain any startup read_paths"
+    );
+
+    let fa = system_path_to_file(&db, root.join("a.py")).unwrap();
+    let _ = source_text(&db, fa);
+    assert_eq!(db.pending_read_paths_count(), 1);
+
+    db.clear_parsed_modules_only();
+    assert_eq!(
+        db.pending_read_paths_count(),
+        0,
+        "clear_parsed_modules_only must delta-drain read_paths instead of retaining O(W^2) set"
+    );
+
+    let fb = system_path_to_file(&db, root.join("b.py")).unwrap();
+    let _ = source_text(&db, fb);
+    assert_eq!(
+        db.pending_read_paths_count(),
+        1,
+        "subsequent reads must record only the newly read file"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn batched_serial_pass2_matches_parallel_and_isolates_panics() {
+    let dir = temp_project(&[
+        (
+            "a_helper.py",
+            concat!(
+                "import time\n",
+                "def run_cb(cb):\n    cb()\n",
+                "def sync_leaf():\n    time.sleep(0.1)\n",
+            ),
+        ),
+        (
+            "b_panic/__async_doctor_panic__.py",
+            "from a_helper import run_cb, sync_leaf\nasync def doomed():\n    run_cb(sync_leaf)\n",
+        ),
+        (
+            "c_ok.py",
+            "from a_helper import run_cb, sync_leaf\nasync def healthy():\n    run_cb(sync_leaf)\n",
+        ),
+    ]);
+
+    let parallel = crate::hermetic_env::with_clean_venv_env(|| crate::scan_path(&dir).unwrap());
+    let batched = crate::hermetic_env::with_clean_venv_env(|| {
+        unsafe { std::env::set_var("ASYNC_DOCTOR_PASS2_BATCH", "1") };
+        let res = crate::scan_path(&dir);
+        unsafe { std::env::remove_var("ASYNC_DOCTOR_PASS2_BATCH") };
+        res.unwrap()
+    });
+
+    assert!(!parallel.complete);
+    assert!(!batched.complete);
+    assert_eq!(batched.skipped, parallel.skipped);
+    assert_eq!(batched.findings, parallel.findings);
+    assert!(
+        batched
+            .findings
+            .iter()
+            .any(|f| f.rule == "blocking-sleep" && f.entry.name == "healthy"),
+        "healthy file after panic must still report findings: {:?}",
+        batched.findings
+    );
+    let _ = fs::remove_dir_all(&dir);
+}

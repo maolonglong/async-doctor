@@ -55,6 +55,7 @@ fn fn_fact(id: u32, qualname: &str, is_async: bool, file: &str, line: u32) -> Fu
         id: FunctionId(id),
         file: file.into(),
         line,
+        end_line: line,
         module: "app".into(),
         qualname: qualname.into(),
         is_async,
@@ -91,12 +92,12 @@ fn edge(
         occurrence: 0,
         is_offload_wrapper: false,
         positional_literals: vec![],
-        keyword_true: vec![],
+        keyword_literals: vec![],
         positional_callables: vec![],
         positional_externals: vec![],
         positional_constructed_receivers: vec![],
         keyword_callables: vec![],
-        param_guard: None,
+        param_guards: vec![],
         is_awaited: false,
         callee_is_coroutine: None,
         is_eager_offload_arg: false,
@@ -149,10 +150,10 @@ fn bound_method_param_guard_and_higher_order_respect_self_offset() {
         vec![ConditionTag::AsyncBranch],
     );
     // `do_sleep` is index 2 in `param_names` (`["self", "skip_io", "do_sleep"]`).
-    helper_sleep.param_guard = Some(ParamGuard {
+    helper_sleep.param_guards = vec![ParamGuard {
         index: 2,
         inverted: false,
-    });
+    }];
 
     let mut call_run_cb = edge(
         0,
@@ -245,10 +246,10 @@ fn intermediate_hop_param_guard_suppresses_provably_false_chain() {
         "inner()",
         vec![ConditionTag::AsyncBranch],
     );
-    call_inner.param_guard = Some(ParamGuard {
+    call_inner.param_guards = vec![ParamGuard {
         index: 0,
         inverted: false,
-    });
+    }];
 
     let inner_sleep = edge(
         2,
@@ -585,10 +586,10 @@ fn intermediate_first_party_param_guard_unknown_arg_stays_finding() {
         "load_colbert()",
         vec![ConditionTag::AsyncBranch],
     );
-    call_colbert.param_guard = Some(ParamGuard {
+    call_colbert.param_guards = vec![ParamGuard {
         index: 0,
         inverted: false,
-    });
+    }];
 
     let sleep = edge(
         2,

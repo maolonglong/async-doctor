@@ -107,3 +107,160 @@ fn offload_decorators_cut() {
     }
     let _ = fs::remove_dir_all(dir);
 }
+
+#[test]
+fn offload_wrappers_with_partial_and_contextvars_preserve_cut_coro_and_twin() {
+    let dir = temp_project(&[(
+        "wrappers.py",
+        r#"
+import asyncio
+import contextvars
+import functools
+import time
+import anyio.to_thread
+import httpx
+
+def sync_sleep():
+    time.sleep(1)
+
+def sync_http():
+    return httpx.get("https://example.com")
+
+async def async_target():
+    return 1
+
+async def wrap_ctx_and_partial(func, *args, **kwargs):
+    loop = asyncio.get_running_loop()
+    ctx = contextvars.copy_context()
+    call = functools.partial(func, *args, **kwargs)
+    return await loop.run_in_executor(None, ctx.run, call)
+
+async def wrap_partial_ctx_run(func, *args, **kwargs):
+    loop = asyncio.get_running_loop()
+    ctx = contextvars.copy_context()
+    call = functools.partial(ctx.run, func, *args, **kwargs)
+    return await loop.run_in_executor(None, call)
+
+async def wrap_anyio_partial(func, *args, **kwargs):
+    return await anyio.to_thread.run_sync(functools.partial(func, **kwargs), *args)
+
+async def cut_via_ctx_partial_ok():
+    await wrap_ctx_and_partial(sync_sleep)
+    await wrap_partial_ctx_run(sync_sleep)
+    await wrap_anyio_partial(sync_sleep)
+
+async def coro_via_ctx_wrapper_bad():
+    await wrap_ctx_and_partial(async_target)
+
+async def coro_via_direct_ctx_run_bad():
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, contextvars.copy_context().run, async_target)
+
+async def twin_via_ctx_wrapper():
+    await wrap_ctx_and_partial(sync_http)
+
+async def twin_via_direct_ctx_run():
+    loop = asyncio.get_running_loop()
+    ctx = contextvars.copy_context()
+    await loop.run_in_executor(None, ctx.run, httpx.get, "https://example.com")
+"#,
+    )]);
+    super::helpers::copy_dir(&super::helpers::advice_shared_venv(), &dir.join(".venv"));
+    let anyio_dir = dir.join(".venv/lib/python3.12/site-packages/anyio");
+    fs::create_dir_all(&anyio_dir).unwrap();
+    fs::write(anyio_dir.join("__init__.py"), "").unwrap();
+    fs::write(
+        anyio_dir.join("to_thread.py"),
+        "async def run_sync(func, *args):\n    return func(*args)\n",
+    )
+    .unwrap();
+    let report = scan_path(&dir).unwrap();
+    let _ = fs::remove_dir_all(dir);
+
+    assert!(
+        !report
+            .findings
+            .iter()
+            .any(|f| f.entry.name == "cut_via_ctx_partial_ok"),
+        "partial + contextvars wrappers must be recognized as offload cuts: {:?}",
+        report.findings
+    );
+    for bad in ["coro_via_ctx_wrapper_bad", "coro_via_direct_ctx_run_bad"] {
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.entry.name == bad && f.rule == "offload-coroutine"),
+            "{bad} must emit offload-coroutine: {:?}",
+            report.findings
+        );
+    }
+    for adv in ["twin_via_ctx_wrapper", "twin_via_direct_ctx_run"] {
+        assert!(
+            report
+                .advice
+                .iter()
+                .any(|a| a.entry.name == adv && a.rule == "offload-has-async-twin"),
+            "{adv} must emit offload-has-async-twin: {:?}",
+            report.advice
+        );
+    }
+}
+
+#[test]
+fn offload_lambda_returning_coroutine_emits_offload_coroutine() {
+    let dir = temp_project(&[(
+        "lam_coro.py",
+        r#"
+import asyncio
+import time
+
+async def async_fn() -> int:
+    return 1
+
+async def async_gen():
+    yield 1
+
+def sync_fn() -> int:
+    time.sleep(1)
+    return 2
+
+async def inline_lambda_coro_bad():
+    await asyncio.to_thread(lambda: async_fn())
+
+async def local_lambda_coro_bad():
+    thunk = lambda: async_fn()
+    await asyncio.to_thread(thunk)
+
+async def sync_lambda_ok():
+    await asyncio.to_thread(lambda: sync_fn())
+
+async def async_gen_lambda_not_coro():
+    await asyncio.to_thread(lambda: async_gen())
+"#,
+    )]);
+    let report = scan_path(&dir).unwrap();
+    let _ = fs::remove_dir_all(dir);
+
+    for bad in ["inline_lambda_coro_bad", "local_lambda_coro_bad"] {
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.entry.name == bad && f.rule == "offload-coroutine"),
+            "{bad} must emit offload-coroutine: {:?}",
+            report.findings
+        );
+    }
+    assert!(
+        !report.findings.iter().any(
+            |f| f.entry.name == "sync_lambda_ok" || f.entry.name == "async_gen_lambda_not_coro"
+        ),
+        "sync lambda and async-generator lambda must not emit offload-coroutine: {:?}",
+        report.findings
+    );
+    assert_eq!(
+        report.async_entry_count, 6,
+        "synthetic lambda facts must not inflate async_entry_count"
+    );
+}

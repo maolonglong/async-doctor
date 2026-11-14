@@ -1,6 +1,8 @@
 # JSON report contract (`schemaVersion` 2)
 
-Machine-readable output from `async-doctor --format json`. Policy background:
+Machine-readable output from `async-doctor --format json` (pretty-printed on
+TTYs; compact single-line JSON when stdout is piped or redirected). Policy
+background:
 [decisions/2026-10-30-reporting-contract.md](decisions/2026-10-30-reporting-contract.md)
 and [decisions/2026-10-31-advice-tier.md](decisions/2026-10-31-advice-tier.md).
 CLI flags: [cli.md](cli.md).
@@ -10,10 +12,10 @@ CLI flags: [cli.md](cli.md).
 | `schemaVersion` | integer; bump on breaking changes (currently **2**) |
 | `complete` | false on timeout / parse failure; attach `skipped` |
 | `score` | deterministic `0..=100` health score (`100` when clean; `>= 85` ("Great") iff zero findings and zero unused suppressions; see **Health score** below) |
-| `environment` | interpreter/venv/site-packages used; `frameworks` when async frameworks/runtimes (FastAPI, Starlette, Django, aiohttp, anyio, Trio, … — not client libs like httpx/redis) are detected in `site-packages`; `note` when degraded (ratio-aware when a venv is active). `environment.note` and `environment.frameworks` are omitted from JSON when empty (`skip_serializing_if`); `environment.followBudgetSkipped` counts third-party callees not followed because the follow budget was reached — omitted when 0, and it never flips `complete` |
+| `environment` | interpreter/venv/site-packages used; `frameworks` when async frameworks/runtimes (FastAPI, Starlette, Django, aiohttp, anyio, Trio, … — not client libs like httpx/redis) are detected in `site-packages`; `unresolvedThirdPartyModules` (up to 10 sorted top-level missing third-party package names); `note` when degraded (ratio-aware when a venv is active). `environment.note`, `environment.frameworks`, and `environment.unresolvedThirdPartyModules` are omitted from JSON when empty (`skip_serializing_if`); `environment.followBudgetSkipped` counts third-party callees not followed because the follow budget was reached — omitted when 0, and it never flips `complete` |
 | `findings[]` / `candidates[]` / `advice[]` | always emitted (even empty); candidates have `reason` (e.g. `conditional`, `metadata`, `short-lock`, `cheap-path-op`, `unresolved`); advice is non-blocking (SARIF `note`) |
 | `locationLessCandidates[]` | always emitted; missing-third-party aggregate lives here with empty `entry.file`/`chain` and empty `why` |
-| `skipped[]` / `sinkSites[]` / `unusedSuppressions[]` / `unresolvedSummary[]` | always emitted (even empty); `sinkSites[]` attributes merged `open` + `read`/`write` chains to the primary `open` hop |
+| `skipped[]` / `sinkSites[]` / `unusedSuppressions[]` / `unresolvedSummary[]` | always emitted (even empty); `sinkSites[]` attributes merged `open` + `read`/`write` chains to the primary `open` hop, and includes optional `syncCallerCount` (omitted when 0) and `sampleSyncCaller` (`file:line`, omitted when absent) when synchronous callers also invoke the sink helper |
 | `hiddenUnresolvedCandidates` / `omittedNonProductionEntries` / `fileCount` / `asyncEntryCount` / `omittedFindings` / `omittedCandidates` / `omittedAdvice` | always emitted, including `0` — the `omitted*` trio counts entries cut by `--max-findings` (0 without the flag) |
 | `id` | stable sha256 (16-byte hex) of **rule + entry qualname + sink qualname + chain qualnames + occurrence**; **not** file/line/column |
 | `rule` | e.g. `blocking-sleep`, `blocking-http` |
