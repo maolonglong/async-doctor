@@ -160,7 +160,7 @@ pub(crate) struct CallCollector<'a, 'db> {
     pub(super) in_memory_archive_receivers: HashSet<String>,
     /// Local receiver paths proven complete by the actual concurrent Future
     /// `done` method. Explicit writes invalidate them; only the actual Future
-    /// `result` method can use the exemption.
+    /// `result` and `exception` methods can use the exemption.
     pub(super) future_done_receivers: HashSet<String>,
     /// Base functions marked as offload wrappers while visiting with `functions_base`.
     pub(super) base_offload_wrappers: HashSet<FunctionId>,

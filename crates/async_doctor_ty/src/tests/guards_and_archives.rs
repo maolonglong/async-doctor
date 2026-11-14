@@ -100,6 +100,37 @@ fn p1_off_loop_thread_and_done_guards() {
             "custom result() bodies must remain reachable: {name}"
         );
     }
+    let waits: std::collections::BTreeSet<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.entry.name.starts_with("wait_"))
+        .map(|f| (f.entry.name.as_str(), f.rule.as_str()))
+        .collect();
+    assert_eq!(
+        waits,
+        std::collections::BTreeSet::from([
+            ("wait_default_exception_blocks", "blocking-lock"),
+            ("wait_pending_exception_blocks", "blocking-lock"),
+            ("wait_inherited_exception_blocks", "blocking-lock"),
+            ("wait_rebound_exception_blocks", "blocking-lock"),
+            ("wait_misleading_done_exception_blocks", "blocking-lock"),
+            ("wait_custom_exception_blocks", "blocking-sleep"),
+            ("wait_positive_result_blocks", "blocking-lock"),
+            ("wait_dynamic_exception_blocks", "blocking-lock"),
+            ("wait_poll_eager_receiver_blocks", "blocking-sleep"),
+            ("wait_unbound_exception_blocks", "blocking-lock"),
+            ("wait_true_timeout_exception_blocks", "blocking-lock"),
+        ]),
+        "pending waits and custom/eager work must report; completed/zero-timeout/asyncio calls must not"
+    );
+    assert!(
+        report
+            .candidates
+            .iter()
+            .all(|c| !c.entry.name.starts_with("wait_")),
+        "safe Future calls must not be demoted to candidates: {:?}",
+        report.candidates
+    );
     assert!(report.complete && report.skipped.is_empty());
     let _ = fs::remove_dir_all(&dir);
 }

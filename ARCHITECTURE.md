@@ -106,11 +106,13 @@ under parallel tests — pass an explicit cache dir instead.
   guards; call-site edges carry the enclosing conditions. Dead definitions
   retain their dead status.
 - Future completion guards require the actual concurrent Future `done` and
-  `result` methods. Proofs follow local true/false branches, intersect at live
-  continuations, and invalidate on explicit receiver writes; deferred functions
-  do not inherit them. Direct inline lambdas keep call-site capture proofs,
-  excluding shadowing parameters. This is not heap/alias, arbitrary-call
-  mutation, or cross-coroutine completion analysis.
+  `result` / `exception` methods. Proofs follow local true/false branches,
+  intersect at live continuations, and invalidate on explicit receiver writes;
+  deferred functions do not inherit them. Direct inline lambdas keep call-site
+  capture proofs, excluding shadowing parameters. Direct nonpositive-timeout
+  literal polls omit only the Future wait, not receiver/argument evaluation.
+  This is not heap/alias, arbitrary-call mutation, or cross-coroutine completion
+  analysis.
 - Local generator-origin and parameter-forwarding proofs use ty's use-def map,
   not IDE name navigation (which includes non-reaching bindings). Only a unique
   binding owned by the current function/lambda is followed; rebinding or
@@ -149,7 +151,7 @@ persists `item_spans` while `scan_input_fingerprint_with_python` recomputes
 `ignore_candidate_files` (`Option<Vec<PathBuf>>`) and restores both onto `Report`
 (`#[serde(skip)]` on JSON output) so warm `--changed` and unused-suppression
 checks match cold scans without process-global state. Package-cache schema is
-`CACHE_SCHEMA_VERSION` 26 (including the corrected Future completion semantics):
+`CACHE_SCHEMA_VERSION` 27 (including Future completion and polling semantics):
 it persists cross-package `follow_targets` referenced by analyzed edges alongside
 `is_bound_call`, `is_eager_offload_arg`, `constructed_receiver`,
 `positional_externals`, `positional_constructed_receivers`, decorator qualnames,

@@ -46,7 +46,9 @@ use serde::{Deserialize, Serialize};
 /// literal bindings include proven caller-parameter forwarding (`param:N`).
 /// v26: concurrent Future guards use actual method identities and local
 /// completion proofs that do not survive explicit receiver replacement.
-pub const CACHE_SCHEMA_VERSION: u32 = 26;
+/// v27: Future exception waits share typed completion guards; literal
+/// nonpositive-timeout result/exception polls do not produce waiting edges.
+pub const CACHE_SCHEMA_VERSION: u32 = 27;
 
 /// Tool version embedded in the cache path (from this crate's Cargo.toml).
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -437,3 +437,131 @@ async def proof_import_rebind_blocks(future: Future[int]):
     from app import proof_pending as future
 
     return future.result()
+
+
+import asyncio
+
+
+class WaitOverriddenException(Future[int]):
+    def exception(self, timeout=None):
+        import time
+
+        time.sleep(0.01)
+        return RuntimeError("custom exception reader")
+
+
+def wait_make_future() -> Future[int]:
+    import time
+
+    time.sleep(0.01)
+    return Future()
+
+
+async def wait_default_exception_blocks(future: Future[int]):
+    return future.exception()
+
+
+async def wait_pending_exception_blocks(future: Future[int]):
+    return future.exception(timeout=0.02)
+
+
+async def wait_inherited_exception_blocks(future: ProofInheritedFuture):
+    return future.exception(0.02)
+
+
+async def wait_rebound_exception_blocks(future: Future[int]):
+    if future.done():
+        future = Future()
+        return future.exception(timeout=0.02)
+
+
+async def wait_misleading_done_exception_blocks(future: ProofMisleadingFuture):
+    if future.done():
+        return future.exception(timeout=0.02)
+
+
+async def wait_custom_exception_blocks(future: WaitOverriddenException):
+    if future.done():
+        return future.exception(timeout=0)
+
+
+async def wait_positive_result_blocks(future: Future[int]):
+    return future.result(timeout=0.02)
+
+
+async def wait_dynamic_exception_blocks(future: Future[int], timeout: float | None):
+    return future.exception(timeout=timeout)
+
+
+async def wait_poll_eager_receiver_blocks():
+    return wait_make_future().exception(timeout=0)
+
+
+async def wait_done_exception_ok(future: Future[int]):
+    if future.done():
+        return future.exception()
+
+
+async def wait_negative_guard_exception_ok(future: Future[int]):
+    if not future.done():
+        return None
+    return future.exception()
+
+
+async def wait_poll_result_zero_ok(future: Future[int]):
+    return future.result(0)
+
+
+async def wait_poll_result_float_ok(future: Future[int]):
+    return future.result(timeout=0.0)
+
+
+async def wait_poll_result_negative_ok(future: Future[int]):
+    return future.result(-1)
+
+
+async def wait_poll_result_signed_zero_ok(future: Future[int]):
+    return future.result(timeout=-0.0)
+
+
+async def wait_poll_exception_zero_ok(future: Future[int]):
+    return future.exception(timeout=+0)
+
+
+async def wait_poll_exception_negative_ok(future: Future[int]):
+    return future.exception(-0.125)
+
+
+async def wait_poll_exception_bool_ok(future: Future[int]):
+    return future.exception(timeout=False)
+
+
+async def wait_inherited_poll_ok(future: ProofInheritedFuture):
+    try:
+        future.result(0)
+    except TimeoutError:
+        return future.exception(timeout=0)
+
+
+async def wait_asyncio_exception_ok(future: asyncio.Future[int]):
+    return future.exception()
+
+
+async def wait_unbound_poll_ok(future: Future[int]):
+    try:
+        Future.result(future, 0)
+    except TimeoutError:
+        return Future.exception(self=future, timeout=0)
+
+
+async def wait_unbound_done_exception_ok(future: Future[int]):
+    if future.done():
+        return Future.exception(future)
+
+
+async def wait_unbound_exception_blocks(future: Future[int]):
+    return Future.exception(future, timeout=0.02)
+
+
+async def wait_true_timeout_exception_blocks(future: Future[int]):
+    return future.exception(timeout=True)

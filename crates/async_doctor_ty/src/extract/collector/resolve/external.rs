@@ -143,9 +143,11 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         // buffering is not mistaken for Redis IO.
         if let Expr::Attribute(attr) = func {
             // Future completion guards and sink identity must use the same
-            // actual method, including inherited result() on project subclasses.
-            if attr.attr.as_str() == "result" && self.is_concurrent_future_method(attr) {
-                return Some("concurrent.futures.Future.result".to_string());
+            // actual method, including inherited methods on project subclasses.
+            if matches!(attr.attr.as_str(), "result" | "exception")
+                && self.is_concurrent_future_method(attr)
+            {
+                return Some(format!("concurrent.futures.Future.{}", attr.attr.as_str()));
             }
             // Prefer bindings from `async with r.pipeline() as pipe`.
             if let Expr::Name(n) = attr.value.as_ref()

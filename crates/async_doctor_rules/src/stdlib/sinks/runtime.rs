@@ -32,6 +32,7 @@ pub(super) const RUNTIME_SINKS: &[BuiltinSink] = &[
     BuiltinSink::finding("queue.Queue.put", RULE_BLOCKING_LOCK),
     BuiltinSink::finding("queue.SimpleQueue.get", RULE_BLOCKING_LOCK),
     BuiltinSink::finding("concurrent.futures.Future.result", RULE_BLOCKING_LOCK),
+    BuiltinSink::finding("concurrent.futures.Future.exception", RULE_BLOCKING_LOCK),
     BuiltinSink::candidate("threading.Lock.__enter__", RULE_BLOCKING_LOCK, "short-lock"),
     BuiltinSink::finding_consume_only("concurrent.futures.Executor.map", RULE_BLOCKING_LOCK),
     BuiltinSink::finding_consume_only(

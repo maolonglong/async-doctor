@@ -122,8 +122,8 @@ archives (`zipfile` / `tarfile`), and blocking `input()` on the loop.
 
 ## blocking-lock
 
-Threading locks, `queue.Queue`, blocking `concurrent.futures.Future.result`,
-`Executor.map` consumption, and `concurrent.futures.wait` on the loop.
+Threading locks, `queue.Queue`, blocking `concurrent.futures.Future.result` /
+`exception`, `Executor.map` consumption, and `concurrent.futures.wait` on the loop.
 
 **Notes:**
 
@@ -133,11 +133,20 @@ Threading locks, `queue.Queue`, blocking `concurrent.futures.Future.result`,
   `current_thread() is not main_thread()` (and the complementary else of an
   on-loop test). Arbitrary `owner != get_ident()` compares are not off-loop.
 - Completion guards require the actual `concurrent.futures.Future.done` and
-  `result` methods, including inherited methods, not custom same-name methods.
+  `result` / `exception` methods, including inherited methods, not custom
+  same-name methods.
   They track the same name/attribute path in `if`/`elif`/`else`, short-circuit
   `and`/`or`, and ternaries, including `if not future.done(): return`.
   Explicit receiver replacement invalidates the proof; deferred functions
   cannot inherit it, and only shared proofs survive continuing branches.
+- Direct literal nonpositive `timeout` values on the actual Future `result`
+  and `exception` methods are immediate polls, not completion waits. This
+  includes signed numeric zero/negative values and `False`, passed positionally
+  or by keyword on bound or unbound calls. Dynamic timeout values remain
+  unproven. Receiver and argument evaluation are still analyzed; custom methods
+  and asyncio Futures do not inherit the concurrent Future sink/exemption by
+  name. Negative-timeout polling is specific to Futures;
+  `Lock.acquire(timeout=-1)` can wait forever.
 - Completion analysis is local and structural, not a general heap/alias or
   arbitrary-call mutation model. It does not establish completion from
   cross-coroutine channel/portal coordination. A concurrent Future is not

@@ -290,8 +290,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             self.analyze_lambda_body(lambda);
         }
 
-        // `if fut.done(): fut.result()` — result does not block.
-        if self.call_is_done_guarded_future_result(call) {
+        // Completed Futures and nonpositive-timeout polls do not wait.
+        // walk_call_children still evaluates their receiver and arguments.
+        if self.call_is_nonblocking_future_wait(call) {
             self.clear_pending_call_args();
             self.pending_is_awaited = false;
             return Some(None);

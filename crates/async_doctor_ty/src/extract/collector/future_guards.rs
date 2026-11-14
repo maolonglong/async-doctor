@@ -64,16 +64,26 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
     }
 
-    pub(crate) fn call_is_done_guarded_future_result(&self, call: &ast::ExprCall) -> bool {
-        if self.future_done_receivers.is_empty() {
-            return false;
-        }
+    pub(crate) fn call_is_nonblocking_future_wait(&self, call: &ast::ExprCall) -> bool {
         let Expr::Attribute(attr) = call.func.as_ref() else {
             return false;
         };
-        attr.attr.as_str() == "result"
-            && expr_attr_path(&attr.value)
-                .is_some_and(|path| self.future_done_receivers.contains(&path))
+        if !matches!(attr.attr.as_str(), "result" | "exception") {
+            return false;
+        }
+        let bound = self.expr_is_external_bound_call(&call.func);
+        let receiver = if bound {
+            Some(attr.value.as_ref())
+        } else {
+            call.arguments.find_argument_value("self", 0)
+        };
+        let complete = receiver
+            .and_then(expr_attr_path)
+            .is_some_and(|path| self.future_done_receivers.contains(&path));
+        let timeout = call
+            .arguments
+            .find_argument_value("timeout", usize::from(!bound));
+        (complete || timeout.is_some_and(timeout_literal_is_nonpositive))
             && self.is_concurrent_future_method(attr)
     }
 
@@ -125,6 +135,26 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         for path in writes.paths {
             self.invalidate_future_done_receiver(&path);
         }
+    }
+}
+
+fn timeout_literal_is_nonpositive(timeout: &Expr) -> bool {
+    let (literal, negative) = match timeout {
+        Expr::UnaryOp(u) if matches!(u.op, ast::UnaryOp::UAdd | ast::UnaryOp::USub) => {
+            (u.operand.as_ref(), matches!(u.op, ast::UnaryOp::USub))
+        }
+        _ => (timeout, false),
+    };
+    // Numeric tokens are unsigned; the unary expression supplies their sign.
+    // Do not share this with lock timeouts: Lock.acquire(timeout=-1) waits.
+    match literal {
+        Expr::NumberLiteral(n) => match &n.value {
+            ast::Number::Int(i) => negative || i.as_u64() == Some(0),
+            ast::Number::Float(f) => (if negative { -*f } else { *f }) <= 0.0,
+            _ => false,
+        },
+        Expr::BooleanLiteral(b) => negative || !b.value,
+        _ => false,
     }
 }
 

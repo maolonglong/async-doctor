@@ -110,12 +110,14 @@ until the synchronous call returns.",
     RuleDoc {
         id: "blocking-lock",
         title: "Blocking thread lock / queue / future",
-        summary: "Threading locks, queues, `Future.result`, and `Executor.map`/`wait`.",
+        summary: "Threading locks, queues, `Future.result`/`exception`, and `Executor.map`/`wait`.",
         body: "\
-A contended lock, blocking queue get, `concurrent.futures.Future.result()`,\n\
-`Executor.map` consumption, or `wait()` on the event-loop thread freezes every\n\
-task sharing the loop while the wait lasts. Actual delay depends on contention,\n\
-queue state, and whether the awaited thread work is already complete.",
+A contended lock, blocking queue get, `concurrent.futures.Future.result()` or\n\
+`exception()`, `Executor.map` consumption, or `wait()` on the event-loop thread\n\
+freezes every task sharing the loop while the wait lasts. Actual delay depends\n\
+on contention, queue state, and whether the awaited thread work is complete.\n\
+Completed Future reads and literal nonpositive-timeout polls do not wait for\n\
+completion; this does not make their receiver or argument evaluation safe.",
         fix: "",
     },
     RuleDoc {
