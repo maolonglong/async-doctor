@@ -98,25 +98,37 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             }
             self.consuming_generator = false;
         } else {
+            // A generator object passed to an ordinary callable is not consumed
+            // on the loop by that pass (the callee may iterate it off-loop or
+            // not at all) — the for/comprehension consumption context stops
+            // here. Lazy iterator adapters are the exception: the outer loop
+            // drives them through their argument, so the context propagates.
+            let lazy_adapter = self
+                .external_qualname(&call.func)
+                .is_some_and(|q| is_lazy_iter_adapter(&q));
+            let was_consuming = self.consuming_generator;
+            if !lazy_adapter {
+                self.consuming_generator = false;
+            }
             for arg in &call.arguments.args {
                 self.visit_expr(arg);
             }
             for kw in &call.arguments.keywords {
                 self.visit_expr(&kw.value);
             }
+            self.consuming_generator = was_consuming;
         }
     }
 
     fn visit_eager_offload_expr(&mut self, expr: &'a Expr, consumer: bool) {
         let prev_eager = self.in_eager_offload_arg;
+        let prev_consuming = self.consuming_generator;
         self.in_eager_offload_arg = true;
-        if consumer {
-            self.consuming_generator = true;
-        }
+        // Arguments evaluated eagerly on the loop are not consumed there either
+        // unless the callee itself is an exhaustive generator consumer.
+        self.consuming_generator = consumer;
         self.visit_expr(expr);
-        if consumer {
-            self.consuming_generator = false;
-        }
+        self.consuming_generator = prev_consuming;
         self.in_eager_offload_arg = prev_eager;
     }
 
@@ -379,6 +391,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
 
         let func_ext_qual = self.external_qualname(&call.func);
         self.note_socket_mode_call(call, func_ext_qual.as_deref());
+        self.note_fd_mode_call(call, func_ext_qual.as_deref());
         self.maybe_record_gather_shared_session(caller, call, func_ext_qual.as_deref());
 
         // In-memory buffer args to open/Image.open: not blocking file IO — skip
@@ -528,4 +541,33 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         self.clear_pending_call_args();
         Some(None)
     }
+}
+
+/// Lazy iterator adapters: the outer `for`/comprehension drives them, and they
+/// pull from their argument on the loop — the consumption context propagates.
+fn is_lazy_iter_adapter(qualname: &str) -> bool {
+    matches!(
+        qualname,
+        "builtins.enumerate"
+            | "builtins.zip"
+            | "builtins.map"
+            | "builtins.filter"
+            | "builtins.iter"
+            | "builtins.reversed"
+            | "itertools.chain"
+            | "itertools.chain.from_iterable"
+            | "itertools.islice"
+            | "itertools.takewhile"
+            | "itertools.dropwhile"
+            | "itertools.filterfalse"
+            | "itertools.starmap"
+            | "itertools.compress"
+            | "itertools.zip_longest"
+            | "itertools.accumulate"
+            | "itertools.pairwise"
+            | "itertools.batched"
+            | "itertools.groupby"
+            | "itertools.cycle"
+            | "itertools.tee"
+    )
 }

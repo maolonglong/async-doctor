@@ -16,10 +16,29 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             self.note_local_binding(n.id.as_str(), &assign.value);
             return;
         }
-        // Unpacked or chained targets (`sock, addr = srv.accept()`, `a = b = x`)
+        // `r, w = os.pipe()` / `os.pipe2(flags)` binds a pipe fd pair; other
+        // unpacked or chained targets (`sock, addr = srv.accept()`, `a = b = x`)
         // invalidate stale proven-safe local bindings on every bound name.
+        let pipe_kind = if assign.targets.len() == 1 && matches!(&assign.targets[0], Expr::Tuple(_))
+        {
+            self.pipe_call_kind(&assign.value)
+        } else {
+            None
+        };
         for target in &assign.targets {
             self.invalidate_unpacked_target(target);
+        }
+        if let Some(nonblocking) = pipe_kind
+            && let Expr::Tuple(t) = &assign.targets[0]
+        {
+            for elt in &t.elts {
+                if let Expr::Name(n) = elt {
+                    self.pipe_fd_vars.insert(n.id.as_str().to_string());
+                    if nonblocking {
+                        self.nonblocking_fd_vars.insert(n.id.as_str().to_string());
+                    }
+                }
+            }
         }
     }
 
@@ -44,6 +63,8 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 self.local_stateful_sessions.remove(name);
                 self.in_memory_sqlite_vars.remove(name);
                 self.nonblocking_socket_vars.remove(name);
+                self.pipe_fd_vars.remove(name);
+                self.nonblocking_fd_vars.remove(name);
                 self.local_partials.remove(name);
                 self.context_locals.remove(name);
             }
@@ -84,6 +105,8 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 self.local_stateful_sessions.remove(name);
                 self.in_memory_sqlite_vars.remove(name);
                 self.nonblocking_socket_vars.remove(name);
+                self.pipe_fd_vars.remove(name);
+                self.nonblocking_fd_vars.remove(name);
                 self.local_partials.remove(name);
                 self.context_locals.remove(name);
             }
@@ -105,6 +128,8 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 self.local_stateful_sessions.remove(name);
                 self.in_memory_sqlite_vars.remove(name);
                 self.nonblocking_socket_vars.remove(name);
+                self.pipe_fd_vars.remove(name);
+                self.nonblocking_fd_vars.remove(name);
                 self.local_partials.remove(name);
                 self.context_locals.remove(name);
             }
@@ -125,6 +150,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 self.note_stateful_session_binding(name, other);
                 self.note_sqlite_binding(name, other);
                 self.note_socket_binding(name, other);
+                self.note_fd_binding(name, other);
                 self.note_context_binding(name, other);
                 self.note_partial_binding(name, other);
             }

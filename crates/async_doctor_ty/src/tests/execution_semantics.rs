@@ -138,3 +138,87 @@ fn implicit_context_protocols_follow_local_and_inherited_method_bodies() {
         "with invokes type-level __enter__/__exit__, unless the whole use is offloaded"
     );
 }
+
+#[test]
+fn generator_arg_to_async_for_callee_is_not_consumed_on_loop() {
+    let dir = super::helpers::temp_project(&[(
+        "app.py",
+        r#"
+import itertools
+import time
+
+def sync_chunks():
+    with open("big.bin", "rb") as f:
+        while chunk := f.read(65536):
+            yield chunk
+
+async def external_iter_arg_not_consumed():
+    async for chunk in missing_iterate_in_threadpool(sync_chunks()):
+        pass
+
+async def project_iter_arg_not_consumed():
+    for chunk in plain_wrapper(sync_chunks()):
+        pass
+
+def plain_wrapper(it):
+    return it
+
+async def adapter_enumerate_consumes():
+    for i, c in enumerate(sync_chunks()):
+        pass
+
+async def adapter_zip_consumes():
+    for a, b in zip(sync_chunks(), range(3)):
+        pass
+
+async def adapter_islice_consumes():
+    for c in itertools.islice(sync_chunks(), 2):
+        pass
+
+async def adapter_nested_consumes():
+    for i, (a, b) in enumerate(zip(sync_chunks(), range(3))):
+        pass
+
+async def adapter_comprehension_map_consumes():
+    return [len(c) for c in map(bytes, sync_chunks())]
+
+async def sync_for_still_consumes():
+    for chunk in sync_chunks():
+        pass
+
+async def list_still_consumes():
+    return list(sync_chunks())
+"#,
+    )]);
+    let report = scan_path(&dir).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    let names: BTreeSet<_> = report
+        .findings
+        .iter()
+        .map(|f| f.entry.name.as_str())
+        .collect();
+    for clean in [
+        "external_iter_arg_not_consumed",
+        "project_iter_arg_not_consumed",
+    ] {
+        assert!(
+            !names.contains(clean),
+            "{clean} passes the generator to a callable; the pass itself must not consume it on the loop: {:?}",
+            report.findings
+        );
+    }
+    for blocked in [
+        "adapter_enumerate_consumes",
+        "adapter_zip_consumes",
+        "adapter_islice_consumes",
+        "adapter_nested_consumes",
+        "adapter_comprehension_map_consumes",
+        "sync_for_still_consumes",
+        "list_still_consumes",
+    ] {
+        assert!(
+            names.contains(blocked),
+            "{blocked} consumes the generator on the loop and must report: {names:?}"
+        );
+    }
+}

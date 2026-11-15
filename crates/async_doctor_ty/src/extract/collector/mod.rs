@@ -185,6 +185,11 @@ pub(crate) struct CallCollector<'a, 'db> {
     pub(super) in_memory_sqlite_vars: HashSet<String>,
     /// Locals bound to `socket.socket` instances proven in non-blocking mode.
     pub(super) nonblocking_socket_vars: HashSet<String>,
+    /// Names bound by tuple-unpacking `os.pipe()` / `os.pipe2(...)`.
+    pub(super) pipe_fd_vars: HashSet<String>,
+    /// Pipe fds proven non-blocking: `os.pipe2` pair created with
+    /// `O_NONBLOCK`, or a `pipe_fd_vars` name after `os.set_blocking(fd, False)`.
+    pub(super) nonblocking_fd_vars: HashSet<String>,
     /// Local name -> unwrapped callable expression from `functools.partial(...)`.
     pub(super) local_partials: HashMap<String, &'a Expr>,
     /// Locals bound to `contextvars.copy_context()` / `contextvars.Context()`.
@@ -306,6 +311,8 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             local_stateful_sessions: HashSet::new(),
             in_memory_sqlite_vars: HashSet::new(),
             nonblocking_socket_vars: HashSet::new(),
+            pipe_fd_vars: HashSet::new(),
+            nonblocking_fd_vars: HashSet::new(),
             local_partials: HashMap::new(),
             context_locals: HashSet::new(),
             unshared_local_locks: HashMap::new(),
