@@ -71,9 +71,15 @@ rules.
 - Composite GitHub Action (`action.yml`): `uses: maolonglong/async-doctor@v0`
   with optional `path`, `version`, `args`, `sarif`, `sarif-file`, and `summary`
   inputs.
-- Pre-commit hook (`.pre-commit-hooks.yaml`): hook id `async-doctor` (runs
-  zero-config `async-doctor` over the repo root with `pass_filenames: false`;
-  accepts optional `args`, e.g. `args: [--changed]`).
+- Pre-commit: the primary setup is a local hook installing the PyPI wheel —
+  `repo: local` with `entry: async-doctor`, `language: python`,
+  `additional_dependencies: ["async-doctor==0.1.4"]`, `types_or: [python, pyi]`,
+  `pass_filenames: false`, `require_serial: true` (see the README for the full
+  snippet). Alternatively `.pre-commit-hooks.yaml` provides hook id
+  `async-doctor` via `repo: https://github.com/maolonglong/async-doctor`; that
+  form builds from source and requires the Rust toolchain pinned in
+  `rust-toolchain.toml`. Both run zero-config `async-doctor` over the repo root
+  and accept optional `args`, e.g. `args: [--changed]`.
 
 ## Environment
 

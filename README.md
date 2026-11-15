@@ -133,9 +133,27 @@ jobs:
           sarif: "true"
 ```
 
-Or run as a `pre-commit` hook (`.pre-commit-hooks.yaml`; pass `args: [--changed]`
-for diff-scoped commits that short-circuit in `<20ms` when no Python or config
+Or run as a `pre-commit` hook. A local hook that installs the PyPI wheel is the
+primary option — no Rust toolchain needed (pass `args: [--changed]` for
+diff-scoped commits that short-circuit in `<20ms` when no Python or config
 files changed):
+
+```yaml
+repos:
+  - repo: local
+    hooks:
+      - id: async-doctor
+        name: async-doctor
+        entry: async-doctor
+        language: python
+        additional_dependencies: ["async-doctor==0.1.4"]
+        types_or: [python, pyi]
+        pass_filenames: false
+        require_serial: true
+```
+
+Alternatively, the remote hook form builds from source and requires the Rust
+toolchain pinned in [rust-toolchain.toml](rust-toolchain.toml):
 
 ```yaml
 repos:
