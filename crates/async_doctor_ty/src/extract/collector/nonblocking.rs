@@ -229,41 +229,44 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             }
             Expr::Name(n) => {
                 // `from os import <flag>` (incl. `as` aliases): the name's own
-                // qualname is `builtins.int`, so check each definition it
-                // binds — either the typeshed `os`/`posix` member itself or a
-                // `from os/posix import` alias site.
-                for r in definitions_for_name(
+                // qualname is `builtins.int`, so check its definitions. ALL of
+                // them must be the `os`/`posix` flag — a merged alternative
+                // binding (e.g. `else: F = 0`) keeps the call blocking.
+                let resolved = definitions_for_name(
                     self.model,
                     n.id.as_str(),
                     n.into(),
                     ImportAliasResolution::PreserveAliases,
-                ) {
+                );
+                let mut all_match = !resolved.is_empty();
+                for r in &resolved {
                     let Some(def) = r.definition() else {
+                        all_match = false;
                         continue;
                     };
                     let db = self.model.db();
-                    if let DefinitionKind::ImportFrom(imp) = def.kind(db) {
+                    let matched = if let DefinitionKind::ImportFrom(imp) = def.kind(db) {
                         let parsed = parsed_module(db, def.python_file(db)).load(db);
                         let node = imp.import(&parsed);
                         let alias = imp.alias(&parsed);
-                        if matches!(
+                        matches!(
                             node.module.as_ref().map(|m| m.as_str()),
                             Some("os" | "posix")
                         ) && alias.name.as_str() == flag
-                        {
-                            return true;
-                        }
-                        continue;
+                    } else {
+                        // Typeshed `os`/`posix` member (`WNOHANG: int`, …): the
+                        // bound use-site name is the imported symbol itself.
+                        matches!(
+                            module_of_definition(self.model, def).as_deref(),
+                            Some("os" | "posix")
+                        ) && n.id.as_str() == flag
+                    };
+                    if !matched {
+                        all_match = false;
                     }
-                    // Typeshed `os`/`posix` member (`WNOHANG: int`, …): the
-                    // bound use-site name is the imported symbol itself.
-                    if matches!(
-                        module_of_definition(self.model, def).as_deref(),
-                        Some("os" | "posix")
-                    ) && n.id.as_str() == flag
-                    {
-                        return true;
-                    }
+                }
+                if all_match {
+                    return true;
                 }
                 self.external_qualname(expr)
                     .is_some_and(|q| q == format!("os.{flag}") || q == format!("posix.{flag}"))
@@ -285,23 +288,18 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
     }
 
+    /// `alias = r` on a tracked fd is ambiguous (later mode calls on either
+    /// name may disagree) — drop the proof from BOTH names rather than copy it.
     pub(super) fn note_fd_binding(&mut self, name: &str, value: &Expr) {
-        if let Expr::Name(src) = value {
-            let src = src.id.as_str();
-            if self.pipe_fd_vars.contains(src) {
-                self.pipe_fd_vars.insert(name.to_string());
-            } else {
-                self.pipe_fd_vars.remove(name);
-            }
-            if self.nonblocking_fd_vars.contains(src) {
-                self.nonblocking_fd_vars.insert(name.to_string());
-            } else {
-                self.nonblocking_fd_vars.remove(name);
-            }
-        } else {
-            self.pipe_fd_vars.remove(name);
-            self.nonblocking_fd_vars.remove(name);
+        if let Expr::Name(src) = value
+            && (self.pipe_fd_vars.contains(src.id.as_str())
+                || self.nonblocking_fd_vars.contains(src.id.as_str()))
+        {
+            self.pipe_fd_vars.remove(src.id.as_str());
+            self.nonblocking_fd_vars.remove(src.id.as_str());
         }
+        self.pipe_fd_vars.remove(name);
+        self.nonblocking_fd_vars.remove(name);
     }
 
     pub(super) fn note_sqlite_binding(&mut self, name: &str, value: &Expr) {

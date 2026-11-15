@@ -52,7 +52,11 @@ use serde::{Deserialize, Serialize};
 /// `os.read`/`os.write`, memory-buffer `shutil.copyfileobj`, in-memory SQLite
 /// cursor `__iter__`) and argument-position generator calls no longer produce
 /// loop-consumption edges.
-pub const CACHE_SCHEMA_VERSION: u32 = 28;
+/// v29: eager consumers (`f(*gen())`, `itertools.product`-family) re-added;
+/// os-flag resolution requires every resolved definition to match; fd
+/// aliasing is conservative; proofs gained inside possibly-skipped suites
+/// (loop/try bodies, else clauses) cannot escape them.
+pub const CACHE_SCHEMA_VERSION: u32 = 29;
 
 /// Tool version embedded in the cache path (from this crate's Cargo.toml).
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");

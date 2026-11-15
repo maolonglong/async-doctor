@@ -556,6 +556,17 @@ async def waitpid_from_import_ok():
     from os import WNOHANG
     os.waitpid(-1, WNOHANG)
 
+async def waitpid_wnohang_as_alias_ok():
+    from os import WNOHANG as WN
+    os.waitpid(-1, WN)
+
+async def waitpid_ambiguous_flag_blocks(flag: bool, pid: int):
+    if flag:
+        from os import WNOHANG as F
+    else:
+        F = 0
+    os.waitpid(pid, F)
+
 async def waitpid_zero_blocks(pid: int):
     os.waitpid(pid, 0)
 
@@ -632,6 +643,7 @@ async def copyfileobj_disk_dst_blocks(fdst):
         "waitpid_wnohang_bitor_ok",
         "waitpid_wnohang_kw_ok",
         "waitpid_from_import_ok",
+        "waitpid_wnohang_as_alias_ok",
         "pipe_set_nonblocking_read_ok",
         "pipe2_nonblock_write_ok",
         "copyfileobj_all_memory_ok",
@@ -646,6 +658,7 @@ async def copyfileobj_disk_dst_blocks(fdst):
     for blocked in [
         "waitpid_zero_blocks",
         "waitpid_default_blocks",
+        "waitpid_ambiguous_flag_blocks",
         "waitpid_unknown_option_blocks",
         "waitpid_literal_option_blocks",
         "blocking_pipe_read_blocks",
@@ -659,6 +672,89 @@ async def copyfileobj_disk_dst_blocks(fdst):
         assert!(
             names.contains(blocked),
             "{blocked} can block and must report a finding: {names:?}"
+        );
+    }
+}
+
+#[test]
+fn body_only_proofs_do_not_escape_loops_try_or_aliases() {
+    let dir = temp_project(&[(
+        "leak.py",
+        r#"
+import os
+import socket
+import sqlite3
+
+async def fd_nonblocking_only_in_loop_blocks(items: list):
+    r, w = os.pipe()
+    for _ in items:
+        os.set_blocking(r, False)
+    os.read(r, 1)
+
+async def fd_nonblocking_only_in_try_blocks():
+    r, w = os.pipe()
+    try:
+        os.set_blocking(r, False)
+    except Exception:
+        pass
+    os.read(r, 1)
+
+async def fd_nonblocking_only_in_else_blocks(items: list):
+    r, w = os.pipe()
+    for _ in items:
+        pass
+    else:
+        os.set_blocking(r, False)
+    os.read(r, 1)
+
+async def fd_alias_drops_proof_blocks():
+    r, w = os.pipe2(os.O_NONBLOCK)
+    alias = r
+    os.set_blocking(alias, True)
+    os.read(r, 1)
+
+async def sock_nonblocking_only_in_loop_blocks(items: list):
+    sock = socket.socket()
+    for _ in items:
+        sock.setblocking(False)
+    sock.recv(1)
+
+async def sqlite_mem_only_in_loop_blocks(items: list):
+    conn = sqlite3.connect("app.db")
+    for _ in items:
+        conn = sqlite3.connect(":memory:")
+    conn.execute("SELECT 1")
+
+async def fd_nonblocking_before_loop_stays_clean(items: list):
+    r, w = os.pipe()
+    os.set_blocking(r, False)
+    for _ in items:
+        os.read(r, 1024)
+"#,
+    )]);
+    let report = scan_path(&dir).unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    let names: std::collections::BTreeSet<_> = report
+        .findings
+        .iter()
+        .map(|f| f.entry.name.as_str())
+        .collect();
+    assert!(
+        !names.contains("fd_nonblocking_before_loop_stays_clean"),
+        "proof established before the loop must apply inside it: {:?}",
+        report.findings
+    );
+    for blocked in [
+        "fd_nonblocking_only_in_loop_blocks",
+        "fd_nonblocking_only_in_try_blocks",
+        "fd_nonblocking_only_in_else_blocks",
+        "fd_alias_drops_proof_blocks",
+        "sock_nonblocking_only_in_loop_blocks",
+        "sqlite_mem_only_in_loop_blocks",
+    ] {
+        assert!(
+            names.contains(blocked),
+            "{blocked}: a body-only or aliased-away proof must not survive: {names:?}"
         );
     }
 }

@@ -13,24 +13,30 @@ impl<'a, 'db> CallCollector<'a, 'db> {
     pub(crate) fn visit_try(&mut self, try_stmt: &'a ast::StmtTry) {
         self.maybe_record_swallowed_cancelled_error(try_stmt);
         let before = self.future_done_receivers.clone();
+        let before_guards = self.local_guards();
         let mut continuations = Vec::new();
+        let mut guard_continuations: Vec<super::super::LocalGuards> = Vec::new();
         // Any try/except/else/finally path is guarded — not unconditional.
         let prev_saw = self.try_saw_get_loop;
         self.try_saw_get_loop = false;
         self.branch_depth += 1;
         self.visit_body_seq(&try_stmt.body);
         let normal = self.future_done_receivers.clone();
+        let normal_guards = self.local_guards();
         let saw_get_loop = self.try_saw_get_loop;
         self.branch_depth -= 1;
         for handler in &try_stmt.handlers {
             self.future_done_receivers.clone_from(&before);
+            self.restore_local_guards(before_guards.clone());
             self.invalidate_future_writes_in_body(&try_stmt.body);
+            self.invalidate_local_guard_writes_in_body(&try_stmt.body);
             let ast::ExceptHandler::ExceptHandler(h) = handler;
             if let Some(type_) = &h.type_ {
                 self.visit_expr(type_);
             }
             if let Some(name) = &h.name {
                 self.invalidate_future_done_receiver(name.as_str());
+                self.drop_local_guard(name.as_str());
             }
             let runtime_error = saw_get_loop && except_is_runtime_error(h.type_.as_deref());
             self.branch_depth += 1;
@@ -44,32 +50,47 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             self.branch_depth -= 1;
             if !body_always_exits(&h.body) {
                 continuations.push(self.future_done_receivers.clone());
+                guard_continuations.push(self.local_guards());
             }
         }
         self.try_saw_get_loop = prev_saw;
         self.future_done_receivers = normal;
+        self.restore_local_guards(normal_guards);
         self.branch_depth += 1;
         self.visit_body_seq(&try_stmt.orelse);
         self.branch_depth -= 1;
         if !body_always_exits(&try_stmt.body) && !body_always_exits(&try_stmt.orelse) {
             continuations.push(self.future_done_receivers.clone());
+            guard_continuations.push(self.local_guards());
         }
         self.future_done_receivers = continuations.pop().unwrap_or_default();
         for branch in continuations {
             self.future_done_receivers
                 .retain(|path| branch.contains(path));
         }
+        if let Some(mut merged) = guard_continuations.pop() {
+            for other in &guard_continuations {
+                merged.intersect(other);
+            }
+            self.restore_local_guards(merged);
+        } else {
+            self.restore_local_guards(Default::default());
+        }
         // finally always runs, but keep conservative (still a try-related path).
         if !try_stmt.finalbody.is_empty() {
             // It also runs before an exception is caught or a return completes.
             // A proof established only on normal completion is insufficient.
             self.future_done_receivers = before;
+            self.restore_local_guards(before_guards);
             self.invalidate_future_writes_in_body(&try_stmt.body);
+            self.invalidate_local_guard_writes_in_body(&try_stmt.body);
             for handler in &try_stmt.handlers {
                 let ast::ExceptHandler::ExceptHandler(h) = handler;
                 self.invalidate_future_writes_in_body(&h.body);
+                self.invalidate_local_guard_writes_in_body(&h.body);
             }
             self.invalidate_future_writes_in_body(&try_stmt.orelse);
+            self.invalidate_local_guard_writes_in_body(&try_stmt.orelse);
         }
         self.branch_depth += 1;
         self.visit_body_seq(&try_stmt.finalbody);
@@ -147,17 +168,23 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
         self.consuming_generator = false;
         let before = self.future_done_receivers.clone();
+        let before_guards = self.local_guards();
         self.invalidate_future_writes_in_expr(&for_stmt.target);
+        self.invalidate_local_guard_writes_in_expr(&for_stmt.target);
         self.invalidate_future_writes_in_body(&for_stmt.body);
+        self.invalidate_local_guard_writes_in_body(&for_stmt.body);
         self.loop_depth += 1;
         self.visit_body_seq(&for_stmt.body);
         self.loop_depth -= 1;
         self.future_done_receivers
             .retain(|path| before.contains(path));
+        self.retain_local_guards(&before_guards);
         let before_else = self.future_done_receivers.clone();
+        let before_else_guards = self.local_guards();
         self.visit_body_seq(&for_stmt.orelse);
         self.future_done_receivers
             .retain(|path| before_else.contains(path));
+        self.retain_local_guards(&before_else_guards);
     }
 
     pub(crate) fn visit_with(&mut self, with_stmt: &'a ast::StmtWith) {

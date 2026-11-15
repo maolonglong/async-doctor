@@ -4,7 +4,7 @@ use async_doctor_core::{EntryLabel, FunctionFact, FunctionId};
 use ruff_python_ast::visitor::Visitor;
 use ruff_python_ast::{self as ast, Expr};
 
-use super::CallCollector;
+use super::{CallCollector, LocalGuards};
 use crate::extract::constants::expr_has_yield;
 use crate::extract::ctx::DefKey;
 
@@ -289,5 +289,45 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         self.cache_miss_depth = depths.3;
         self.no_running_loop_depth = depths.4;
         self.off_loop_thread_depth = depths.5;
+    }
+}
+
+impl<'a, 'db> CallCollector<'a, 'db> {
+    /// Snapshot the name-local "proven non-blocking" guard sets.
+    pub(super) fn local_guards(&self) -> LocalGuards {
+        LocalGuards {
+            sqlite: self.in_memory_sqlite_vars.clone(),
+            socket: self.nonblocking_socket_vars.clone(),
+            archive: self.in_memory_archive_receivers.clone(),
+            pipe_fd: self.pipe_fd_vars.clone(),
+            nonblocking_fd: self.nonblocking_fd_vars.clone(),
+        }
+    }
+
+    /// Restore a [`LocalGuards`] snapshot wholesale (branch resets).
+    pub(super) fn restore_local_guards(&mut self, guards: LocalGuards) {
+        self.in_memory_sqlite_vars = guards.sqlite;
+        self.nonblocking_socket_vars = guards.socket;
+        self.in_memory_archive_receivers = guards.archive;
+        self.pipe_fd_vars = guards.pipe_fd;
+        self.nonblocking_fd_vars = guards.nonblocking_fd;
+    }
+
+    /// Keep only proofs already present in `before`: a possibly-skipped suite
+    /// (loop body, try body, else suite) cannot leak additions, while
+    /// removals made inside it persist.
+    pub(super) fn retain_local_guards(&mut self, before: &LocalGuards) {
+        let mut current = self.local_guards();
+        current.retain_from(before);
+        self.restore_local_guards(current);
+    }
+
+    /// Drop every local-guard proof bound to `name` (e.g. `except ... as name`).
+    pub(super) fn drop_local_guard(&mut self, name: &str) {
+        self.in_memory_sqlite_vars.remove(name);
+        self.nonblocking_socket_vars.remove(name);
+        self.in_memory_archive_receivers.remove(name);
+        self.pipe_fd_vars.remove(name);
+        self.nonblocking_fd_vars.remove(name);
     }
 }

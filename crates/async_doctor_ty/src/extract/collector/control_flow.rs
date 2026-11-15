@@ -271,21 +271,8 @@ impl<'a, 'db> CallCollector<'a, 'db> {
     }
 
     pub(crate) fn visit_if(&mut self, if_stmt: &'a ast::StmtIf) {
-        let pre_local_guards = (
-            self.in_memory_sqlite_vars.clone(),
-            self.nonblocking_socket_vars.clone(),
-            self.in_memory_archive_receivers.clone(),
-            self.pipe_fd_vars.clone(),
-            self.nonblocking_fd_vars.clone(),
-        );
-        #[allow(clippy::type_complexity)]
-        let mut live_fallthrough_guards: Vec<(
-            HashSet<String>,
-            HashSet<String>,
-            HashSet<String>,
-            HashSet<String>,
-            HashSet<String>,
-        )> = Vec::new();
+        let pre_local_guards = self.local_guards();
+        let mut live_fallthrough_guards: Vec<super::LocalGuards> = Vec::new();
         let mut live_future_proofs = Vec::new();
         let mut has_else = false;
 
@@ -363,24 +350,13 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             self.dead_depth -= 1;
         } else if !body_always_exits(&if_stmt.body) {
             live_future_proofs.push(self.future_done_receivers.clone());
-            live_fallthrough_guards.push((
-                self.in_memory_sqlite_vars.clone(),
-                self.nonblocking_socket_vars.clone(),
-                self.in_memory_archive_receivers.clone(),
-                self.pipe_fd_vars.clone(),
-                self.nonblocking_fd_vars.clone(),
-            ));
+            live_fallthrough_guards.push(self.local_guards());
         }
 
         for clause in &if_stmt.elif_else_clauses {
             self.future_done_receivers
                 .clone_from(&remaining_future_proofs);
-            self.in_memory_sqlite_vars.clone_from(&pre_local_guards.0);
-            self.nonblocking_socket_vars.clone_from(&pre_local_guards.1);
-            self.in_memory_archive_receivers
-                .clone_from(&pre_local_guards.2);
-            self.pipe_fd_vars.clone_from(&pre_local_guards.3);
-            self.nonblocking_fd_vars.clone_from(&pre_local_guards.4);
+            self.restore_local_guards(pre_local_guards.clone());
             let is_else = clause.test.is_none();
             if is_else {
                 has_else = true;
@@ -496,13 +472,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 self.dead_depth -= 1;
             } else if !body_always_exits(&clause.body) {
                 live_future_proofs.push(self.future_done_receivers.clone());
-                live_fallthrough_guards.push((
-                    self.in_memory_sqlite_vars.clone(),
-                    self.nonblocking_socket_vars.clone(),
-                    self.in_memory_archive_receivers.clone(),
-                    self.pipe_fd_vars.clone(),
-                    self.nonblocking_fd_vars.clone(),
-                ));
+                live_fallthrough_guards.push(self.local_guards());
             }
         }
 
@@ -518,27 +488,13 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         } else {
             after_test_proofs
         };
-        if let Some((mut sql, mut sock, mut arch, mut pipe, mut nbfd)) =
-            live_fallthrough_guards.pop()
-        {
-            for (s, k, a, p, n) in &live_fallthrough_guards {
-                sql.retain(|v| s.contains(v));
-                sock.retain(|v| k.contains(v));
-                arch.retain(|v| a.contains(v));
-                pipe.retain(|v| p.contains(v));
-                nbfd.retain(|v| n.contains(v));
+        if let Some(mut merged) = live_fallthrough_guards.pop() {
+            for other in &live_fallthrough_guards {
+                merged.intersect(other);
             }
-            self.in_memory_sqlite_vars = sql;
-            self.nonblocking_socket_vars = sock;
-            self.in_memory_archive_receivers = arch;
-            self.pipe_fd_vars = pipe;
-            self.nonblocking_fd_vars = nbfd;
+            self.restore_local_guards(merged);
         } else {
-            self.in_memory_sqlite_vars = pre_local_guards.0;
-            self.nonblocking_socket_vars = pre_local_guards.1;
-            self.in_memory_archive_receivers = pre_local_guards.2;
-            self.pipe_fd_vars = pre_local_guards.3;
-            self.nonblocking_fd_vars = pre_local_guards.4;
+            self.restore_local_guards(pre_local_guards);
         }
     }
 

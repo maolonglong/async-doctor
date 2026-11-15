@@ -162,7 +162,9 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
             }
             Stmt::While(while_stmt) => {
                 let before = self.future_done_receivers.clone();
+                let before_guards = self.local_guards();
                 self.invalidate_future_writes_in_body(&while_stmt.body);
+                self.invalidate_local_guard_writes_in_body(&while_stmt.body);
                 self.loop_depth += 1;
                 self.visit_expr(&while_stmt.test);
                 self.visit_body_seq(&while_stmt.body);
@@ -170,10 +172,13 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 // The body may never execute; body-only proofs cannot escape.
                 self.future_done_receivers
                     .retain(|path| before.contains(path));
+                self.retain_local_guards(&before_guards);
                 let before_else = self.future_done_receivers.clone();
+                let before_else_guards = self.local_guards();
                 self.visit_body_seq(&while_stmt.orelse);
                 self.future_done_receivers
                     .retain(|path| before_else.contains(path));
+                self.retain_local_guards(&before_else_guards);
             }
             Stmt::With(with_stmt) => self.visit_with(with_stmt),
             Stmt::Try(try_stmt) => self.visit_try(try_stmt),

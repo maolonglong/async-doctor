@@ -136,6 +136,30 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             self.invalidate_future_done_receiver(&path);
         }
     }
+
+    /// Bare names written anywhere in `body` lose their local-guard proofs —
+    /// used when a suite is replayed from a pre-body snapshot (try handlers,
+    /// finally paths) so body writes cannot be undone.
+    pub(super) fn invalidate_local_guard_writes_in_body(&mut self, body: &[Stmt]) {
+        let mut writes = ReceiverWrites::default();
+        writes.visit_body(body);
+        for name in writes.paths {
+            if !name.contains('.') {
+                self.drop_local_guard(&name);
+            }
+        }
+    }
+
+    /// Same invalidation for a single assignment target (e.g. a `for` target).
+    pub(super) fn invalidate_local_guard_writes_in_expr(&mut self, target: &Expr) {
+        let mut writes = ReceiverWrites::default();
+        writes.visit_expr(target);
+        for name in writes.paths {
+            if !name.contains('.') {
+                self.drop_local_guard(&name);
+            }
+        }
+    }
 }
 
 fn timeout_literal_is_nonpositive(timeout: &Expr) -> bool {

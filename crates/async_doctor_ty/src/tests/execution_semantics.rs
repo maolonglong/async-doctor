@@ -182,6 +182,20 @@ async def adapter_nested_consumes():
 async def adapter_comprehension_map_consumes():
     return [len(c) for c in map(bytes, sync_chunks())]
 
+def wrap_starred(*args):
+    return list(args)
+
+async def product_arg_consumes():
+    for item in itertools.product(sync_chunks()):
+        pass
+
+async def starred_arg_consumes_in_for():
+    for item in wrap_starred(*sync_chunks()):
+        pass
+
+async def starred_arg_consumes_bare():
+    wrap_starred(*sync_chunks())
+
 async def sync_for_still_consumes():
     for chunk in sync_chunks():
         pass
@@ -208,6 +222,9 @@ async def list_still_consumes():
         );
     }
     for blocked in [
+        "product_arg_consumes",
+        "starred_arg_consumes_in_for",
+        "starred_arg_consumes_bare",
         "adapter_enumerate_consumes",
         "adapter_zip_consumes",
         "adapter_islice_consumes",
