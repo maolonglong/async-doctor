@@ -57,8 +57,11 @@ is required. Can be stacked after `# type: ignore[...]` or `# noqa: ...` on the
 same line. Trailing inline comments apply strictly to their own statement
 (including the start line of a multi-line call), never bleeding to `line + 1`;
 standalone comments on their own line cover `line + 1` (including above stacked
-`@decorator` lines on an `async def`). `#` inside single- or multi-line string
-literals (`'''` / `"""`) is ignored. Unused suppressions are tracked per rule
+`@decorator` lines on an `async def`). Comment detection is token-based (Ruff
+parser tokens), so `#` inside any string literal — including PEP 701 nested
+same-quote f-strings, format specs, and t-strings — is never a comment, while a
+real trailing comment after such a literal still applies. Unused suppressions
+are tracked per rule
 and fail the run (exit 1 unless `--fail-on none`). On single-file scans, unused
 suppressions are checked strictly in that target file. Same syntax covers advice
 rules.

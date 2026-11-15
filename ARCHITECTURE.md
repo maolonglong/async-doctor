@@ -45,7 +45,10 @@ Exit codes and JSON field meanings live in [`docs/json-contract.md`](docs/json-c
 Binary crate: clap args (`args.rs` — including `--python`, `--changed` / `--diff`,
 `--fail-on`, and `why --format json`), path resolution, whole-file inline
 `# async-doctor: ignore[…]` suppressions (`suppress.rs`, `suppress/lexer.rs` —
-consuming `Report.ignore_candidate_files` directly with no process-global state),
+token-based comment detection over `async_doctor_ty::source_lines` (one
+`parse_unchecked` pass; `#` inside string literals, including PEP 701 nested
+f-strings, is never a comment), consuming `Report.ignore_candidate_files`
+directly with no process-global state),
 git `--changed` / baseline filters (`changed.rs`, `baseline.rs`), text /
 Markdown / JSON / SARIF reporters (`text/`, `markdown.rs`, `sarif.rs`),
 `explain` / `why` (`help_cmd.rs`), and `install-skill` (`skill_cmd.rs`). Depends
