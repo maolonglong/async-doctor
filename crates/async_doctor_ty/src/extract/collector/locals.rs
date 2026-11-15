@@ -322,6 +322,13 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         self.restore_local_guards(current);
     }
 
+    /// Drop only the "currently non-blocking" proofs bound to `name` — a
+    /// mode call changes blocking state, never fd/socket identity.
+    pub(super) fn drop_local_mode_guard(&mut self, name: &str) {
+        self.nonblocking_socket_vars.remove(name);
+        self.nonblocking_fd_vars.remove(name);
+    }
+
     /// Drop every local-guard proof bound to `name` (e.g. `except ... as name`).
     pub(super) fn drop_local_guard(&mut self, name: &str) {
         self.in_memory_sqlite_vars.remove(name);

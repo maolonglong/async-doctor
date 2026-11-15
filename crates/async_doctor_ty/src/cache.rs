@@ -59,7 +59,10 @@ use serde::{Deserialize, Serialize};
 /// v30: replayed suites also drop fd/socket mode-call targets; `*`/`**`
 /// unpacking of literals and `itertools.product(..., repeat=0)` no longer
 /// force generator consumption.
-pub const CACHE_SCHEMA_VERSION: u32 = 30;
+/// v31: mode-call invalidation drops only non-blocking proofs (fd identity
+/// survives); mode targets are scope- and os-receiver-limited; nested `*`
+/// elements inside container literals consume again.
+pub const CACHE_SCHEMA_VERSION: u32 = 31;
 
 /// Tool version embedded in the cache path (from this crate's Cargo.toml).
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
