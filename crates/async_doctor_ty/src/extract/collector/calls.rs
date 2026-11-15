@@ -108,11 +108,28 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             // adapters (`enumerate`, `zip`, `islice`, …) propagate the outer
             // consumption context into their argument.
             let func_q = self.external_qualname(&call.func);
-            let eager = func_q.as_deref().is_some_and(is_eager_iter_consumer);
+            // `product(gen(), repeat=0)` never advances its iterables.
+            let repeat_zero = func_q.as_deref() == Some("itertools.product")
+                && call.arguments.keywords.iter().any(|kw| {
+                    kw.arg.as_ref().is_some_and(|a| a.id.as_str() == "repeat")
+                        && matches!(
+                            &kw.value,
+                            Expr::NumberLiteral(n)
+                                if n.value.as_int().is_some_and(|i| i.as_i64() == Some(0))
+                        )
+                });
+            let eager = func_q.as_deref().is_some_and(is_eager_iter_consumer) && !repeat_zero;
             let lazy = func_q.as_deref().is_some_and(is_lazy_iter_adapter);
             let was_consuming = self.consuming_generator;
             for arg in &call.arguments.args {
-                if matches!(arg, Expr::Starred(_)) || eager {
+                // `f(*gen())` iterates the starred value eagerly — but a
+                // container literal (`f(*(gen(),))`) yields its elements, it
+                // does not consume them.
+                let starred_unpack = matches!(arg, Expr::Starred(s) if !matches!(
+                    s.value.as_ref(),
+                    Expr::Tuple(_) | Expr::List(_) | Expr::Set(_)
+                ));
+                if starred_unpack || eager {
                     self.consuming_generator = true;
                 } else if !lazy {
                     self.consuming_generator = false;
@@ -121,8 +138,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 self.consuming_generator = was_consuming;
             }
             for kw in &call.arguments.keywords {
-                // `f(**gen())` unpacks eagerly just like `*gen()`.
-                if kw.arg.is_none() || eager {
+                // `**` unpacking yields keys, never values — `f(**{'g': gen()})`
+                // does not consume the generator.
+                if eager {
                     self.consuming_generator = true;
                 } else if !lazy {
                     self.consuming_generator = false;

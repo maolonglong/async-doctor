@@ -56,7 +56,10 @@ use serde::{Deserialize, Serialize};
 /// os-flag resolution requires every resolved definition to match; fd
 /// aliasing is conservative; proofs gained inside possibly-skipped suites
 /// (loop/try bodies, else clauses) cannot escape them.
-pub const CACHE_SCHEMA_VERSION: u32 = 29;
+/// v30: replayed suites also drop fd/socket mode-call targets; `*`/`**`
+/// unpacking of literals and `itertools.product(..., repeat=0)` no longer
+/// force generator consumption.
+pub const CACHE_SCHEMA_VERSION: u32 = 30;
 
 /// Tool version embedded in the cache path (from this crate's Cargo.toml).
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");

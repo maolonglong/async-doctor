@@ -139,7 +139,10 @@ impl<'a, 'db> CallCollector<'a, 'db> {
 
     /// Bare names written anywhere in `body` lose their local-guard proofs —
     /// used when a suite is replayed from a pre-body snapshot (try handlers,
-    /// finally paths) so body writes cannot be undone.
+    /// finally paths) so body writes cannot be undone. Mode calls are not
+    /// assignments: `os.set_blocking(fd, ...)` / `x.setblocking(...)` /
+    /// `x.settimeout(...)` anywhere in the body drop the fd/receiver name too,
+    /// with any argument value, because the call may or may not have run.
     pub(super) fn invalidate_local_guard_writes_in_body(&mut self, body: &[Stmt]) {
         let mut writes = ReceiverWrites::default();
         writes.visit_body(body);
@@ -147,6 +150,11 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             if !name.contains('.') {
                 self.drop_local_guard(&name);
             }
+        }
+        let mut modes = ModeCallTargets::default();
+        modes.visit_body(body);
+        for name in modes.names {
+            self.drop_local_guard(&name);
         }
     }
 
@@ -187,6 +195,37 @@ fn receiver_is_within(receiver: &str, path: &str) -> bool {
         || receiver
             .strip_prefix(path)
             .is_some_and(|tail| tail.starts_with('.'))
+}
+
+/// fd/receiver names of fd-mode calls anywhere in a suite: `os.set_blocking`
+/// positional fd, and `.setblocking`/`.settimeout` receiver names. Purely
+/// syntactic — any argument value invalidates, since the call may have run.
+#[derive(Default)]
+struct ModeCallTargets {
+    names: HashSet<String>,
+}
+
+impl<'a> Visitor<'a> for ModeCallTargets {
+    fn visit_expr(&mut self, expr: &'a Expr) {
+        if let Expr::Call(call) = expr
+            && let Expr::Attribute(attr) = call.func.as_ref()
+        {
+            match attr.attr.as_str() {
+                "setblocking" | "settimeout" => {
+                    if let Expr::Name(n) = attr.value.as_ref() {
+                        self.names.insert(n.id.to_string());
+                    }
+                }
+                "set_blocking" => {
+                    if let Some(Expr::Name(n)) = call.arguments.args.first() {
+                        self.names.insert(n.id.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        walk_expr(self, expr);
+    }
 }
 
 #[derive(Default)]

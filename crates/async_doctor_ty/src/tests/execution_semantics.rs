@@ -196,6 +196,36 @@ async def starred_arg_consumes_in_for():
 async def starred_arg_consumes_bare():
     wrap_starred(*sync_chunks())
 
+async def starred_tuple_literal_not_consumed():
+    wrap_starred(*(sync_chunks(),))
+
+async def starred_list_literal_not_consumed():
+    wrap_starred(*[sync_chunks()])
+
+async def starred_set_literal_not_consumed():
+    wrap_starred(*{sync_chunks()})
+
+def kw_wrap(**kwargs):
+    return kwargs
+
+async def doublestar_dict_literal_not_consumed():
+    kw_wrap(**{"g": sync_chunks()})
+
+async def doublestar_mapping_not_consumed():
+    m = {"g": sync_chunks()}
+    kw_wrap(**m)
+
+async def product_repeat_zero_not_consumed():
+    for item in itertools.product(sync_chunks(), repeat=0):
+        pass
+
+async def product_repeat_zero_bare():
+    itertools.product(sync_chunks(), repeat=0)
+
+async def product_repeat_two_consumes():
+    for item in itertools.product(sync_chunks(), repeat=2):
+        pass
+
 async def sync_for_still_consumes():
     for chunk in sync_chunks():
         pass
@@ -214,6 +244,13 @@ async def list_still_consumes():
     for clean in [
         "external_iter_arg_not_consumed",
         "project_iter_arg_not_consumed",
+        "starred_tuple_literal_not_consumed",
+        "starred_list_literal_not_consumed",
+        "starred_set_literal_not_consumed",
+        "doublestar_dict_literal_not_consumed",
+        "doublestar_mapping_not_consumed",
+        "product_repeat_zero_not_consumed",
+        "product_repeat_zero_bare",
     ] {
         assert!(
             !names.contains(clean),
@@ -223,6 +260,7 @@ async def list_still_consumes():
     }
     for blocked in [
         "product_arg_consumes",
+        "product_repeat_two_consumes",
         "starred_arg_consumes_in_for",
         "starred_arg_consumes_bare",
         "adapter_enumerate_consumes",
@@ -236,6 +274,131 @@ async def list_still_consumes():
         assert!(
             names.contains(blocked),
             "{blocked} consumes the generator on the loop and must report: {names:?}"
+        );
+    }
+}
+
+#[test]
+fn body_only_proofs_do_not_escape_loops_try_or_aliases() {
+    let dir = super::helpers::temp_project(&[(
+        "leak.py",
+        r#"
+import os
+import socket
+import sqlite3
+
+async def fd_nonblocking_only_in_loop_blocks(items: list):
+    r, w = os.pipe()
+    for _ in items:
+        os.set_blocking(r, False)
+    os.read(r, 1)
+
+async def fd_nonblocking_only_in_try_blocks():
+    r, w = os.pipe()
+    try:
+        os.set_blocking(r, False)
+    except Exception:
+        pass
+    os.read(r, 1)
+
+async def fd_nonblocking_only_in_else_blocks(items: list):
+    r, w = os.pipe()
+    for _ in items:
+        pass
+    else:
+        os.set_blocking(r, False)
+    os.read(r, 1)
+
+async def fd_alias_drops_proof_blocks():
+    r, w = os.pipe2(os.O_NONBLOCK)
+    alias = r
+    os.set_blocking(alias, True)
+    os.read(r, 1)
+
+async def sock_nonblocking_only_in_loop_blocks(items: list):
+    sock = socket.socket()
+    for _ in items:
+        sock.setblocking(False)
+    sock.recv(1)
+
+async def sqlite_mem_only_in_loop_blocks(items: list):
+    conn = sqlite3.connect("app.db")
+    for _ in items:
+        conn = sqlite3.connect(":memory:")
+    conn.execute("SELECT 1")
+
+async def fd_nonblocking_before_loop_stays_clean(items: list):
+    r, w = os.pipe()
+    os.set_blocking(r, False)
+    for _ in items:
+        os.read(r, 1024)
+
+async def fd_reblocking_in_try_body_except_blocks():
+    r, w = os.pipe2(os.O_NONBLOCK)
+    try:
+        os.set_blocking(r, True)
+        x()
+    except Exception:
+        os.read(r, 1)
+
+async def fd_reblocking_in_try_body_finally_blocks():
+    r, w = os.pipe2(os.O_NONBLOCK)
+    try:
+        os.set_blocking(r, True)
+        x()
+    except Exception:
+        pass
+    finally:
+        os.read(r, 1)
+
+async def sock_reblocking_in_try_body_blocks():
+    sock = socket.socket()
+    sock.setblocking(False)
+    try:
+        sock.settimeout(1.0)
+        x()
+    except Exception:
+        sock.recv(1)
+
+async def fd_nonblocking_survives_clean_try_ok():
+    r, w = os.pipe2(os.O_NONBLOCK)
+    try:
+        x()
+    except Exception:
+        os.read(r, 1)
+"#,
+    )]);
+    let report = scan_path(&dir).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    let names: std::collections::BTreeSet<_> = report
+        .findings
+        .iter()
+        .map(|f| f.entry.name.as_str())
+        .collect();
+    assert!(
+        !names.contains("fd_nonblocking_survives_clean_try_ok"),
+        "a proof valid before the try must hold inside the handler: {:?}",
+        report.findings
+    );
+    assert!(
+        !names.contains("fd_nonblocking_before_loop_stays_clean"),
+        "proof established before the loop must apply inside it: {:?}",
+        report.findings
+    );
+    for blocked in [
+        "fd_nonblocking_only_in_loop_blocks",
+        "fd_nonblocking_only_in_try_blocks",
+        "fd_nonblocking_only_in_else_blocks",
+        "fd_alias_drops_proof_blocks",
+        "fd_reblocking_in_try_body_except_blocks",
+        "fd_reblocking_in_try_body_finally_blocks",
+        "sock_reblocking_in_try_body_blocks",
+        "sock_nonblocking_only_in_loop_blocks",
+        "sqlite_mem_only_in_loop_blocks",
+    ] {
+        assert!(
+            names.contains(blocked),
+            "{blocked}: a body-only or aliased-away proof must not survive: {names:?}"
         );
     }
 }
