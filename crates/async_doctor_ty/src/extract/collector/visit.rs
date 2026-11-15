@@ -50,6 +50,8 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 let prev_archives = self.in_memory_archive_receivers.clone();
                 let prev_sqlite = self.in_memory_sqlite_vars.clone();
                 let prev_sockets = self.nonblocking_socket_vars.clone();
+                let prev_pipe_fds = self.pipe_fd_vars.clone();
+                let prev_nonblocking_fds = self.nonblocking_fd_vars.clone();
                 let prev_contexts = self.context_locals.clone();
                 self.current_fn = fid;
                 self.current_param_names = fid
@@ -65,6 +67,8 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                     self.in_memory_archive_receivers.remove(p);
                     self.in_memory_sqlite_vars.remove(p);
                     self.nonblocking_socket_vars.remove(p);
+                    self.pipe_fd_vars.remove(p);
+                    self.nonblocking_fd_vars.remove(p);
                     self.context_locals.remove(p);
                 }
                 self.fn_stack.push(func.name.as_str().to_string());
@@ -115,6 +119,8 @@ impl<'a, 'db> Visitor<'a> for CallCollector<'a, 'db> {
                 self.in_memory_archive_receivers = prev_archives;
                 self.in_memory_sqlite_vars = prev_sqlite;
                 self.nonblocking_socket_vars = prev_sockets;
+                self.pipe_fd_vars = prev_pipe_fds;
+                self.nonblocking_fd_vars = prev_nonblocking_fds;
                 self.context_locals = prev_contexts;
             }
             Stmt::ClassDef(class) => {

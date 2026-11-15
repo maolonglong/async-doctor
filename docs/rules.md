@@ -80,6 +80,13 @@ Sync HTTP, RPC, messaging, and cloud/AI/vector SDKs (`urllib`, `http.client`,
 `subprocess.run` / `Popen.wait` / `os.system` / `os.waitpid` wait on the
 event-loop thread (`subprocess.Popen(...)` construction itself is not a finding).
 
+**Notes:**
+
+- `os.waitpid` whose options argument resolves to `os.WNOHANG` /
+  `posix.WNOHANG` (including `from os import WNOHANG` and flags inside a `|`
+  mask, positional or `options=`) polls instead of waiting and stays clean.
+  Unknown variables and bare integer literals stay findings.
+
 ## blocking-file
 
 `open`, `io.BufferedReader` / `io.FileIO`, raw fd ops (`os.read` / `write` /
@@ -119,6 +126,16 @@ archives (`zipfile` / `tarfile`), and blocking `input()` on the loop.
   prefix merge into one finding whose `sinkSites` entry and `why` locator point
   at the `open` hop while retaining both hops in `chain[]` (so `async-doctor why`
   matches either line); `SMTP(...).sendmail(...)` on one line likewise.
+- `os.read` / `os.write` stay clean only on pipe fds proven non-blocking:
+  names tuple-unpacked from `os.pipe2(..., os.O_NONBLOCK)` (flag may sit inside
+  a `|` mask or come via `from os import O_NONBLOCK`), or `os.pipe()` fds after
+  `os.set_blocking(fd, False)`. `os.set_blocking(fd, True)`, rebinding, branch
+  paths where non-blocking was not proven, `os.open` fds, and non-pipe fds all
+  keep the finding — regular files block regardless of `O_NONBLOCK`.
+- `shutil.copyfileobj` between two proven in-memory buffers
+  (`io.BytesIO` / `io.StringIO` values or locals bound to them, positional or
+  `fsrc=` / `fdst=`) performs no disk IO and stays clean; a real file or
+  unknown object on either side keeps the finding.
 
 ## blocking-lock
 
@@ -163,6 +180,10 @@ Sync SQL, document, and KV database drivers (`sqlite3`, `psycopg` / `psycopg2`,
 - `sqlite3.Connection` defaults to `check_same_thread=True` and raises
   `ProgrammingError` when used from another thread. SQLAlchemy/SQLModel sync
   `Session` instances hold non-thread-safe identity-map and transaction state.
+- `sqlite3.connect(":memory:")` / `uri=True` with `mode=memory` connections,
+  cursors derived from them, and `for row in ...` iteration over those
+  connections/cursors (`sqlite3.Cursor.__iter__`) stay clean; file-backed
+  connections still report on `connect`, `execute`, and iteration.
 - `AsyncSession.run_sync` runs sync work on a greenlet in the event-loop thread
   — it is **not** a thread offload and is not treated as one.
 - Pure helpers and handle getters do not report: `pymysql.err.*` /

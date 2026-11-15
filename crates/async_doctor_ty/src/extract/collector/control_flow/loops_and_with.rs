@@ -114,6 +114,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             );
             if !invalid
                 && !for_stmt.is_async
+                // `for row in <in-memory sqlite conn/cursor>` runs no disk IO;
+                // the dunder edge path bypasses the call-site :memory: guard.
+                && !self.expr_produces_in_memory_sqlite(&for_stmt.iter)
                 && let Some(callee) = self.resolve_dunder(&for_stmt.iter, "__iter__")
             {
                 self.push_edge(

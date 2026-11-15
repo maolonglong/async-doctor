@@ -82,9 +82,13 @@ all workers share one `Storage` per wave and drop it to refcount 0 between
 waves, with a shared read-only pass-1 function slice and pre-indexed
 `SiteRootIndex`), per-file `CallCollector` (`extract/collector/`, including
 `llm_advice.rs`, local deferred-generator consumption in `generators.rs`,
-typed asyncio callback binding in `calls/callbacks.rs`, and local concurrent
-Future completion proofs in `future_guards.rs`), and third-party follow with
-budget (`follow.rs`).
+typed asyncio callback binding in `calls/callbacks.rs`, local concurrent
+Future completion proofs in `future_guards.rs`, and proven-nonblocking stdlib
+guards in `nonblocking.rs` — `:memory:` sqlite (connections, cursors, and
+`__iter__` iteration), nonblocking sockets, `os.waitpid` `WNOHANG`,
+pipe-fd `os.read`/`os.write` after `os.pipe2(O_NONBLOCK)` or
+`os.set_blocking(fd, False)`, and memory-buffer `shutil.copyfileobj`), and
+third-party follow with budget (`follow.rs`).
 Package cache: `cache.rs` / `cache/`. Whole-scan report cache: `scan_cache.rs`.
 Site-packages helpers: `sitepkgs/`. See
 [docs/notes/2026-11-salsa-fresh-empty-rss.md](docs/notes/2026-11-salsa-fresh-empty-rss.md).

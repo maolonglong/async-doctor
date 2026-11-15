@@ -5,9 +5,13 @@
 //! - `sqlite3.connect(":memory:")` and `uri=True` with `mode=memory` (plus `.cursor()`)
 //! - `sock.setblocking(False)` / `sock.settimeout(0 | 0.0)` non-blocking socket ops
 
+use ruff_db::parsed::parsed_module;
 use ruff_python_ast::{self as ast, Expr};
+use ty_python_core::definition::DefinitionKind;
+use ty_python_semantic::{ImportAliasResolution, definitions_for_name};
 
 use super::CallCollector;
+use crate::extract::helpers::module_of_definition;
 
 impl<'a, 'db> CallCollector<'a, 'db> {
     /// True when this external call is a threading/queue/sqlite/socket sink that cannot block.
@@ -20,6 +24,15 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             return true;
         }
         if self.call_is_nonblocking_socket_op(qualname, call) {
+            return true;
+        }
+        if self.call_is_wnohang_waitpid(qualname, call) {
+            return true;
+        }
+        if self.call_is_nonblocking_fd_op(qualname, call) {
+            return true;
+        }
+        if self.call_is_in_memory_copyfileobj(qualname, call) {
             return true;
         }
         let method = qualname
@@ -113,6 +126,155 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         )
     }
 
+    /// `os.waitpid(pid, WNOHANG)` only polls — never suspends the loop.
+    /// Options may arrive positionally, as `options=`, or inside a `|` mask.
+    /// Bare integer literals stay blocking: flag values are platform-specific.
+    fn call_is_wnohang_waitpid(&mut self, qualname: &str, call: &ast::ExprCall) -> bool {
+        if !is_os_qual(qualname, "waitpid") {
+            return false;
+        }
+        let options = call.arguments.args.get(1).or_else(|| {
+            call.arguments
+                .keywords
+                .iter()
+                .find(|kw| kw.arg.as_ref().is_some_and(|a| a.as_str() == "options"))
+                .map(|kw| &kw.value)
+        });
+        options.is_some_and(|e| self.expr_contains_os_flag(e, "WNOHANG"))
+    }
+
+    /// `os.read` / `os.write` on a pipe fd already proven non-blocking.
+    /// Regular files never qualify — `O_NONBLOCK` on disk still blocks.
+    fn call_is_nonblocking_fd_op(&self, qualname: &str, call: &ast::ExprCall) -> bool {
+        if !(is_os_qual(qualname, "read") || is_os_qual(qualname, "write")) {
+            return false;
+        }
+        matches!(
+            call.arguments.args.first(),
+            Some(Expr::Name(n)) if self.nonblocking_fd_vars.contains(n.id.as_str())
+        )
+    }
+
+    /// `shutil.copyfileobj` between two in-memory buffers performs no disk IO.
+    fn call_is_in_memory_copyfileobj(&mut self, qualname: &str, call: &ast::ExprCall) -> bool {
+        if qualname != "shutil.copyfileobj" {
+            return false;
+        }
+        let arg_or_kw = |idx: usize, name: &str| {
+            call.arguments.args.get(idx).or_else(|| {
+                call.arguments
+                    .keywords
+                    .iter()
+                    .find(|kw| kw.arg.as_ref().is_some_and(|a| a.as_str() == name))
+                    .map(|kw| &kw.value)
+            })
+        };
+        let (Some(src), Some(dst)) = (arg_or_kw(0, "fsrc"), arg_or_kw(1, "fdst")) else {
+            return false;
+        };
+        self.expr_is_in_memory_buffer(src) && self.expr_is_in_memory_buffer(dst)
+    }
+
+    /// Update `nonblocking_fd_vars` for `os.set_blocking(fd, flag)`: only fds
+    /// bound by `os.pipe*` can flip to non-blocking; anything else drops proof.
+    pub(super) fn note_fd_mode_call(&mut self, call: &ast::ExprCall, func_ext_qual: Option<&str>) {
+        if !func_ext_qual.is_some_and(|q| is_os_qual(q, "set_blocking")) {
+            return;
+        }
+        let Some(Expr::Name(fd)) = call.arguments.args.first() else {
+            return;
+        };
+        let name = fd.id.as_str();
+        if call
+            .arguments
+            .args
+            .get(1)
+            .is_some_and(expr_is_falsey_blocking_flag)
+            && self.pipe_fd_vars.contains(name)
+        {
+            self.nonblocking_fd_vars.insert(name.to_string());
+        } else {
+            self.nonblocking_fd_vars.remove(name);
+        }
+    }
+
+    /// Track `r, w = os.pipe()` / `os.pipe2(flags)` tuple targets.
+    /// Returns `Some(nonblocking)` for pipe calls, `None` otherwise.
+    pub(super) fn pipe_call_kind(&mut self, value: &Expr) -> Option<bool> {
+        let Expr::Call(call) = value else {
+            return None;
+        };
+        let q = self.external_qualname(&call.func)?;
+        if is_os_qual(&q, "pipe") {
+            Some(false)
+        } else if is_os_qual(&q, "pipe2") {
+            Some(
+                call.arguments
+                    .args
+                    .first()
+                    .is_some_and(|f| self.expr_contains_os_flag(f, "O_NONBLOCK")),
+            )
+        } else {
+            None
+        }
+    }
+
+    /// `expr` resolves to `os.<flag>` / `posix.<flag>` (covering
+    /// `from os import <flag>`), or is a `|` mask with a side that does.
+    fn expr_contains_os_flag(&mut self, expr: &Expr, flag: &str) -> bool {
+        match expr {
+            Expr::BinOp(b) if matches!(b.op, ast::Operator::BitOr) => {
+                self.expr_contains_os_flag(&b.left, flag)
+                    || self.expr_contains_os_flag(&b.right, flag)
+            }
+            Expr::Name(n) => {
+                // `from os import <flag>` (incl. `as` aliases): the name's own
+                // qualname is `builtins.int`, so check each definition it
+                // binds — either the typeshed `os`/`posix` member itself or a
+                // `from os/posix import` alias site.
+                for r in definitions_for_name(
+                    self.model,
+                    n.id.as_str(),
+                    n.into(),
+                    ImportAliasResolution::PreserveAliases,
+                ) {
+                    let Some(def) = r.definition() else {
+                        continue;
+                    };
+                    let db = self.model.db();
+                    if let DefinitionKind::ImportFrom(imp) = def.kind(db) {
+                        let parsed = parsed_module(db, def.python_file(db)).load(db);
+                        let node = imp.import(&parsed);
+                        let alias = imp.alias(&parsed);
+                        if matches!(
+                            node.module.as_ref().map(|m| m.as_str()),
+                            Some("os" | "posix")
+                        ) && alias.name.as_str() == flag
+                        {
+                            return true;
+                        }
+                        continue;
+                    }
+                    // Typeshed `os`/`posix` member (`WNOHANG: int`, …): the
+                    // bound use-site name is the imported symbol itself.
+                    if matches!(
+                        module_of_definition(self.model, def).as_deref(),
+                        Some("os" | "posix")
+                    ) && n.id.as_str() == flag
+                    {
+                        return true;
+                    }
+                }
+                self.external_qualname(expr)
+                    .is_some_and(|q| q == format!("os.{flag}") || q == format!("posix.{flag}"))
+            }
+            Expr::Attribute(_) => self
+                .external_qualname(expr)
+                .is_some_and(|q| q == format!("os.{flag}") || q == format!("posix.{flag}")),
+            _ => false,
+        }
+    }
+
     pub(super) fn note_socket_binding(&mut self, name: &str, value: &Expr) {
         if let Expr::Name(src) = value
             && self.nonblocking_socket_vars.contains(src.id.as_str())
@@ -120,6 +282,25 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             self.nonblocking_socket_vars.insert(name.to_string());
         } else {
             self.nonblocking_socket_vars.remove(name);
+        }
+    }
+
+    pub(super) fn note_fd_binding(&mut self, name: &str, value: &Expr) {
+        if let Expr::Name(src) = value {
+            let src = src.id.as_str();
+            if self.pipe_fd_vars.contains(src) {
+                self.pipe_fd_vars.insert(name.to_string());
+            } else {
+                self.pipe_fd_vars.remove(name);
+            }
+            if self.nonblocking_fd_vars.contains(src) {
+                self.nonblocking_fd_vars.insert(name.to_string());
+            } else {
+                self.nonblocking_fd_vars.remove(name);
+            }
+        } else {
+            self.pipe_fd_vars.remove(name);
+            self.nonblocking_fd_vars.remove(name);
         }
     }
 
@@ -131,7 +312,7 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
     }
 
-    fn expr_produces_in_memory_sqlite(&mut self, expr: &Expr) -> bool {
+    pub(super) fn expr_produces_in_memory_sqlite(&mut self, expr: &Expr) -> bool {
         match expr {
             Expr::Name(n) => self.in_memory_sqlite_vars.contains(n.id.as_str()),
             Expr::Call(call) => {
@@ -196,6 +377,12 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             _ => false,
         }
     }
+}
+
+/// `os` functions resolve to `posix.*` when imported via `from os import f`
+/// on Unix; accept both spellings.
+fn is_os_qual(qualname: &str, name: &str) -> bool {
+    qualname == format!("os.{name}") || qualname == format!("posix.{name}")
 }
 
 fn is_sqlite_connect_call(call: &ast::ExprCall, ext_qual: Option<&str>) -> bool {

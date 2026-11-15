@@ -275,9 +275,17 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             self.in_memory_sqlite_vars.clone(),
             self.nonblocking_socket_vars.clone(),
             self.in_memory_archive_receivers.clone(),
+            self.pipe_fd_vars.clone(),
+            self.nonblocking_fd_vars.clone(),
         );
-        let mut live_fallthrough_guards: Vec<(HashSet<String>, HashSet<String>, HashSet<String>)> =
-            Vec::new();
+        #[allow(clippy::type_complexity)]
+        let mut live_fallthrough_guards: Vec<(
+            HashSet<String>,
+            HashSet<String>,
+            HashSet<String>,
+            HashSet<String>,
+            HashSet<String>,
+        )> = Vec::new();
         let mut live_future_proofs = Vec::new();
         let mut has_else = false;
 
@@ -359,6 +367,8 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                 self.in_memory_sqlite_vars.clone(),
                 self.nonblocking_socket_vars.clone(),
                 self.in_memory_archive_receivers.clone(),
+                self.pipe_fd_vars.clone(),
+                self.nonblocking_fd_vars.clone(),
             ));
         }
 
@@ -369,6 +379,8 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             self.nonblocking_socket_vars.clone_from(&pre_local_guards.1);
             self.in_memory_archive_receivers
                 .clone_from(&pre_local_guards.2);
+            self.pipe_fd_vars.clone_from(&pre_local_guards.3);
+            self.nonblocking_fd_vars.clone_from(&pre_local_guards.4);
             let is_else = clause.test.is_none();
             if is_else {
                 has_else = true;
@@ -488,6 +500,8 @@ impl<'a, 'db> CallCollector<'a, 'db> {
                     self.in_memory_sqlite_vars.clone(),
                     self.nonblocking_socket_vars.clone(),
                     self.in_memory_archive_receivers.clone(),
+                    self.pipe_fd_vars.clone(),
+                    self.nonblocking_fd_vars.clone(),
                 ));
             }
         }
@@ -504,19 +518,27 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         } else {
             after_test_proofs
         };
-        if let Some((mut sql, mut sock, mut arch)) = live_fallthrough_guards.pop() {
-            for (s, k, a) in &live_fallthrough_guards {
+        if let Some((mut sql, mut sock, mut arch, mut pipe, mut nbfd)) =
+            live_fallthrough_guards.pop()
+        {
+            for (s, k, a, p, n) in &live_fallthrough_guards {
                 sql.retain(|v| s.contains(v));
                 sock.retain(|v| k.contains(v));
                 arch.retain(|v| a.contains(v));
+                pipe.retain(|v| p.contains(v));
+                nbfd.retain(|v| n.contains(v));
             }
             self.in_memory_sqlite_vars = sql;
             self.nonblocking_socket_vars = sock;
             self.in_memory_archive_receivers = arch;
+            self.pipe_fd_vars = pipe;
+            self.nonblocking_fd_vars = nbfd;
         } else {
             self.in_memory_sqlite_vars = pre_local_guards.0;
             self.nonblocking_socket_vars = pre_local_guards.1;
             self.in_memory_archive_receivers = pre_local_guards.2;
+            self.pipe_fd_vars = pre_local_guards.3;
+            self.nonblocking_fd_vars = pre_local_guards.4;
         }
     }
 

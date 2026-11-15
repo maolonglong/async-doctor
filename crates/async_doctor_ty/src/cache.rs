@@ -48,7 +48,11 @@ use serde::{Deserialize, Serialize};
 /// completion proofs that do not survive explicit receiver replacement.
 /// v27: Future exception waits share typed completion guards; literal
 /// nonpositive-timeout result/exception polls do not produce waiting edges.
-pub const CACHE_SCHEMA_VERSION: u32 = 27;
+/// v28: proven-nonblocking stdlib exemptions (`os.waitpid` WNOHANG, pipe-fd
+/// `os.read`/`os.write`, memory-buffer `shutil.copyfileobj`, in-memory SQLite
+/// cursor `__iter__`) and argument-position generator calls no longer produce
+/// loop-consumption edges.
+pub const CACHE_SCHEMA_VERSION: u32 = 28;
 
 /// Tool version embedded in the cache path (from this crate's Cargo.toml).
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");

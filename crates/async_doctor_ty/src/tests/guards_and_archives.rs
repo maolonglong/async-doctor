@@ -292,6 +292,23 @@ async def conditional_mem_only_blocks(flag: bool):
     if flag:
         conn = sqlite3.connect(":memory:")
     conn.execute("SELECT 1")
+
+async def mem_cursor_iter_ok():
+    conn = sqlite3.connect(":memory:")
+    cur = conn.execute("SELECT 1")
+    for row in cur:
+        print(row)
+
+async def mem_inline_execute_iter_ok():
+    conn = sqlite3.connect(":memory:")
+    for row in conn.execute("SELECT 1"):
+        print(row)
+
+async def disk_cursor_iter_blocks():
+    conn = sqlite3.connect("app.db")
+    cur = conn.execute("SELECT 1")
+    for row in cur:
+        print(row)
 "#,
     )]);
     let report = scan_path(&dir).unwrap();
@@ -302,7 +319,13 @@ async def conditional_mem_only_blocks(flag: bool):
         .iter()
         .map(|f| f.entry.name.as_str())
         .collect();
-    for clean in ["mem_basic_ok", "mem_uri_ok", "mem_with_inline_ok"] {
+    for clean in [
+        "mem_basic_ok",
+        "mem_uri_ok",
+        "mem_with_inline_ok",
+        "mem_cursor_iter_ok",
+        "mem_inline_execute_iter_ok",
+    ] {
         assert!(
             !names.contains(clean),
             "{clean} uses in-memory SQLite and must not emit blocking-db: {:?}",
@@ -314,12 +337,25 @@ async def conditional_mem_only_blocks(flag: bool):
         "uri_false_mode_memory_blocks",
         "reassigned_to_disk_blocks",
         "conditional_mem_only_blocks",
+        "disk_cursor_iter_blocks",
     ] {
         assert!(
             names.contains(blocked),
             "{blocked} touches disk SQLite and must report blocking-db: {names:?}"
         );
     }
+    // On a disk DB, cursor iteration is a third blocking-db finding
+    // (`sqlite3.Cursor.__iter__`) alongside `connect` and `execute`.
+    let disk_iter_findings = report
+        .findings
+        .iter()
+        .filter(|f| f.entry.name == "disk_cursor_iter_blocks" && f.rule == "blocking-db")
+        .count();
+    assert_eq!(
+        disk_iter_findings, 3,
+        "disk cursor iteration must stay a separate blocking-db finding: {:?}",
+        report.findings
+    );
 }
 
 #[test]
@@ -496,4 +532,133 @@ async def buffered_reader_from_open_blocks():
             .any(|f| f.chain.iter().any(|s| s.text.contains("Image.open"))),
         "Image.open on BufferedReader from open('rb') must not be skipped as BytesIO: {open_findings:?}"
     );
+}
+
+#[test]
+fn waitpid_wnohang_nonblocking_pipe_fds_and_copyfileobj_stay_clean() {
+    let dir = temp_project(&[(
+        "os_ops.py",
+        r#"
+import io
+import os
+import shutil
+
+async def waitpid_wnohang_ok():
+    os.waitpid(-1, os.WNOHANG)
+
+async def waitpid_wnohang_bitor_ok():
+    os.waitpid(-1, os.WNOHANG | os.O_NDELAY)
+
+async def waitpid_wnohang_kw_ok():
+    os.waitpid(-1, options=os.WNOHANG)
+
+async def waitpid_from_import_ok():
+    from os import WNOHANG
+    os.waitpid(-1, WNOHANG)
+
+async def waitpid_zero_blocks(pid: int):
+    os.waitpid(pid, 0)
+
+async def waitpid_default_blocks(pid: int):
+    os.waitpid(pid)
+
+async def waitpid_unknown_option_blocks(pid: int, options):
+    os.waitpid(pid, options)
+
+async def waitpid_literal_option_blocks(pid: int):
+    os.waitpid(pid, 1)
+
+async def pipe_set_nonblocking_read_ok():
+    r, w = os.pipe()
+    os.set_blocking(r, False)
+    os.read(r, 1024)
+
+async def pipe2_nonblock_write_ok():
+    r, w = os.pipe2(os.O_NONBLOCK)
+    os.write(w, b"x")
+
+async def blocking_pipe_read_blocks():
+    r, w = os.pipe()
+    os.read(r, 1024)
+
+async def reblocked_pipe_read_blocks():
+    r, w = os.pipe()
+    os.set_blocking(r, False)
+    os.set_blocking(r, True)
+    os.read(r, 1024)
+
+async def open_fd_set_nonblocking_blocks():
+    fd = os.open("f.bin", os.O_RDONLY | os.O_NONBLOCK)
+    os.set_blocking(fd, False)
+    os.read(fd, 1024)
+
+async def rebound_pipe_read_blocks():
+    r, w = os.pipe()
+    os.set_blocking(r, False)
+    r = 9
+    os.read(r, 1024)
+
+async def branch_only_nonblocking_pipe_blocks(flag: bool):
+    r, w = os.pipe()
+    if flag:
+        os.set_blocking(r, False)
+    os.read(r, 1024)
+
+async def copyfileobj_all_memory_ok():
+    src = io.BytesIO(b"abc")
+    dst = io.BytesIO()
+    shutil.copyfileobj(src, dst)
+
+async def copyfileobj_kwargs_memory_ok():
+    shutil.copyfileobj(fsrc=io.BytesIO(b"abc"), fdst=io.BytesIO())
+
+async def copyfileobj_disk_src_blocks(fsrc):
+    shutil.copyfileobj(fsrc, io.BytesIO())
+
+async def copyfileobj_disk_dst_blocks(fdst):
+    shutil.copyfileobj(io.BytesIO(b"x"), fdst)
+"#,
+    )]);
+    let report = scan_path(&dir).unwrap();
+    let _ = fs::remove_dir_all(&dir);
+
+    let names: std::collections::BTreeSet<_> = report
+        .findings
+        .iter()
+        .map(|f| f.entry.name.as_str())
+        .collect();
+    for clean in [
+        "waitpid_wnohang_ok",
+        "waitpid_wnohang_bitor_ok",
+        "waitpid_wnohang_kw_ok",
+        "waitpid_from_import_ok",
+        "pipe_set_nonblocking_read_ok",
+        "pipe2_nonblock_write_ok",
+        "copyfileobj_all_memory_ok",
+        "copyfileobj_kwargs_memory_ok",
+    ] {
+        assert!(
+            !names.contains(clean),
+            "{clean} is proven non-blocking and must stay clean: {:?}",
+            report.findings
+        );
+    }
+    for blocked in [
+        "waitpid_zero_blocks",
+        "waitpid_default_blocks",
+        "waitpid_unknown_option_blocks",
+        "waitpid_literal_option_blocks",
+        "blocking_pipe_read_blocks",
+        "reblocked_pipe_read_blocks",
+        "open_fd_set_nonblocking_blocks",
+        "rebound_pipe_read_blocks",
+        "branch_only_nonblocking_pipe_blocks",
+        "copyfileobj_disk_src_blocks",
+        "copyfileobj_disk_dst_blocks",
+    ] {
+        assert!(
+            names.contains(blocked),
+            "{blocked} can block and must report a finding: {names:?}"
+        );
+    }
 }
