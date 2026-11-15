@@ -205,6 +205,9 @@ async def starred_list_literal_not_consumed():
 async def starred_set_literal_not_consumed():
     wrap_starred(*{sync_chunks()})
 
+async def starred_nested_starred_consumes():
+    wrap_starred(*[*sync_chunks()])
+
 def kw_wrap(**kwargs):
     return kwargs
 
@@ -261,6 +264,7 @@ async def list_still_consumes():
     for blocked in [
         "product_arg_consumes",
         "product_repeat_two_consumes",
+        "starred_nested_starred_consumes",
         "starred_arg_consumes_in_for",
         "starred_arg_consumes_bare",
         "adapter_enumerate_consumes",
@@ -366,6 +370,29 @@ async def fd_nonblocking_survives_clean_try_ok():
         x()
     except Exception:
         os.read(r, 1)
+
+async def fd_setblocking_read_in_loop_ok(items: list):
+    r, w = os.pipe()
+    for _ in items:
+        os.set_blocking(r, False)
+        os.read(r, 1)
+
+async def fd_mode_call_in_nested_def_ok():
+    r, w = os.pipe2(os.O_NONBLOCK)
+    try:
+        def helper():
+            os.set_blocking(r, True)
+        x()
+    except Exception:
+        os.read(r, 1)
+
+async def fd_other_obj_set_blocking_ok():
+    r, w = os.pipe2(os.O_NONBLOCK)
+    try:
+        other.set_blocking(r, True)
+        x()
+    except Exception:
+        os.read(r, 1)
 "#,
     )]);
     let report = scan_path(&dir).unwrap();
@@ -375,6 +402,16 @@ async def fd_nonblocking_survives_clean_try_ok():
         .iter()
         .map(|f| f.entry.name.as_str())
         .collect();
+    for clean in [
+        "fd_setblocking_read_in_loop_ok",
+        "fd_mode_call_in_nested_def_ok",
+        "fd_other_obj_set_blocking_ok",
+    ] {
+        assert!(
+            !names.contains(clean),
+            "{clean}: the proof must not be undone: {names:?}"
+        );
+    }
     assert!(
         !names.contains("fd_nonblocking_survives_clean_try_ok"),
         "a proof valid before the try must hold inside the handler: {:?}",

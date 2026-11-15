@@ -124,18 +124,32 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             for arg in &call.arguments.args {
                 // `f(*gen())` iterates the starred value eagerly — but a
                 // container literal (`f(*(gen(),))`) yields its elements, it
-                // does not consume them.
-                let starred_unpack = matches!(arg, Expr::Starred(s) if !matches!(
-                    s.value.as_ref(),
-                    Expr::Tuple(_) | Expr::List(_) | Expr::Set(_)
-                ));
-                if starred_unpack || eager {
-                    self.consuming_generator = true;
-                } else if !lazy {
-                    self.consuming_generator = false;
+                // does not consume them. Nested `*gen()` elements still
+                // consume recursively.
+                match arg {
+                    Expr::Starred(s) if is_container_literal(&s.value) => {
+                        for elt in container_elements(&s.value) {
+                            if matches!(elt, Expr::Starred(e) if !is_container_literal(&e.value))
+                                || eager
+                            {
+                                self.consuming_generator = true;
+                            } else if !lazy {
+                                self.consuming_generator = false;
+                            }
+                            self.visit_expr(elt);
+                            self.consuming_generator = was_consuming;
+                        }
+                    }
+                    _ => {
+                        if matches!(arg, Expr::Starred(_)) || eager {
+                            self.consuming_generator = true;
+                        } else if !lazy {
+                            self.consuming_generator = false;
+                        }
+                        self.visit_expr(arg);
+                        self.consuming_generator = was_consuming;
+                    }
                 }
-                self.visit_expr(arg);
-                self.consuming_generator = was_consuming;
             }
             for kw in &call.arguments.keywords {
                 // `**` unpacking yields keys, never values — `f(**{'g': gen()})`
@@ -571,6 +585,19 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         }
         self.clear_pending_call_args();
         Some(None)
+    }
+}
+
+fn is_container_literal(expr: &Expr) -> bool {
+    matches!(expr, Expr::Tuple(_) | Expr::List(_) | Expr::Set(_))
+}
+
+fn container_elements(expr: &Expr) -> &[Expr] {
+    match expr {
+        Expr::Tuple(t) => &t.elts,
+        Expr::List(l) => &l.elts,
+        Expr::Set(s) => &s.elts,
+        _ => &[],
     }
 }
 

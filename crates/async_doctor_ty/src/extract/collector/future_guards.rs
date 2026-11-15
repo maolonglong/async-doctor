@@ -154,7 +154,9 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         let mut modes = ModeCallTargets::default();
         modes.visit_body(body);
         for name in modes.names {
-            self.drop_local_guard(&name);
+            // A mode call changes blocking state, never the identity of the
+            // fd/socket — only the non-blocking proofs are dropped.
+            self.drop_local_mode_guard(&name);
         }
     }
 
@@ -206,19 +208,45 @@ struct ModeCallTargets {
 }
 
 impl<'a> Visitor<'a> for ModeCallTargets {
+    fn visit_stmt(&mut self, stmt: &'a Stmt) {
+        // Nested defs/classes are deferred scopes — a mode call inside one
+        // has not run (decorators/defaults are ignored, same as
+        // ReceiverWrites' write collection).
+        if matches!(stmt, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
+            return;
+        }
+        walk_stmt(self, stmt);
+    }
+
     fn visit_expr(&mut self, expr: &'a Expr) {
-        if let Expr::Call(call) = expr
-            && let Expr::Attribute(attr) = call.func.as_ref()
-        {
-            match attr.attr.as_str() {
-                "setblocking" | "settimeout" => {
-                    if let Expr::Name(n) = attr.value.as_ref() {
-                        self.names.insert(n.id.to_string());
+        // A lambda's body is deferred; only its defaults execute now.
+        if let Expr::Lambda(l) = expr {
+            if let Some(parameters) = &l.parameters {
+                self.visit_parameters(parameters);
+            }
+            return;
+        }
+        if let Expr::Call(call) = expr {
+            match call.func.as_ref() {
+                Expr::Attribute(attr) => match attr.attr.as_str() {
+                    "setblocking" | "settimeout" => {
+                        if let Expr::Name(n) = attr.value.as_ref() {
+                            self.names.insert(n.id.to_string());
+                        }
                     }
-                }
-                "set_blocking" => {
-                    if let Some(Expr::Name(n)) = call.arguments.args.first() {
-                        self.names.insert(n.id.to_string());
+                    // Only `os.set_blocking` / `posix.set_blocking` —
+                    // `other.set_blocking` is not the fd mode call.
+                    "set_blocking" if matches!(attr.value.as_ref(), Expr::Name(n) if matches!(n.id.as_str(), "os" | "posix")) => {
+                        if let Some(Expr::Name(fd)) = call.arguments.args.first() {
+                            self.names.insert(fd.id.to_string());
+                        }
+                    }
+                    _ => {}
+                },
+                // `from os import set_blocking` style: bare-name call.
+                Expr::Name(n) if n.id.as_str() == "set_blocking" => {
+                    if let Some(Expr::Name(fd)) = call.arguments.args.first() {
+                        self.names.insert(fd.id.to_string());
                     }
                 }
                 _ => {}
