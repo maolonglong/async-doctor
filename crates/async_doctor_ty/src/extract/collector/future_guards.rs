@@ -209,10 +209,14 @@ struct ModeCallTargets {
 
 impl<'a> Visitor<'a> for ModeCallTargets {
     fn visit_stmt(&mut self, stmt: &'a Stmt) {
-        // Nested defs/classes are deferred scopes — a mode call inside one
-        // has not run (decorators/defaults are ignored, same as
-        // ReceiverWrites' write collection).
-        if matches!(stmt, Stmt::FunctionDef(_) | Stmt::ClassDef(_)) {
+        // A nested function body is deferred — only its decorators and
+        // parameter defaults execute now. A class body, like its decorators
+        // and bases, executes at definition time, so it is walked.
+        if let Stmt::FunctionDef(f) = stmt {
+            for decorator in &f.decorator_list {
+                self.visit_expr(&decorator.expression);
+            }
+            self.visit_parameters(&f.parameters);
             return;
         }
         walk_stmt(self, stmt);

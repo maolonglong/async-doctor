@@ -386,6 +386,15 @@ async def fd_mode_call_in_nested_def_ok():
     except Exception:
         os.read(r, 1)
 
+async def fd_mode_call_in_class_body_blocks():
+    r, w = os.pipe2(os.O_NONBLOCK)
+    try:
+        class C:
+            os.set_blocking(r, True)
+        x()
+    except Exception:
+        os.read(r, 1)
+
 async def fd_other_obj_set_blocking_ok():
     r, w = os.pipe2(os.O_NONBLOCK)
     try:
@@ -427,6 +436,7 @@ async def fd_other_obj_set_blocking_ok():
         "fd_nonblocking_only_in_try_blocks",
         "fd_nonblocking_only_in_else_blocks",
         "fd_alias_drops_proof_blocks",
+        "fd_mode_call_in_class_body_blocks",
         "fd_reblocking_in_try_body_except_blocks",
         "fd_reblocking_in_try_body_finally_blocks",
         "sock_reblocking_in_try_body_blocks",
