@@ -17,7 +17,7 @@ class AgentEvaluationTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
         self.project = self.root / "project"
         (self.project / "tests").mkdir(parents=True)
         self.python = Path(sys.executable)
@@ -35,11 +35,12 @@ class AgentEvaluationTests(unittest.TestCase):
         (self.project / "PROJECTS.md").write_text("Unrelated private project inventory\n")
         self.binary = executable(
             self.root / "scanner",
-            "import json, sys\nfrom pathlib import Path\n"
+            "import json, subprocess, sys\nfrom pathlib import Path\n"
             f"data = json.loads({json.dumps(report())!r})\n"
-            "python = Path(sys.argv[sys.argv.index('--python') + 1])\n"
-            "prefix = python.parent.parent if python.parent.name in {'bin', 'Scripts'} else python.parent\n"
-            "data['environment']['prefix'] = str(prefix)\n"
+            "python = sys.argv[sys.argv.index('--python') + 1]\n"
+            "out = subprocess.run([python, '-c', 'import sys; print(sys.prefix)'],\n"
+            "                    capture_output=True, text=True, check=True)\n"
+            "data['environment']['prefix'] = out.stdout.strip()\n"
             "data['fileCount'] = len(list(Path.cwd().rglob('*.py')))\n"
             "print(json.dumps(data))\n",
         )
