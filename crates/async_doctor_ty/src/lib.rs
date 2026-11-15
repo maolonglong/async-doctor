@@ -11,6 +11,7 @@ mod scan;
 mod scan_cache;
 mod search_paths;
 mod sitepkgs;
+pub mod source_lines;
 mod timing;
 mod twin_resolve;
 

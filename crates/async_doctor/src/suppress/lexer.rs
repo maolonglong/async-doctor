@@ -1,11 +1,15 @@
-//! Whole-file Python lexical scanner and pragma parser for inline suppressions.
+//! Pragma parser for inline suppressions over ruff-token line facts.
 //!
-//! Tracks single- and triple-quoted string literals across lines, bracket
-//! nesting, logical statement starts, `@decorator` spans, stacked `#` pragmas
-//! (`# type: ignore[...]`, `# noqa: ...`), and comma-separated rule lists
+//! Comment detection comes from `async_doctor_ty::source_lines` (ruff tokens),
+//! so `#` inside string literals — including PEP 701 nested same-quote
+//! f-strings — is never a comment. This module keeps bracket/logical-statement
+//! metadata, `@decorator` spans, stacked `#` pragmas (`# type: ignore[...]`,
+//! `# noqa: ...`), and comma-separated rule lists
 //! (`# async-doctor: ignore[rule-a, rule-b]: <reason>`).
 
 use std::collections::HashSet;
+
+use async_doctor_ty::source_lines::{LineFacts, scan_line_facts};
 
 use crate::paths::normalize_path;
 
@@ -17,25 +21,8 @@ pub(super) struct ParseResult {
     pub missing_reason: Vec<MissingReasonIgnore>,
 }
 
-#[derive(Debug, Default, Clone)]
-struct LineScanInfo {
-    has_code_before_comment: bool,
-    is_decorator_line: bool,
-    comment_range: Option<(usize, usize)>,
-    depth_at_comment: usize,
-    stmt_start_at_comment: Option<u32>,
-    closed_open_lines: Vec<u32>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LexState {
-    Code,
-    SingleString { quote: u8 },
-    TripleString { quote: u8 },
-}
-
 pub(super) fn parse_file(file: &str, source: &str) -> ParseResult {
-    let lines = scan_python_lines(source);
+    let lines = scan_line_facts(source);
     let norm_file = normalize_path(file);
     let mut out = ParseResult::default();
 
@@ -88,7 +75,7 @@ pub(super) fn parse_file(file: &str, source: &str) -> ParseResult {
     out
 }
 
-fn compute_covered_lines(info: &LineScanInfo, line_no: u32) -> Vec<u32> {
+fn compute_covered_lines(info: &LineFacts, line_no: u32) -> Vec<u32> {
     let mut covered_lines = Vec::new();
     if info.has_code_before_comment {
         for &open_line in &info.closed_open_lines {
@@ -173,7 +160,7 @@ fn starts_with_known_pragma(s: &str) -> bool {
 /// If standalone comment at `comment_line` is immediately followed by one or
 /// more `@decorator` lines (including multi-line `@dec(...)` spans), return the
 /// line number of the `def` / `async def` immediately after the decorator block.
-fn find_decorated_target_line(lines: &[LineScanInfo], comment_line: usize) -> Option<u32> {
+fn find_decorated_target_line(lines: &[LineFacts], comment_line: usize) -> Option<u32> {
     let mut cursor = comment_line + 1;
     let mut saw_decorator = false;
     while cursor < lines.len() {
@@ -195,211 +182,6 @@ fn find_decorated_target_line(lines: &[LineScanInfo], comment_line: usize) -> Op
     } else {
         None
     }
-}
-
-/// Single-pass whole-file Python lexer tracking string literals across lines,
-/// bracket nesting, logical statement starts, and `@decorator` spans.
-///
-/// Returned Vec is 1-indexed (`lines[1]` is line 1).
-fn scan_python_lines(source: &str) -> Vec<LineScanInfo> {
-    let bytes = source.as_bytes();
-    let total_lines = bytes.iter().filter(|&&b| b == b'\n').count() + 2;
-    let mut lines = vec![LineScanInfo::default(); total_lines];
-
-    let mut state = LexState::Code;
-    let mut line_no: usize = 1;
-    let mut first_token_on_line = true;
-    let mut bracket_stack: Vec<(u8, u32)> = Vec::new();
-    let mut current_stmt_start: Option<u32> = None;
-    let mut in_decorator_stmt = false;
-    let mut line_continuation = false;
-
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-        match state {
-            LexState::SingleString { quote } => {
-                if b == b'\\' {
-                    if i + 1 < bytes.len() {
-                        if bytes[i + 1] == b'\n' {
-                            line_no += 1;
-                            first_token_on_line = false;
-                        }
-                        i += 2;
-                    } else {
-                        i += 1;
-                    }
-                    continue;
-                }
-                if b == quote {
-                    state = LexState::Code;
-                    i += 1;
-                    continue;
-                }
-                if b == b'\n' {
-                    state = LexState::Code;
-                    line_no += 1;
-                    first_token_on_line = true;
-                    if bracket_stack.is_empty() {
-                        current_stmt_start = None;
-                        in_decorator_stmt = false;
-                    }
-                    i += 1;
-                    continue;
-                }
-                i += 1;
-            }
-            LexState::TripleString { quote } => {
-                if b == b'\\' {
-                    if i + 1 < bytes.len() {
-                        if bytes[i + 1] == b'\n' {
-                            line_no += 1;
-                            first_token_on_line = false;
-                        }
-                        i += 2;
-                    } else {
-                        i += 1;
-                    }
-                    continue;
-                }
-                if matches_triple(bytes, i, quote) {
-                    state = LexState::Code;
-                    i += 3;
-                    continue;
-                }
-                if b == b'\n' {
-                    line_no += 1;
-                    first_token_on_line = false;
-                    i += 1;
-                    continue;
-                }
-                i += 1;
-            }
-            LexState::Code => {
-                if b == b'\n' {
-                    if !line_continuation && bracket_stack.is_empty() {
-                        current_stmt_start = None;
-                        in_decorator_stmt = false;
-                    }
-                    line_continuation = false;
-                    line_no += 1;
-                    first_token_on_line = true;
-                    if in_decorator_stmt {
-                        lines[line_no].is_decorator_line = true;
-                    }
-                    i += 1;
-                    continue;
-                }
-                if b == b' ' || b == b'\t' || b == b'\r' || b == 0x0c {
-                    i += 1;
-                    continue;
-                }
-                if b == b'\\' {
-                    line_continuation = true;
-                    i += 1;
-                    continue;
-                }
-                if b == b'#' {
-                    let start = i + 1;
-                    let mut end = start;
-                    while end < bytes.len() && bytes[end] != b'\n' {
-                        end += 1;
-                    }
-                    let trimmed_end = if end > start && bytes[end - 1] == b'\r' {
-                        end - 1
-                    } else {
-                        end
-                    };
-                    let info = &mut lines[line_no];
-                    info.comment_range = Some((start, trimmed_end));
-                    info.depth_at_comment = bracket_stack.len();
-                    info.stmt_start_at_comment = current_stmt_start;
-                    i = end;
-                    continue;
-                }
-
-                line_continuation = false;
-                lines[line_no].has_code_before_comment = true;
-                if current_stmt_start.is_none() {
-                    current_stmt_start = Some(line_no as u32);
-                }
-                if first_token_on_line {
-                    first_token_on_line = false;
-                    if b == b'@' && bracket_stack.is_empty() {
-                        in_decorator_stmt = true;
-                        lines[line_no].is_decorator_line = true;
-                    } else if in_decorator_stmt {
-                        lines[line_no].is_decorator_line = true;
-                    }
-                }
-
-                if let Some((quote_pos, quote, is_triple)) = string_start(bytes, i) {
-                    state = if is_triple {
-                        i = quote_pos + 3;
-                        LexState::TripleString { quote }
-                    } else {
-                        i = quote_pos + 1;
-                        LexState::SingleString { quote }
-                    };
-                    continue;
-                }
-
-                match b {
-                    b'(' | b'[' | b'{' => {
-                        bracket_stack.push((b, line_no as u32));
-                    }
-                    b')' | b']' | b'}' => {
-                        let expected = match b {
-                            b')' => b'(',
-                            b']' => b'[',
-                            _ => b'{',
-                        };
-                        if let Some(pos) = bracket_stack
-                            .iter()
-                            .rposition(|(open, _)| *open == expected)
-                        {
-                            let (_, open_line) = bracket_stack[pos];
-                            bracket_stack.truncate(pos);
-                            lines[line_no].closed_open_lines.push(open_line);
-                        }
-                    }
-                    b';' if bracket_stack.is_empty() => {
-                        current_stmt_start = None;
-                        in_decorator_stmt = false;
-                    }
-                    _ => {}
-                }
-                i += 1;
-            }
-        }
-    }
-
-    lines
-}
-
-fn matches_triple(bytes: &[u8], i: usize, quote: u8) -> bool {
-    i + 3 <= bytes.len() && bytes[i] == quote && bytes[i + 1] == quote && bytes[i + 2] == quote
-}
-
-fn string_start(bytes: &[u8], i: usize) -> Option<(usize, u8, bool)> {
-    let mut j = i;
-    while j < bytes.len()
-        && matches!(
-            bytes[j],
-            b'r' | b'R' | b'f' | b'F' | b'b' | b'B' | b'u' | b'U'
-        )
-    {
-        j += 1;
-    }
-    if j < bytes.len() && (bytes[j] == b'\'' || bytes[j] == b'"') {
-        if j > i && i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_') {
-            return None;
-        }
-        let q = bytes[j];
-        let triple = matches_triple(bytes, j, q);
-        return Some((j, q, triple));
-    }
-    None
 }
 
 enum IgnoreParse {
@@ -507,6 +289,62 @@ mod tests {
         assert!(!p.suppressions[0].matches_line(2));
         assert!(p.suppressions[1].matches_line(3));
         assert!(p.suppressions[1].matches_line(4));
+    }
+
+    #[test]
+    fn nested_same_quote_fstring_hash_is_not_a_comment() {
+        // PEP 701: `{"..."}` nested inside `f"..."` is a string literal — the
+        // `#` inside it must not suppress anything or register a suppression.
+        let src =
+            "x = f\"{'#'} {\"# async-doctor: ignore[blocking-sleep]: fake\"}\"\ntime.sleep(1)\n";
+        let p = parse_file("a.py", src);
+        assert!(p.suppressions.is_empty(), "{p:?}");
+        assert!(p.missing_reason.is_empty(), "{p:?}");
+    }
+
+    #[test]
+    fn triple_fstring_replacement_field_hash_is_not_a_comment() {
+        let src =
+            "x = f\"\"\"{\"# async-doctor: ignore[blocking-sleep]: fake\"}\"\"\"\ntime.sleep(1)\n";
+        let p = parse_file("a.py", src);
+        assert!(p.suppressions.is_empty(), "{p:?}");
+    }
+
+    #[test]
+    fn tstring_and_format_spec_hash_are_not_comments() {
+        // `#` inside a format spec / nested replacement field is string text.
+        for src in [
+            "x = f\"{1:#x}\"\ntime.sleep(1)\n",
+            "x = t\"{v!r:>{'#'}}\"\ntime.sleep(1)\n",
+            "x = f\"{v:{'#'}}\"\ntime.sleep(1)\n",
+        ] {
+            let p = parse_file("a.py", src);
+            assert!(p.suppressions.is_empty(), "{src}: {p:?}");
+        }
+    }
+
+    #[test]
+    fn trailing_comment_after_nested_fstring_still_suppresses() {
+        let src = "x = f\"{'#'} {\"nested\"}\"; time.sleep(1)  # async-doctor: ignore[blocking-sleep]: real\n";
+        let p = parse_file("a.py", src);
+        assert_eq!(p.suppressions.len(), 1, "{p:?}");
+        assert!(!p.suppressions[0].standalone);
+        assert!(p.suppressions[0].matches_line(1));
+        assert_eq!(p.suppressions[0].reason, "real");
+    }
+
+    #[test]
+    fn comment_on_triple_string_tail_is_trailing_not_standalone() {
+        // `abc"""  # pragma` on the closing line of a triple-quoted string
+        // trails that statement — it must not cover the following line.
+        let src =
+            "x = \"\"\"ab\ncd\"\"\"  # async-doctor: ignore[blocking-sleep]: r\ntime.sleep(2)\n";
+        let p = parse_file("a.py", src);
+        assert_eq!(p.suppressions.len(), 1, "{p:?}");
+        assert!(!p.suppressions[0].standalone, "{p:?}");
+        assert!(p.suppressions[0].matches_line(1), "{p:?}");
+        assert!(p.suppressions[0].matches_line(2), "{p:?}");
+        assert!(!p.suppressions[0].matches_line(3), "{p:?}");
     }
 
     #[test]

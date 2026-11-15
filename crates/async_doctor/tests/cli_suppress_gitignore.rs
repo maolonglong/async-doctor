@@ -97,3 +97,42 @@ fn gitignored_py_tree_not_scanned_for_suppressions() {
         "suppress walk appears to be reading the gitignored tree: {elapsed:?}"
     );
 }
+
+/// A pragma on the closing line of a triple-quoted string trails that string's
+/// statement; it must not bleed to the next line's `time.sleep` (p7 repro).
+#[test]
+fn triple_string_tail_pragma_does_not_suppress_next_line() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    fs::write(
+        root.join("app.py"),
+        "import time\n\n\nasync def f():\n    time.sleep(1); x = \"\"\"\nabc\"\"\"  # async-doctor: ignore[blocking-sleep]: r\n    time.sleep(2)\n",
+    )
+    .unwrap();
+
+    let out = bin()
+        .current_dir(root)
+        .args([".", "--format", "json", "--fail-on", "none"])
+        .output()
+        .expect("run async-doctor");
+    assert!(
+        out.status.success(),
+        "scan failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let findings = v["findings"].as_array().expect("findings");
+    assert!(
+        findings.iter().any(|f| {
+            f["rule"] == "blocking-sleep"
+                && f["chain"]
+                    .as_array()
+                    .is_some_and(|c| c.last().is_some_and(|hop| hop["line"] == 7))
+        }),
+        "time.sleep(2) on line 7 must be reported: {findings:#?}"
+    );
+    assert!(
+        v["unusedSuppressions"].as_array().unwrap().is_empty(),
+        "tail pragma still suppresses the line-5 statement start: {v:#?}"
+    );
+}
