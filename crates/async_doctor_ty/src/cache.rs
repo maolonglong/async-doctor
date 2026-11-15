@@ -62,7 +62,9 @@ use serde::{Deserialize, Serialize};
 /// v31: mode-call invalidation drops only non-blocking proofs (fd identity
 /// survives); mode targets are scope- and os-receiver-limited; nested `*`
 /// elements inside container literals consume again.
-pub const CACHE_SCHEMA_VERSION: u32 = 31;
+/// v32: mode-call invalidation walks class bodies (they execute at
+/// definition time); function bodies stay deferred.
+pub const CACHE_SCHEMA_VERSION: u32 = 32;
 
 /// Tool version embedded in the cache path (from this crate's Cargo.toml).
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
