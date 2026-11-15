@@ -101,22 +101,35 @@ impl<'a, 'db> CallCollector<'a, 'db> {
             // A generator object passed to an ordinary callable is not consumed
             // on the loop by that pass (the callee may iterate it off-loop or
             // not at all) — the for/comprehension consumption context stops
-            // here. Lazy iterator adapters are the exception: the outer loop
-            // drives them through their argument, so the context propagates.
-            let lazy_adapter = self
-                .external_qualname(&call.func)
-                .is_some_and(|q| is_lazy_iter_adapter(&q));
+            // here. Two exceptions: the argument evaluation itself consumes the
+            // generator (`f(*gen())` unpacking, eager `itertools` constructors
+            // like `product` that materialize their iterables at call time —
+            // both consume even with no outer loop), and lazy iterator
+            // adapters (`enumerate`, `zip`, `islice`, …) propagate the outer
+            // consumption context into their argument.
+            let func_q = self.external_qualname(&call.func);
+            let eager = func_q.as_deref().is_some_and(is_eager_iter_consumer);
+            let lazy = func_q.as_deref().is_some_and(is_lazy_iter_adapter);
             let was_consuming = self.consuming_generator;
-            if !lazy_adapter {
-                self.consuming_generator = false;
-            }
             for arg in &call.arguments.args {
+                if matches!(arg, Expr::Starred(_)) || eager {
+                    self.consuming_generator = true;
+                } else if !lazy {
+                    self.consuming_generator = false;
+                }
                 self.visit_expr(arg);
+                self.consuming_generator = was_consuming;
             }
             for kw in &call.arguments.keywords {
+                // `f(**gen())` unpacks eagerly just like `*gen()`.
+                if kw.arg.is_none() || eager {
+                    self.consuming_generator = true;
+                } else if !lazy {
+                    self.consuming_generator = false;
+                }
                 self.visit_expr(&kw.value);
+                self.consuming_generator = was_consuming;
             }
-            self.consuming_generator = was_consuming;
         }
     }
 
@@ -541,6 +554,19 @@ impl<'a, 'db> CallCollector<'a, 'db> {
         self.clear_pending_call_args();
         Some(None)
     }
+}
+
+/// Itertools constructors that materialize every iterable argument at call
+/// time — `product`, `permutations`, `combinations` eagerly build pools/tuples,
+/// so their arguments are consumed on the loop regardless of outer context.
+fn is_eager_iter_consumer(qualname: &str) -> bool {
+    matches!(
+        qualname,
+        "itertools.product"
+            | "itertools.permutations"
+            | "itertools.combinations"
+            | "itertools.combinations_with_replacement"
+    )
 }
 
 /// Lazy iterator adapters: the outer `for`/comprehension drives them, and they

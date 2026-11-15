@@ -199,6 +199,37 @@ pub(crate) struct CallCollector<'a, 'db> {
 }
 
 /// One enclosing `def` scope for nested-def offload-wrapper detection.
+/// Snapshot of the name-local "proven non-blocking" guard sets
+/// (`in_memory_sqlite_vars`, `nonblocking_socket_vars`,
+/// `in_memory_archive_receivers`, `pipe_fd_vars`, `nonblocking_fd_vars`).
+/// Suites that may not run — loop bodies, try bodies, else suites — only keep
+/// proofs that existed before them; removals made inside persist via retain.
+#[derive(Clone, Debug, Default)]
+pub(super) struct LocalGuards {
+    pub sqlite: HashSet<String>,
+    pub socket: HashSet<String>,
+    pub archive: HashSet<String>,
+    pub pipe_fd: HashSet<String>,
+    pub nonblocking_fd: HashSet<String>,
+}
+
+impl LocalGuards {
+    /// Drop proofs absent from `before` (body-only additions cannot escape).
+    fn retain_from(&mut self, before: &Self) {
+        self.sqlite.retain(|v| before.sqlite.contains(v));
+        self.socket.retain(|v| before.socket.contains(v));
+        self.archive.retain(|v| before.archive.contains(v));
+        self.pipe_fd.retain(|v| before.pipe_fd.contains(v));
+        self.nonblocking_fd
+            .retain(|v| before.nonblocking_fd.contains(v));
+    }
+
+    /// Branch join: keep only proofs also present in `other`.
+    fn intersect(&mut self, other: &Self) {
+        self.retain_from(other);
+    }
+}
+
 pub(super) struct FnScope {
     /// The enclosing function's id (None for defs outside the qual map).
     pub fid: Option<FunctionId>,

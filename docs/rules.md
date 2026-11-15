@@ -85,7 +85,9 @@ event-loop thread (`subprocess.Popen(...)` construction itself is not a finding)
 - `os.waitpid` whose options argument resolves to `os.WNOHANG` /
   `posix.WNOHANG` (including `from os import WNOHANG` and flags inside a `|`
   mask, positional or `options=`) polls instead of waiting and stays clean.
-  Unknown variables and bare integer literals stay findings.
+  Every definition the name can resolve to must be the flag — a merged
+  alternative binding (`else: F = 0`) — as well as unknown variables and bare
+  integer literals, stays a finding.
 
 ## blocking-file
 
@@ -129,9 +131,12 @@ archives (`zipfile` / `tarfile`), and blocking `input()` on the loop.
 - `os.read` / `os.write` stay clean only on pipe fds proven non-blocking:
   names tuple-unpacked from `os.pipe2(..., os.O_NONBLOCK)` (flag may sit inside
   a `|` mask or come via `from os import O_NONBLOCK`), or `os.pipe()` fds after
-  `os.set_blocking(fd, False)`. `os.set_blocking(fd, True)`, rebinding, branch
-  paths where non-blocking was not proven, `os.open` fds, and non-pipe fds all
-  keep the finding — regular files block regardless of `O_NONBLOCK`.
+  `os.set_blocking(fd, False)`. `os.set_blocking(fd, True)`, rebinding,
+  aliasing (`alias = r` drops the proof on both names), proofs gained only
+  inside a possibly-skipped suite (a `for`/`while`/`try` body or an `else`
+  clause), branch paths where non-blocking was not proven, `os.open` fds, and
+  non-pipe fds all keep the finding — regular files block regardless of
+  `O_NONBLOCK`.
 - `shutil.copyfileobj` between two proven in-memory buffers
   (`io.BytesIO` / `io.StringIO` values or locals bound to them, positional or
   `fsrc=` / `fdst=`) performs no disk IO and stays clean; a real file or
