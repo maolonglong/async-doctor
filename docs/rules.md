@@ -399,12 +399,12 @@ mutual exclusion or concurrency limiting is a no-op.
 
 ## swallowed-cancelled-error
 
-**Advice (correctness)** — never fails the exit code.
+**Withdrawn** (no longer emitted; not in `async-doctor explain`).
 
-Inside an `async def`, `except asyncio.CancelledError:` (or bare `except:` /
-`except BaseException:` guarding an `await` / `async with` / `async for` block
-without a preceding `CancelledError` handler) can exit normally or `return`
-without re-raising. Swallowing `CancelledError` leaves cancellation state
-uncleared and breaks `asyncio.timeout`, `asyncio.wait_for`, and
-`asyncio.TaskGroup`. Top-level `Task` and `Lifecycle` entries, `except Exception:`
-handlers, and `Task.uncancel()` scopes are not reported.
+This advice rule shipped through 0.1.5 and was removed in 0.1.6 because common
+`except CancelledError` / bare-`except` patterns produced too much noise for a
+zero-FP product. Scans no longer seed or report it. `# async-doctor:
+ignore[swallowed-cancelled-error]: …` comments become unused suppressions and
+fail the run until removed. Revisit only with a precision design that meets the
+false-positive bar
+([decision](decisions/2026-11-17-withdraw-swallowed-cancelled-error.md)).

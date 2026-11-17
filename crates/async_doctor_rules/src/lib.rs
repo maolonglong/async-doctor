@@ -30,7 +30,6 @@ pub const RULE_EPHEMERAL_ASYNC_CLIENT: &str = "ephemeral-async-client";
 pub const RULE_SHARED_ASYNC_SESSION: &str = "shared-async-session";
 pub const RULE_OFFLOAD_STATEFUL_SESSION: &str = "offload-stateful-session";
 pub const RULE_USELESS_LOCAL_ASYNC_LOCK: &str = "useless-local-async-lock";
-pub const RULE_SWALLOWED_CANCELLED_ERROR: &str = "swallowed-cancelled-error";
 
 use async_doctor_core::SinkHit;
 

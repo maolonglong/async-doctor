@@ -1,7 +1,8 @@
 //! Regression tests (positives + strict FP guards) for LLM async advice rules:
 //! - `offload-stateful-session`
 //! - `useless-local-async-lock`
-//! - `swallowed-cancelled-error`
+//!
+//! Also asserts withdrawn `swallowed-cancelled-error` emits nothing.
 
 use async_doctor_core::AdviceCategory;
 
@@ -261,12 +262,11 @@ async def safe_async_generator_lock():
 }
 
 #[test]
-fn swallowed_cancelled_error_positives_and_negatives() {
+fn swallowed_cancelled_error_withdrawn_emits_nothing() {
     let dir = temp_project(&[(
         "app.py",
         r#"import asyncio
 from asyncio import CancelledError
-from contextlib import asynccontextmanager
 
 
 class App:
@@ -279,7 +279,7 @@ class App:
 app = App()
 
 
-async def bad_fallthrough_cancelled():
+async def fallthrough_cancelled():
     try:
         await asyncio.sleep(0)
     except asyncio.CancelledError:
@@ -287,102 +287,30 @@ async def bad_fallthrough_cancelled():
 
 
 @app.get("/x")
-async def bad_return_cancelled():
+async def return_cancelled():
     try:
         await asyncio.sleep(0)
     except CancelledError:
         return None
 
 
-async def bad_tuple_cancelled():
-    try:
-        await asyncio.sleep(0)
-    except (ValueError, asyncio.CancelledError):
-        return 0
-
-
-async def bad_bare_except_over_await():
+async def bare_except_over_await():
     try:
         await asyncio.sleep(0)
     except:
         return -1
 
 
-async def bad_base_exception_over_await():
+async def base_exception_over_await():
     try:
         await asyncio.sleep(0)
     except BaseException:
         pass
 
 
-async def safe_reraise_cancelled():
-    try:
+async def still_useless_local_lock():
+    async with asyncio.Lock():
         await asyncio.sleep(0)
-    except asyncio.CancelledError:
-        raise
-
-
-async def safe_branch_both_raise(flag: bool):
-    try:
-        await asyncio.sleep(0)
-    except asyncio.CancelledError as exc:
-        if flag:
-            raise RuntimeError("boom") from exc
-        else:
-            raise
-
-
-async def safe_except_exception():
-    try:
-        await asyncio.sleep(0)
-    except Exception:
-        return None
-
-
-async def safe_preceding_cancelled_handler():
-    try:
-        await asyncio.sleep(0)
-    except asyncio.CancelledError:
-        raise
-    except BaseException:
-        return None
-
-
-async def safe_bare_except_sync_try_body(raw: str):
-    try:
-        return int(raw)
-    except:
-        return 0
-
-
-async def safe_uncancel_guard():
-    try:
-        await asyncio.sleep(0)
-    except asyncio.CancelledError:
-        task = asyncio.current_task()
-        if task is not None and task.uncancel() == 0:
-            raise
-        return None
-
-
-async def safe_background_task_entry():
-    try:
-        await asyncio.sleep(1)
-    except asyncio.CancelledError:
-        return None
-
-
-async def spawn_bg(tasks: set):
-    t = asyncio.create_task(safe_background_task_entry())
-    tasks.add(t)
-
-
-@asynccontextmanager
-async def lifespan(_app):
-    try:
-        yield
-    except asyncio.CancelledError:
-        return
 "#,
     )]);
 
@@ -390,39 +318,17 @@ async def lifespan(_app):
     let _ = std::fs::remove_dir_all(&dir);
 
     assert!(report.findings.is_empty(), "{:?}", report.findings);
-    let pairs = advice_pairs(&report);
-    for expected in [
-        ("swallowed-cancelled-error", "bad_fallthrough_cancelled"),
-        ("swallowed-cancelled-error", "bad_return_cancelled"),
-        ("swallowed-cancelled-error", "bad_tuple_cancelled"),
-        ("swallowed-cancelled-error", "bad_bare_except_over_await"),
-        ("swallowed-cancelled-error", "bad_base_exception_over_await"),
-    ] {
-        assert!(
-            pairs.contains(&expected),
-            "missing expected advice {expected:?}, got {pairs:?}"
-        );
-    }
-    for banned in [
-        "safe_reraise_cancelled",
-        "safe_branch_both_raise",
-        "safe_except_exception",
-        "safe_preceding_cancelled_handler",
-        "safe_bare_except_sync_try_body",
-        "safe_uncancel_guard",
-        "safe_background_task_entry",
-        "lifespan",
-    ] {
-        assert!(
-            !pairs.iter().any(|(_, e)| *e == banned),
-            "false-positive advice on {banned}: {pairs:?}"
-        );
-    }
     assert!(
         report
             .advice
             .iter()
-            .filter(|a| a.rule == "swallowed-cancelled-error")
-            .all(|a| a.category == AdviceCategory::Correctness)
+            .all(|a| a.rule != "swallowed-cancelled-error"),
+        "withdrawn rule must not emit advice: {:?}",
+        advice_pairs(&report)
+    );
+    let pairs = advice_pairs(&report);
+    assert!(
+        pairs.contains(&("useless-local-async-lock", "still_useless_local_lock")),
+        "sibling LLM advice must still fire: {pairs:?}"
     );
 }

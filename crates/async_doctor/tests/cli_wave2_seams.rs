@@ -476,23 +476,32 @@ fn cli_llm_advice_rules_exit_zero_and_explain_works() {
         .collect();
     assert_eq!(
         advice_rules,
-        std::collections::BTreeSet::from([
-            "offload-stateful-session",
-            "swallowed-cancelled-error",
-            "useless-local-async-lock",
-        ]),
+        std::collections::BTreeSet::from(["offload-stateful-session", "useless-local-async-lock",]),
         "advice={}",
         v["advice"]
     );
+    assert!(
+        !advice_rules.contains("swallowed-cancelled-error"),
+        "withdrawn rule must stay silent: {}",
+        v["advice"]
+    );
 
-    for rule in [
-        "offload-stateful-session",
-        "useless-local-async-lock",
-        "swallowed-cancelled-error",
-    ] {
+    for rule in ["offload-stateful-session", "useless-local-async-lock"] {
         let ex = bin().args(["explain", rule]).output().expect("explain");
         assert_eq!(ex.status.code(), Some(0), "explain {rule}");
         let stdout = String::from_utf8_lossy(&ex.stdout);
         assert!(stdout.contains(rule), "{stdout}");
     }
+
+    let withdrawn = bin()
+        .args(["explain", "swallowed-cancelled-error"])
+        .output()
+        .expect("explain withdrawn");
+    assert_eq!(
+        withdrawn.status.code(),
+        Some(2),
+        "withdrawn rule must not be explainable"
+    );
+    let stderr = String::from_utf8_lossy(&withdrawn.stderr);
+    assert!(stderr.contains("unknown rule"), "{stderr}");
 }

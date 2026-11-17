@@ -5,7 +5,7 @@ description: >-
   Use after changing async Python code, before committing, or for a full audit.
   Runs changed/full scans, traces explain/why evidence, and separates proven
   diagnoses from repairs that require application and library context.
-version: "1.3.0"
+version: "1.3.1"
 ---
 
 # async-doctor
@@ -80,7 +80,6 @@ async-doctor why path/to/file.py:42 --path . --format json
 - **shared-async-session** — one stateful `AsyncSession` / `AsyncConnection` / `asyncpg.Connection` / `psycopg.AsyncConnection` is shared concurrently across tasks in `asyncio.gather` or `TaskGroup`.
 - **offload-stateful-session** — a bound method of a non-thread-safe sync `Session` / `Connection` / `Cursor` is passed directly to `to_thread` / `run_in_executor` across threads.
 - **useless-local-async-lock** — `async with asyncio.Lock():` / `Semaphore(...)` is freshly created per call in `async def` without escaping to shared tasks or closures (serializes nothing).
-- **swallowed-cancelled-error** — `except asyncio.CancelledError:` (or bare `except:` / `except BaseException:`) in a non-Task/Lifecycle `async def` exits without re-raising cancellation.
 
 ### Error findings
 

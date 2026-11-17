@@ -82,15 +82,14 @@ hidden dirs are skipped (`--include-non-production` to include).
   (without hiding their loop-side pre/postamble), typed asyncio callbacks,
   local generator consumption, and project context-manager methods
 - **Advice** (`offload-has-async-twin`, `dangling-task`, `ephemeral-async-client`,
-  `shared-async-session`, `offload-stateful-session`, `useless-local-async-lock`,
-  `swallowed-cancelled-error`): same-package async-symbol availability behind
-  offload cuts (not a recommendation to replace the offload or a measured
-  performance claim), discarded `create_task` / `ensure_future` handles,
-  per-request / per-loop HTTP client pools, shared non-concurrency-safe async DB
-  sessions across `gather` / `TaskGroup`, offloaded bound sync DB session/cursor
-  methods, per-call unshared `asyncio.Lock` / `Semaphore` guards, and swallowed
-  `CancelledError` handlers (non-blocking; SARIF `note`; text **Advice** section,
-  capped unless `--expand`)
+  `shared-async-session`, `offload-stateful-session`, `useless-local-async-lock`):
+  same-package async-symbol availability behind offload cuts (not a
+  recommendation to replace the offload or a measured performance claim),
+  discarded `create_task` / `ensure_future` handles, per-request / per-loop HTTP
+  client pools, shared non-concurrency-safe async DB sessions across `gather` /
+  `TaskGroup`, offloaded bound sync DB session/cursor methods, and per-call
+  unshared `asyncio.Lock` / `Semaphore` guards (non-blocking; SARIF `note`; text
+  **Advice** section, capped unless `--expand`)
 - **Errors:** `nested-event-loop` (`asyncio.run` / … from async without offload;
   loop-state guards like `if loop is None` / early-return `if loop is not None:
   return` are dropped), `offload-coroutine` (offload target is a coroutine

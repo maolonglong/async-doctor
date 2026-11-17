@@ -319,21 +319,6 @@ concurrency limiting is a no-op. Locks shared with nested closures or passed to\
 helper tasks are excluded. This is correctness advice and never fails the exit code.",
         fix: "",
     },
-    RuleDoc {
-        id: "swallowed-cancelled-error",
-        title: "Swallowed asyncio.CancelledError inside async def (advice)",
-        summary: "`except asyncio.CancelledError:` (or bare `except:` / `except BaseException:` over an `await`) exits without re-raising.",
-        body: "\
-In Python 3.8+, `asyncio.CancelledError` inherits from `BaseException` to drive\n\
-structured cancellation (`asyncio.timeout`, `asyncio.wait_for`, `asyncio.TaskGroup`,\n\
-and client disconnect cleanup). Catching `CancelledError` (or bare `except:` /\n\
-`except BaseException:` without an earlier `CancelledError` re-raise) and returning\n\
-or falling through without `raise` leaves the task's cancellation count un-cleared\n\
-and can interfere with enclosing timeouts and `TaskGroup`s. Top-level `Task` and `Lifecycle`\n\
-entries and `Task.uncancel()` scopes are excluded. This is correctness advice and\n\
-never fails the exit code.",
-        fix: "",
-    },
 ];
 
 /// Look up a rule by id (`blocking-sleep`) or docs anchor (`#blocking-sleep`).
@@ -370,9 +355,8 @@ mod tests {
             RULE_BLOCKING_SUBPROCESS, RULE_DANGLING_TASK, RULE_EAGER_OFFLOAD_CALL,
             RULE_EPHEMERAL_ASYNC_CLIENT, RULE_NESTED_EVENT_LOOP, RULE_OFFLOAD_COROUTINE,
             RULE_OFFLOAD_HAS_ASYNC_TWIN, RULE_OFFLOAD_STATEFUL_SESSION, RULE_SHARED_ASYNC_SESSION,
-            RULE_SWALLOWED_CANCELLED_ERROR, RULE_SYNC_FOR_ASYNC_ITERABLE, RULE_SYNC_WITH_ASYNC_CM,
-            RULE_UNAWAITED_COROUTINE, RULE_USELESS_LOCAL_ASYNC_LOCK, STDLIB_SINKS,
-            THIRD_PARTY_SINKS,
+            RULE_SYNC_FOR_ASYNC_ITERABLE, RULE_SYNC_WITH_ASYNC_CM, RULE_UNAWAITED_COROUTINE,
+            RULE_USELESS_LOCAL_ASYNC_LOCK, STDLIB_SINKS, THIRD_PARTY_SINKS,
         };
         for id in [
             RULE_BLOCKING_SLEEP,
@@ -395,7 +379,6 @@ mod tests {
             RULE_SHARED_ASYNC_SESSION,
             RULE_OFFLOAD_STATEFUL_SESSION,
             RULE_USELESS_LOCAL_ASYNC_LOCK,
-            RULE_SWALLOWED_CANCELLED_ERROR,
         ] {
             assert!(rule_doc(id).is_some(), "missing RuleDoc for {id}");
         }
