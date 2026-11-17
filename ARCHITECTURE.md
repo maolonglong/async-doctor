@@ -189,7 +189,7 @@ sync-for-async-iterable, unawaited-coroutine, eager-offload-call), and
 non-blocking advice (`advice.rs`: offload-has-async-twin;
 `anti_pattern_advice.rs` and `anti_pattern_advice/llm_rules.rs`: dangling-task,
 ephemeral-async-client, shared-async-session, offload-stateful-session,
-useless-local-async-lock, swallowed-cancelled-error).
+useless-local-async-lock).
 
 Inferred wrappers retain their ordinary caller-to-wrapper edge alongside worker
 target metadata; only the worker edge cuts propagation. Offload-decorated

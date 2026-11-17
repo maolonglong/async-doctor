@@ -2,7 +2,7 @@
 //! - `dangling-task` (correctness)
 //! - `ephemeral-async-client` (performance)
 //! - `shared-async-session` (correctness)
-//! - `offload-stateful-session` / `useless-local-async-lock` / `swallowed-cancelled-error` (see `llm_rules`)
+//! - `offload-stateful-session` / `useless-local-async-lock` (see `llm_rules`)
 
 mod llm_rules;
 

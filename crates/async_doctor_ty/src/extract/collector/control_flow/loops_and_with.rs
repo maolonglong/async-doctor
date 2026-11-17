@@ -11,7 +11,6 @@ use crate::extract::constants::body_always_exits;
 
 impl<'a, 'db> CallCollector<'a, 'db> {
     pub(crate) fn visit_try(&mut self, try_stmt: &'a ast::StmtTry) {
-        self.maybe_record_swallowed_cancelled_error(try_stmt);
         let before = self.future_done_receivers.clone();
         let before_guards = self.local_guards();
         let mut continuations = Vec::new();

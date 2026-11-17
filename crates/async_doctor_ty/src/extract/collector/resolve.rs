@@ -75,9 +75,6 @@ fn external_occurrence_key(qualname: &str) -> String {
     if qualname.starts_with("useless-local-async-lock:") {
         return "Euseless-local-async-lock".to_string();
     }
-    if qualname.starts_with("swallowed-cancelled-error:") {
-        return "Eswallowed-cancelled-error".to_string();
-    }
     static SINKS: OnceLock<BuiltinSinkTable> = OnceLock::new();
     let sinks = SINKS.get_or_init(BuiltinSinkTable::new);
     let key = sinks
