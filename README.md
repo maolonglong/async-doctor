@@ -145,7 +145,7 @@ repos:
         name: async-doctor
         entry: async-doctor
         language: python
-        additional_dependencies: ["async-doctor==0.1.5"]
+        additional_dependencies: ["async-doctor==0.1.6"]
         types_or: [python, pyi]
         pass_filenames: false
         require_serial: true
@@ -157,7 +157,7 @@ toolchain pinned in [rust-toolchain.toml](rust-toolchain.toml):
 ```yaml
 repos:
   - repo: https://github.com/maolonglong/async-doctor
-    rev: v0.1.5
+    rev: v0.1.6
     hooks:
       - id: async-doctor
 ```

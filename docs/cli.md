@@ -73,7 +73,7 @@ rules.
   inputs.
 - Pre-commit: the primary setup is a local hook installing the PyPI wheel —
   `repo: local` with `entry: async-doctor`, `language: python`,
-  `additional_dependencies: ["async-doctor==0.1.5"]`, `types_or: [python, pyi]`,
+  `additional_dependencies: ["async-doctor==0.1.6"]`, `types_or: [python, pyi]`,
   `pass_filenames: false`, `require_serial: true` (see the README for the full
   snippet). Alternatively `.pre-commit-hooks.yaml` provides hook id
   `async-doctor` via `repo: https://github.com/maolonglong/async-doctor`; that
